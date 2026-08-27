@@ -9,12 +9,18 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # 데모 시간축과 now() 비교가 어긋나지 않도록 컨테이너 시계를 맞춘다
+      TZ: ${TZ:-Asia/Seoul}
+      PGTZ: ${TZ:-Asia/Seoul}
 
     ports:
       - "5433:5432"
 
     volumes:
       - eron_postgres_data:/var/lib/postgresql/data
+      # 볼륨이 비어 있을 때만 실행된다. 이미 초기화된 DB 에는
+      # database/scripts/load_subset.py 가 같은 SQL 을 다시 적용한다.
+      - ./database/init:/docker-entrypoint-initdb.d:ro
 
     healthcheck:
       test:
@@ -38,15 +44,67 @@ services:
     container_name: eron-backend
     restart: unless-stopped
 
+    # nginx 를 거치지 않고 Swagger·헬스체크에 직접 접근하기 위해 유지한다
     ports:
       - "8100:8000"
 
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      PREDICT_AI_URL: ${PREDICT_AI_URL:-}
+      # nginx 뒤에서는 동일 오리진이라 CORS 가 필요 없다.
+      # 컨테이너 밖에서 vite dev 를 띄울 때만 채운다.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TZ: ${TZ:-Asia/Seoul}
 
     depends_on:
       postgres:
         condition: service_healthy
+
+    networks:
+      - eron-network
+
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    container_name: eron-frontend
+    restart: unless-stopped
+
+    # nginx 를 통해서만 접근한다. 호스트로 공개하지 않는다.
+    expose:
+      - "3000"
+
+    environment:
+      PORT: "3000"
+      NODE_ENV: production
+      TZ: ${TZ:-Asia/Seoul}
+
+    depends_on:
+      - backend
+
+    networks:
+      - eron-network
+
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: eron-nginx
+    restart: unless-stopped
+
+    ports:
+      - "8080:80"
+
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+
+    depends_on:
+      - frontend
+      - backend
 
     networks:
       - eron-network

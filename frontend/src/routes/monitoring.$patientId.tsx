@@ -1,5 +1,7 @@
-import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
+  AlertCircle,
   ArrowLeft,
   BellRing,
   Brain,
@@ -23,73 +25,166 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
+import { edStayKeys, getEdStay, getEdStayPredictions, getEdStayVitals } from "@/api/ed-stays";
+import {
+  formatDateTime,
+  formatTime,
+  num,
+  routeLabel,
+  sexLabel,
+  toPercent,
+  transportLabel,
+} from "@/api/display";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
-import { currentUser, getPatient, riskMeta } from "@/lib/mock-data";
+import { Skeleton } from "@/components/ui/skeleton";
+import { currentUser, riskMeta } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/monitoring/$patientId")({
-  loader: ({ params }) => {
-    const patient = getPatient(params.patientId);
-    if (!patient) throw notFound();
-    return { patient };
-  },
-  head: ({ loaderData }) => {
-    if (!loaderData) {
-      return { meta: [{ title: "환자 정보 없음 · ER-GUARD AI" }, { name: "robots", content: "noindex" }] };
-    }
-    const p = loaderData.patient;
-    const title = `${p.name} 환자 모니터링 · ER-GUARD AI`;
-    const desc = `${p.name} (${p.sex} ${p.age}세) · ${p.chiefComplaint} · AI 악화 예측 확률 ${p.deteriorationProbability}%`;
+  head: ({ params }) => {
+    const title = `환자 ${params.patientId} 모니터링 · ER-GUARD AI`;
     return {
       meta: [
         { title },
-        { name: "description", content: desc },
+        { name: "description", content: "MIMIC-IV 기반 응급실 환자 상세 모니터링 화면." },
         { property: "og:title", content: title },
-        { property: "og:description", content: desc },
       ],
     };
   },
   component: PatientMonitoringPage,
 });
 
-const series = [
-  { key: "probability", name: "AI 악화 확률 (%)", color: "var(--chart-1)", axis: "right" as const },
+const BASE_SERIES = [
   { key: "hr", name: "HR (bpm)", color: "var(--chart-2)", axis: "left" as const },
   { key: "sbp", name: "수축기 혈압 (mmHg)", color: "var(--chart-3)", axis: "left" as const },
   { key: "dbp", name: "이완기 혈압 (mmHg)", color: "var(--chart-4)", axis: "left" as const },
   { key: "spo2", name: "SpO₂ (%)", color: "var(--chart-6)", axis: "left" as const },
   { key: "bt", name: "체온 (℃)", color: "var(--chart-5)", axis: "right" as const },
 ];
+const PROB_SERIES = {
+  key: "probability",
+  name: "AI 악화 확률 (%)",
+  color: "var(--chart-1)",
+  axis: "right" as const,
+};
 
 function PatientMonitoringPage() {
-  const { patient } = Route.useLoaderData();
+  const { patientId } = Route.useParams();
   const [reassessedAt, setReassessedAt] = useState<string | null>(null);
   const [ackAt, setAckAt] = useState<string | null>(null);
   const [patientViewOpen, setPatientViewOpen] = useState(false);
 
+  const detailQ = useQuery({
+    queryKey: edStayKeys.detail(patientId),
+    queryFn: ({ signal }) => getEdStay(patientId, signal),
+  });
+  const vitalsQ = useQuery({
+    queryKey: edStayKeys.vitals(patientId),
+    queryFn: ({ signal }) => getEdStayVitals(patientId, signal),
+  });
+  const predQ = useQuery({
+    queryKey: edStayKeys.predictions(patientId),
+    queryFn: ({ signal }) => getEdStayPredictions(patientId, signal),
+  });
+
   const stamp = () =>
     new Date().toLocaleString("ko-KR", { dateStyle: "medium", timeStyle: "short" });
 
-  const v = patient.vitals;
+  if (detailQ.isPending) {
+    return (
+      <div className="space-y-5">
+        <Skeleton className="h-10 w-40" />
+        <Skeleton className="h-28 w-full" />
+        <div className="grid grid-cols-[1fr_360px] gap-5">
+          <Skeleton className="h-96 w-full" />
+          <Skeleton className="h-96 w-full" />
+        </div>
+      </div>
+    );
+  }
+
+  if (detailQ.isError) {
+    const notFound = detailQ.error.message === "ED stay not found";
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
+        <AlertCircle className="size-9 text-risk-critical" />
+        <h1 className="text-lg font-semibold">
+          {notFound ? "환자를 찾을 수 없습니다" : "환자 정보를 불러오지 못했습니다"}
+        </h1>
+        <p className="text-sm text-muted-foreground">{detailQ.error.message}</p>
+        <div className="mt-2 flex gap-2">
+          <Button variant="outline" onClick={() => void detailQ.refetch()}>
+            다시 시도
+          </Button>
+          <Button asChild>
+            <Link to="/monitoring">환자 목록</Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const patient = detailQ.data;
+  const displayName = patient.display_name ?? `ED-${patient.stay_id}`;
+  const risk = patient.risk_level;
+  const probability = toPercent(patient.risk_probability);
+
+  const latest = vitalsQ.data?.latest;
+  const v = {
+    hr: latest?.heart_rate ?? null,
+    rr: latest?.resp_rate ?? null,
+    sbp: latest?.sbp ?? null,
+    dbp: latest?.dbp ?? null,
+    bt: latest?.temperature_c ?? null,
+    spo2: latest?.spo2 ?? null,
+  };
   const abnormal = {
-    hr: v.hr > 100 || v.hr < 50,
-    rr: v.rr > 20 || v.rr < 10,
-    bp: v.sbp < 100 || v.sbp > 160,
-    bt: v.bt >= 37.5,
-    spo2: v.spo2 < 94,
+    hr: v.hr !== null && (v.hr > 100 || v.hr < 50),
+    rr: v.rr !== null && (v.rr > 20 || v.rr < 10),
+    bp: v.sbp !== null && (v.sbp < 100 || v.sbp > 160),
+    bt: v.bt !== null && v.bt >= 37.5,
+    spo2: v.spo2 !== null && v.spo2 < 94,
   };
 
   const vitalCards = [
-    { label: "HR", value: `${v.hr}`, unit: "bpm", bad: abnormal.hr },
-    { label: "RR", value: `${v.rr}`, unit: "회/분", bad: abnormal.rr },
-    { label: "BP", value: `${v.sbp}/${v.dbp}`, unit: "mmHg", bad: abnormal.bp },
-    { label: "Temperature", value: `${v.bt}`, unit: "℃", bad: abnormal.bt },
-    { label: "SpO₂", value: `${v.spo2}`, unit: "%", bad: abnormal.spo2 },
-    { label: "Mental", value: v.mental, unit: "", bad: false },
+    { label: "HR", value: num(v.hr), unit: "bpm", bad: abnormal.hr },
+    { label: "RR", value: num(v.rr), unit: "회/분", bad: abnormal.rr },
+    {
+      label: "BP",
+      value: v.sbp === null && v.dbp === null ? "-" : `${num(v.sbp)}/${num(v.dbp)}`,
+      unit: "mmHg",
+      bad: abnormal.bp,
+    },
+    { label: "Temperature", value: num(v.bt, 1), unit: "℃", bad: abnormal.bt },
+    { label: "SpO₂", value: num(v.spo2), unit: "%", bad: abnormal.spo2 },
+    { label: "Mental", value: latest?.consciousness ?? "-", unit: "", bad: false },
   ];
+
+  const predictions = predQ.data?.predictions ?? [];
+  const hasPrediction = predictions.length > 0;
+  const series = hasPrediction ? [PROB_SERIES, ...BASE_SERIES] : BASE_SERIES;
+
+  const probByTime = new Map(
+    predictions.map((p) => [formatTime(p.prediction_time), Math.round(p.risk_probability * 100)]),
+  );
+  const trend = (vitalsQ.data?.vitals ?? []).map((p) => {
+    const time = formatTime(p.measured_at);
+    return {
+      time,
+      hr: p.heart_rate,
+      sbp: p.sbp,
+      dbp: p.dbp,
+      spo2: p.spo2,
+      bt: p.temperature_c,
+      probability: probByTime.get(time) ?? null,
+    };
+  });
+
+  const riskFactors = predQ.data?.latest.risk_factors ?? [];
+  const recommendations = predQ.data?.latest.recommendations ?? [];
 
   return (
     <div className="space-y-5">
@@ -104,7 +199,7 @@ function PatientMonitoringPage() {
             <Monitor className="size-4" /> 환자 모니터 화면 미리보기
           </Button>
           <Button asChild>
-            <Link to="/records/$patientId" params={{ patientId: patient.id }}>
+            <Link to="/records/$patientId" params={{ patientId: patient.stay_id }}>
               <ClipboardCheck className="size-4" /> AI 진료기록 작성
             </Link>
           </Button>
@@ -114,14 +209,19 @@ function PatientMonitoringPage() {
       {/* 환자 핵심 정보 */}
       <Card className="overflow-hidden">
         <div className="flex items-stretch">
-          <div className={`w-1.5 ${riskMeta[patient.risk].dot}`} />
+          <div className={`w-1.5 ${risk ? riskMeta[risk].dot : "bg-border"}`} />
           <CardContent className="flex flex-1 items-center gap-8 py-5">
             <div>
-              <p className="text-xs text-muted-foreground">{patient.id}</p>
+              <p className="text-xs text-muted-foreground">{patient.stay_id}</p>
               <p className="text-2xl font-bold tracking-tight">
-                {patient.name}
+                {displayName}
                 <span className="ml-2 text-base font-medium text-muted-foreground">
-                  {patient.sex === "남" ? "남성" : "여성"}, {patient.age}세
+                  {sexLabel(patient.sex) === "남"
+                    ? "남성"
+                    : sexLabel(patient.sex) === "여"
+                      ? "여성"
+                      : "-"}
+                  {patient.age !== null ? `, ${patient.age}세` : ""}
                 </span>
               </p>
             </div>
@@ -129,36 +229,46 @@ function PatientMonitoringPage() {
             <dl className="grid grid-cols-4 gap-x-8 gap-y-1.5 text-sm">
               <div>
                 <dt className="text-xs text-muted-foreground">내원시간</dt>
-                <dd className="tabular font-medium">{patient.arrivedAt}</dd>
+                <dd className="tabular font-medium">{formatDateTime(patient.arrived_at)}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">내원경로</dt>
-                <dd className="font-medium">{patient.arrivalRoute}</dd>
+                <dd className="font-medium">{routeLabel(patient.arrival_route)}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">내원수단</dt>
-                <dd className="font-medium">{patient.arrivalMeans}</dd>
+                <dd className="font-medium">{transportLabel(patient.arrival_transport)}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">KTAS</dt>
-                <dd className="font-bold text-risk-rising">Level {patient.ktas}</dd>
+                <dd className="font-bold text-risk-rising">
+                  {patient.acuity === null ? "-" : `Level ${patient.acuity}`}
+                </dd>
               </div>
               <div className="col-span-3">
                 <dt className="text-xs text-muted-foreground">주증상</dt>
-                <dd className="font-medium">{patient.chiefComplaintDetail}</dd>
+                <dd className="font-medium">{patient.chief_complaint_detail ?? "-"}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">현재 상태</dt>
                 <dd>
-                  <Badge variant="outline" className={riskMeta[patient.risk].badge}>
-                    {riskMeta[patient.risk].label}
-                  </Badge>
+                  {risk ? (
+                    <Badge variant="outline" className={riskMeta[risk].badge}>
+                      {riskMeta[risk].label}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-muted-foreground">
+                      평가 대기
+                    </Badge>
+                  )}
                 </dd>
               </div>
             </dl>
             <div className="ml-auto rounded-lg bg-navy px-6 py-3 text-center text-navy-foreground">
               <p className="text-xs opacity-75">AI 악화 예측 확률</p>
-              <p className="tabular text-3xl font-bold">{patient.deteriorationProbability}%</p>
+              <p className="tabular text-3xl font-bold">
+                {probability === null ? "–" : `${probability}%`}
+              </p>
             </div>
           </CardContent>
         </div>
@@ -169,25 +279,36 @@ function PatientMonitoringPage() {
           {/* Vital */}
           <Card>
             <CardHeader className="border-b py-3">
-              <CardTitle className="text-base">현재 Vital</CardTitle>
+              <CardTitle className="text-base">
+                현재 Vital
+                {latest?.measured_at ? (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    {formatDateTime(latest.measured_at)} 측정
+                  </span>
+                ) : null}
+              </CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-6 gap-3 pt-4">
-              {vitalCards.map((c) => (
-                <div
-                  key={c.label}
-                  className={`rounded-md border px-3 py-2.5 ${
-                    c.bad ? "border-risk-critical/40 bg-risk-critical-soft" : "bg-secondary/40"
-                  }`}
-                >
-                  <p className="text-xs text-muted-foreground">{c.label}</p>
-                  <p
-                    className={`tabular text-xl font-bold ${c.bad ? "text-risk-critical" : "text-foreground"}`}
-                  >
-                    {c.value}
-                    <span className="ml-1 text-xs font-medium text-muted-foreground">{c.unit}</span>
-                  </p>
-                </div>
-              ))}
+              {vitalsQ.isPending
+                ? Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-16" />)
+                : vitalCards.map((c) => (
+                    <div
+                      key={c.label}
+                      className={`rounded-md border px-3 py-2.5 ${
+                        c.bad ? "border-risk-critical/40 bg-risk-critical-soft" : "bg-secondary/40"
+                      }`}
+                    >
+                      <p className="text-xs text-muted-foreground">{c.label}</p>
+                      <p
+                        className={`tabular text-xl font-bold ${c.bad ? "text-risk-critical" : "text-foreground"}`}
+                      >
+                        {c.value}
+                        <span className="ml-1 text-xs font-medium text-muted-foreground">
+                          {c.unit}
+                        </span>
+                      </p>
+                    </div>
+                  ))}
             </CardContent>
           </Card>
 
@@ -197,103 +318,123 @@ function PatientMonitoringPage() {
               <CardTitle className="text-base">시간별 상태 변화</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-4">
-              <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={patient.trend} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 12 }} stroke="var(--muted-foreground)" />
-                    <YAxis
-                      yAxisId="left"
-                      domain={[0, 180]}
-                      tick={{ fontSize: 11 }}
-                      stroke="var(--muted-foreground)"
-                    />
-                    <YAxis
-                      yAxisId="right"
-                      orientation="right"
-                      domain={[0, 100]}
-                      tick={{ fontSize: 11 }}
-                      stroke="var(--muted-foreground)"
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        borderRadius: 8,
-                        border: "1px solid var(--border)",
-                        fontSize: 12,
-                      }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {series.map((s) => (
-                      <Line
-                        key={s.key}
-                        yAxisId={s.axis}
-                        type="monotone"
-                        dataKey={s.key}
-                        name={s.name}
-                        stroke={s.color}
-                        strokeWidth={s.key === "probability" ? 3 : 2}
-                        dot={{ r: 3 }}
-                        activeDot={{ r: 5 }}
-                        isAnimationActive={false}
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* 숫자 테이블 (AI 악화 확률 최상단) */}
-              <div className="overflow-hidden rounded-md border">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-navy text-navy-foreground">
-                      <th className="px-3 py-2 text-left font-medium">항목</th>
-                      {patient.trend.map((t) => (
-                        <th key={t.time} className="tabular px-3 py-2 text-center font-medium">
-                          {t.time}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {series.map((s) => (
-                      <tr key={s.key} className={s.key === "probability" ? "bg-risk-critical-soft" : ""}>
-                        <td className="px-3 py-2">
-                          <span className="flex items-center gap-2">
-                            <span
-                              className="h-0.5 w-4 rounded"
-                              style={{ backgroundColor: s.color }}
-                            />
-                            <span
-                              className={
-                                s.key === "probability" ? "font-bold text-risk-critical" : ""
-                              }
-                            >
-                              {s.name}
-                            </span>
-                          </span>
-                        </td>
-                        {patient.trend.map((t) => (
-                          <td
-                            key={t.time}
-                            className={`tabular px-3 py-2 text-center ${
-                              s.key === "probability" ? "font-bold text-risk-critical" : ""
-                            }`}
-                          >
-                            {t[s.key as keyof typeof t] as number}
-                          </td>
+              {vitalsQ.isPending ? (
+                <Skeleton className="h-72 w-full" />
+              ) : trend.length === 0 ? (
+                <p className="py-20 text-center text-sm text-muted-foreground">
+                  측정된 활력징후가 없습니다.
+                </p>
+              ) : (
+                <>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trend} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis
+                          dataKey="time"
+                          tick={{ fontSize: 12 }}
+                          stroke="var(--muted-foreground)"
+                        />
+                        <YAxis
+                          yAxisId="left"
+                          domain={[0, 180]}
+                          tick={{ fontSize: 11 }}
+                          stroke="var(--muted-foreground)"
+                        />
+                        <YAxis
+                          yAxisId="right"
+                          orientation="right"
+                          domain={[0, 100]}
+                          tick={{ fontSize: 11 }}
+                          stroke="var(--muted-foreground)"
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            borderRadius: 8,
+                            border: "1px solid var(--border)",
+                            fontSize: 12,
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {series.map((s) => (
+                          <Line
+                            key={s.key}
+                            yAxisId={s.axis}
+                            type="monotone"
+                            dataKey={s.key}
+                            name={s.name}
+                            stroke={s.color}
+                            strokeWidth={s.key === "probability" ? 3 : 2}
+                            dot={{ r: 3 }}
+                            activeDot={{ r: 5 }}
+                            isAnimationActive={false}
+                            connectNulls
+                          />
                         ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-md border">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-navy text-navy-foreground">
+                          <th className="px-3 py-2 text-left font-medium">항목</th>
+                          {trend.map((t, i) => (
+                            <th key={i} className="tabular px-3 py-2 text-center font-medium">
+                              {t.time}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {series.map((s) => (
+                          <tr
+                            key={s.key}
+                            className={s.key === "probability" ? "bg-risk-critical-soft" : ""}
+                          >
+                            <td className="px-3 py-2">
+                              <span className="flex items-center gap-2">
+                                <span
+                                  className="h-0.5 w-4 rounded"
+                                  style={{ backgroundColor: s.color }}
+                                />
+                                <span
+                                  className={
+                                    s.key === "probability" ? "font-bold text-risk-critical" : ""
+                                  }
+                                >
+                                  {s.name}
+                                </span>
+                              </span>
+                            </td>
+                            {trend.map((t, i) => {
+                              const value = t[s.key as keyof typeof t];
+                              return (
+                                <td
+                                  key={i}
+                                  className={`tabular px-3 py-2 text-center ${
+                                    s.key === "probability" ? "font-bold text-risk-critical" : ""
+                                  }`}
+                                >
+                                  {value === null || value === undefined ? "-" : String(value)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </div>
 
         {/* AI 분석 */}
         <div className="space-y-4">
-          <Card className="border-risk-critical/30">
+          <Card className={risk ? "border-risk-critical/30" : ""}>
             <CardHeader className="border-b py-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Brain className="size-4 text-primary" /> AI 분석
@@ -303,40 +444,67 @@ function PatientMonitoringPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-4">
-              <div
-                className={`rounded-md border px-4 py-3 text-center ${riskMeta[patient.risk].badge}`}
-              >
-                <p className="text-xs opacity-80">위험도</p>
-                <p className="text-lg font-bold">{riskMeta[patient.risk].label}</p>
-              </div>
+              {!hasPrediction ? (
+                <div className="rounded-md border bg-secondary/40 px-4 py-6 text-center">
+                  <p className="text-sm font-semibold">AI 분석 대기 중</p>
+                  <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                    악화 예측 모델이 연동되지 않아 위험도·위험요인·권고를 표시할 수 없습니다.
+                    <br />
+                    환자 정보와 활력징후는 실제 데이터입니다.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className={`rounded-md border px-4 py-3 text-center ${riskMeta[risk!].badge}`}
+                  >
+                    <p className="text-xs opacity-80">위험도</p>
+                    <p className="text-lg font-bold">{riskMeta[risk!].label}</p>
+                  </div>
 
-              <div>
-                <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
-                  <ShieldAlert className="size-4 text-risk-rising" /> 주요 위험요인
-                </p>
-                <ul className="space-y-1.5">
-                  {patient.riskFactors.map((f) => (
-                    <li key={f} className="flex items-start gap-2 text-sm text-muted-foreground">
-                      <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-risk-rising" />
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                  <div>
+                    <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+                      <ShieldAlert className="size-4 text-risk-rising" /> 주요 위험요인
+                    </p>
+                    {riskFactors.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">모델이 제공하지 않았습니다.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {riskFactors.map((f) => (
+                          <li
+                            key={f}
+                            className="flex items-start gap-2 text-sm text-muted-foreground"
+                          >
+                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-risk-rising" />
+                            {f}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
 
-              <Separator />
+                  <Separator />
 
-              <div>
-                <p className="mb-2 text-sm font-semibold">AI 권고</p>
-                <ul className="space-y-1.5">
-                  {patient.recommendations.map((r) => (
-                    <li key={r} className="flex items-start gap-2 text-sm text-muted-foreground">
-                      <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary" />
-                      {r}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                  <div>
+                    <p className="mb-2 text-sm font-semibold">AI 권고</p>
+                    {recommendations.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">모델이 제공하지 않았습니다.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {recommendations.map((r) => (
+                          <li
+                            key={r}
+                            className="flex items-start gap-2 text-sm text-muted-foreground"
+                          >
+                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary" />
+                            {r}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </>
+              )}
 
               <p className="flex gap-1.5 rounded-md bg-secondary px-3 py-2 text-xs text-muted-foreground">
                 <Info className="mt-0.5 size-3.5 shrink-0" />
