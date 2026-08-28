@@ -17,17 +17,17 @@ def _location_block(config: str, declaration: str) -> str:
 
 
 class ClinicalDraftNginxManifestTests(unittest.TestCase):
-    def test_only_the_draft_route_outlives_the_backend_deadline(self):
+    def test_only_the_draft_route_outlives_the_620_second_backend_deadline(self):
         config = NGINX_PATH.read_text(encoding="utf-8").replace("\r\n", "\n")
         draft = _location_block(config, "= /api/clinical-records/draft")
         general_api = _location_block(config, "/api/")
 
         self.assertIn("proxy_pass         http://eron_backend;", draft)
         self.assertIn("proxy_connect_timeout 5s;", draft)
-        self.assertIn("proxy_send_timeout 190s;", draft)
-        self.assertIn("proxy_read_timeout 190s;", draft)
+        self.assertIn("proxy_send_timeout 630s;", draft)
+        self.assertIn("proxy_read_timeout 630s;", draft)
         self.assertIn("proxy_read_timeout 30s;", general_api)
-        self.assertNotIn("190s", general_api)
+        self.assertNotIn("630s", general_api)
 
 
 if __name__ == "__main__":
