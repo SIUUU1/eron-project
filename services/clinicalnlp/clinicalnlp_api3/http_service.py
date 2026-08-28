@@ -119,7 +119,7 @@ def create_http_server(
                 not isinstance(result, dict)
                 or result.get("schema_version") != "clinical-workflow-v2"
                 or result.get("processing_status")
-                not in {"complete", "partial", "failed"}
+                not in {"completed", "partial", "failed"}
                 or result.get("record_status") != "DRAFT"
             ):
                 self._json(502, {"error": "invalid_clinicalnlp_response"})

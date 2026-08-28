@@ -14,7 +14,7 @@ Build and run the service independently:
 
 ```sh
 docker build -t eron-clinicalnlp services/clinicalnlp
-docker run --rm --env-file services/clinicalnlp/.env -p 8000:8000 \
+docker run --rm --env-file services/clinicalnlp/.env -p 8765:8765 \
   -v /path/to/runtime:/runtime:ro \
   -v /path/to/alias-state:/runtime/state \
   eron-clinicalnlp

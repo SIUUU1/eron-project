@@ -93,7 +93,7 @@ class ServiceSettings:
         if not model:
             raise ConfigurationError("OLLAMA_MODEL is required")
         try:
-            port = int(values.get("CLINICALNLP_HTTP_PORT", "8000"))
+            port = int(values.get("CLINICALNLP_HTTP_PORT", "8765"))
         except (TypeError, ValueError) as error:
             raise ConfigurationError(
                 "CLINICALNLP_HTTP_PORT must be between 0 and 65535"
@@ -317,11 +317,11 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
 def _listener(values: Mapping[str, str]) -> tuple[str, int, float]:
     host = values.get("CLINICALNLP_HTTP_HOST", "0.0.0.0").strip() or "0.0.0.0"
     try:
-        port = int(values.get("CLINICALNLP_HTTP_PORT", "8000"))
+        port = int(values.get("CLINICALNLP_HTTP_PORT", "8765"))
     except (TypeError, ValueError):
-        port = 8000
+        port = 8765
     if port < 0 or port > 65535:
-        port = 8000
+        port = 8765
     try:
         timeout = float(values.get("CLINICALNLP_HTTP_TIMEOUT", "180"))
     except (TypeError, ValueError):

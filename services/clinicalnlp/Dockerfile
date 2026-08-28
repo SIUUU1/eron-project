@@ -22,9 +22,9 @@ RUN groupadd --system --gid 10001 clinicalnlp \
 
 USER clinicalnlp
 
-EXPOSE 8000
+EXPOSE 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).close()"
+    CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/health', timeout=3).close()"
 
 CMD ["python", "-m", "clinicalnlp_api3.service"]

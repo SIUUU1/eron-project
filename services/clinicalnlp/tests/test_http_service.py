@@ -45,7 +45,7 @@ class ClinicalNlpHttpServiceTests(unittest.TestCase):
     def test_valid_whisper_payload_returns_the_v2_draft(self):
         expected = {
             "schema_version": "clinical-workflow-v2",
-            "processing_status": "complete",
+            "processing_status": "completed",
             "record_status": "DRAFT",
         }
 
@@ -180,7 +180,7 @@ class ClinicalNlpHttpServiceTests(unittest.TestCase):
                 time.sleep(0.1)
                 return {
                     "schema_version": "clinical-workflow-v2",
-                    "processing_status": "complete",
+                    "processing_status": "completed",
                 }
 
         server = create_http_server(

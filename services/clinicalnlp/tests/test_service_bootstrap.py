@@ -14,6 +14,15 @@ from clinicalnlp_api3.service import (
 
 
 class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
+    def test_default_internal_http_port_is_8765(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+            }
+        )
+
+        self.assertEqual(settings.port, 8765)
+
     def test_missing_dictionary_assets_keep_service_safely_unavailable(self):
         with TemporaryDirectory() as temporary_directory:
             prepared = prepare_service(
