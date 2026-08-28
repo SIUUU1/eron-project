@@ -37,6 +37,10 @@ class Settings:
     # 예측 모델 연동 여부. PREDICT_AI_URL 이 설정되어야 연동으로 본다.
     predict_ai_url: str | None = None
 
+    # 응급기록 초안 생성용 내부 ClinicalNLP 서비스.
+    record_ai_url: str | None = None
+    clinical_record_ai_timeout_seconds: float = 180.0
+
     # DB 세션 타임존.
     # PostgreSQL 서버 기본값은 Etc/UTC 이고, 컨테이너의 TZ 는 세션에 전달되지 않는다.
     # 명시하지 않으면 API 가 돌려주는 데모 시각이 실제 시각보다 9시간 뒤처진다.
@@ -59,6 +63,11 @@ def load_settings() -> Settings:
         risk_rising=_float_env("RISK_THRESHOLD_RISING", 0.60),
         risk_watch=_float_env("RISK_THRESHOLD_WATCH", 0.30),
         predict_ai_url=os.getenv("PREDICT_AI_URL") or None,
+        record_ai_url=os.getenv("RECORD_AI_URL") or None,
+        clinical_record_ai_timeout_seconds=_float_env(
+            "CLINICAL_RECORD_AI_TIMEOUT_SECONDS",
+            180.0,
+        ),
         db_timezone=os.getenv("DB_TIMEZONE") or os.getenv("TZ") or "Asia/Seoul",
     )
 

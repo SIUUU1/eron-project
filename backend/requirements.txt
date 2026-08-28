@@ -1,4 +1,6 @@
 fastapi
+httpx2
+jsonschema
 uvicorn[standard]
 SQLAlchemy
 psycopg[binary]
