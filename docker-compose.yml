@@ -64,6 +64,53 @@ services:
       - eron-network
 
 
+  clinicalnlp:
+    profiles:
+      - clinical
+
+    build:
+      context: ./services/clinicalnlp
+      dockerfile: Dockerfile
+
+    container_name: eron-clinicalnlp
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+    # 실제 Ollama API key는 이 Git 제외 파일에만 둔다.
+    # required=false이므로 clinical profile을 사용하지 않는 기존 실행은 영향을 받지 않는다.
+    env_file:
+      - path: ./services/clinicalnlp/.env
+        required: false
+
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+
+    # backend가 Docker 내부 DNS 이름 clinicalnlp:8765로만 호출한다.
+    # 호스트나 OCI public ingress에는 공개하지 않는다.
+    expose:
+      - "8765"
+
+    volumes:
+      # 사전·VectorDB·정책·UMLS runtime은 불변 자산으로 읽기 전용 마운트한다.
+      - type: bind
+        source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}
+        target: /runtime
+        read_only: true
+        bind:
+          create_host_path: false
+      # 승인 별칭 DB만 별도 경로에서 쓰기를 허용한다.
+      - type: bind
+        source: ${CLINICALNLP_STATE_ROOT:-./runtime/clinicalnlp-state}
+        target: /runtime/state
+        read_only: false
+        bind:
+          create_host_path: false
+
+    networks:
+      - eron-network
+
+
   frontend:
     build:
       context: ./frontend
