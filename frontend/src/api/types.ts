@@ -3,6 +3,51 @@
  * 백엔드 응답 구조가 원천이며, 여기서 임의로 필드를 만들지 않는다.
  */
 
+export interface WhisperDraftSegment {
+  id: string | number;
+  start: number;
+  end: number;
+  text: string;
+  speaker?: "의료진" | "환자";
+}
+
+export interface WhisperDraftRequest {
+  segments: WhisperDraftSegment[];
+}
+
+export interface ClinicalDraftField {
+  field_id: string;
+  value: string;
+}
+
+export interface ClinicalDraftFields {
+  chief_complaint: ClinicalDraftField;
+  pain_assessment: ClinicalDraftField;
+  history_of_present_illness: ClinicalDraftField;
+  past_history: ClinicalDraftField;
+  medications: ClinicalDraftField;
+  drug_allergy: ClinicalDraftField;
+  social_history: ClinicalDraftField;
+  review_of_systems: ClinicalDraftField;
+  physical_examination: ClinicalDraftField;
+  treatment_plan: ClinicalDraftField;
+  impression: ClinicalDraftField;
+  outcome: ClinicalDraftField;
+}
+
+export interface ClinicalRecordWorkflowResponse {
+  schema_version: "clinical-workflow-v2";
+  processing_status: "completed" | "partial";
+  record_status: "DRAFT";
+  workflow_phase: "DRAFT_GENERATION";
+  completed_at: null;
+  draft: {
+    fields: ClinicalDraftFields;
+    review_items: unknown[];
+  };
+  errors: unknown[];
+}
+
 export interface Meta {
   data_source: string;
   is_demo_timeline: boolean;

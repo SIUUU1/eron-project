@@ -422,6 +422,7 @@ export type RecordFieldKey =
   | "socialHistory"
   | "systemReview"
   | "physicalExam"
+  | "treatmentPlan"
   | "impression"
   | "outcome";
 
@@ -435,6 +436,7 @@ export const recordFieldLabels: Record<RecordFieldKey, string> = {
   socialHistory: "사회력 (흡연·음주)",
   systemReview: "계통문진",
   physicalExam: "신체검진",
+  treatmentPlan: "진료계획",
   impression: "추정진단",
   outcome: "응급진료결과",
 };
@@ -451,6 +453,7 @@ export const emptyRecord: EmergencyRecord = {
   socialHistory: "",
   systemReview: "",
   physicalExam: "",
+  treatmentPlan: "",
   impression: "",
   outcome: "",
 };
@@ -467,6 +470,7 @@ export const aiDraftRecord: EmergencyRecord = {
   socialHistory: "",
   systemReview: "Chest pain (+), Dyspnea (+), Sweating (+)",
   physicalExam: "미확인",
+  treatmentPlan: "미확인",
   impression: "Acute coronary syndrome 의증",
   outcome: "",
 };

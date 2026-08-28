@@ -6,7 +6,7 @@
  * (VITE_* 는 빌드 시점에 번들에 고정되므로 절대 URL 을 기본값으로 두지 않는다.)
  */
 
-const BASE = import.meta.env["VITE_API_BASE_URL"] ?? "";
+const BASE = import.meta.env?.["VITE_API_BASE_URL"] ?? "";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -44,6 +44,42 @@ export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> 
   }
 
   return (await res.json()) as T;
+}
+
+export async function apiPost<TRequest, TResponse>(
+  path: string,
+  body: TRequest,
+  signal?: AbortSignal,
+): Promise<TResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      signal: signal ?? null,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    throw new ApiError(0, "서버에 연결할 수 없습니다.");
+  }
+
+  if (!res.ok) {
+    const message = await res
+      .json()
+      .then((responseBody: { detail?: unknown; error?: unknown }) => {
+        if (typeof responseBody.detail === "string") return responseBody.detail;
+        if (typeof responseBody.error === "string") return responseBody.error;
+        return res.statusText;
+      })
+      .catch(() => res.statusText || "요청을 처리하지 못했습니다.");
+    throw new ApiError(res.status, message);
+  }
+
+  return (await res.json()) as TResponse;
 }
 
 export function buildQuery(params: Record<string, string | number | undefined | null>): string {

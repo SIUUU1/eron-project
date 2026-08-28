@@ -21,6 +21,13 @@ import {
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  clinicalDraftErrorMessage,
+  clinicalDraftPartialMessage,
+  createClinicalRecordDraft,
+  dialogueToWhisperDraftRequest,
+  workflowDraftToEmergencyRecord,
+} from "@/api/clinical-records";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,7 +52,6 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  aiDraftRecord,
   checkStatusMeta,
   currentUser,
   emptyRecord,
@@ -100,6 +106,7 @@ const fieldOrder: RecordFieldKey[] = [
   "socialHistory",
   "systemReview",
   "physicalExam",
+  "treatmentPlan",
   "impression",
   "outcome",
 ];
@@ -142,6 +149,10 @@ function RecordWorkflowPage() {
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
   const [generated, setGenerated] = useState(false);
+  const [generationNotice, setGenerationNotice] = useState<{
+    kind: "partial" | "error";
+    message: string;
+  } | null>(null);
 
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -178,20 +189,36 @@ function RecordWorkflowPage() {
     toast.success("샘플 환자-의료진 대화를 불러왔습니다.");
   };
 
-  const generateRecord = () => {
+  const generateRecord = async () => {
     if (dialogue.length === 0) {
       toast.error("먼저 대화를 불러오거나 녹음을 진행해 주세요.");
       return;
     }
     setGenerating(true);
-    setTimeout(() => {
-      setRecord(aiDraftRecord);
+    setGenerationNotice(null);
+    try {
+      const workflow = await createClinicalRecordDraft(dialogueToWhisperDraftRequest(dialogue));
+      setRecord(workflowDraftToEmergencyRecord(workflow));
       setGenerated(true);
+      setChecked(false);
+      const partialMessage = clinicalDraftPartialMessage(workflow);
+      if (partialMessage) {
+        setGenerationNotice({ kind: "partial", message: partialMessage });
+        toast.warning("응급진료기록 초안이 일부 생성되었습니다.", {
+          description: partialMessage,
+        });
+      } else {
+        toast.success("AI 응급진료기록 초안이 생성되었습니다.", {
+          description: "대화에서 확인되지 않은 항목은 공란 또는 미확인으로 남겨두었습니다.",
+        });
+      }
+    } catch (error) {
+      const message = clinicalDraftErrorMessage(error);
+      setGenerationNotice({ kind: "error", message });
+      toast.error("응급진료기록 초안을 생성하지 못했습니다.", { description: message });
+    } finally {
       setGenerating(false);
-      toast.success("AI 응급진료기록 초안이 생성되었습니다.", {
-        description: "대화에서 확인되지 않은 항목은 공란 또는 미확인으로 남겨두었습니다.",
-      });
-    }, 1300);
+    }
   };
 
   const runCheck = () => {
@@ -411,6 +438,29 @@ function RecordWorkflowPage() {
                 AI는 대화에서 확인된 내용만 기록합니다. 언급되지 않은 항목은 공란 또는 “미확인”,
                 불확실한 항목은 “확인 필요”로 표시되며 임의로 추측하지 않습니다.
               </p>
+              {generating ? (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="flex gap-1.5 rounded-md bg-secondary px-3 py-2 text-xs text-muted-foreground"
+                >
+                  <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                  대화를 분석하여 응급기록 초안을 생성하고 있습니다. 약 40초 정도 걸릴 수 있습니다.
+                </p>
+              ) : null}
+              {generationNotice ? (
+                <p
+                  role="alert"
+                  className={`flex gap-1.5 rounded-md px-3 py-2 text-xs ${
+                    generationNotice.kind === "partial"
+                      ? "bg-risk-rising-soft text-risk-rising"
+                      : "bg-risk-critical-soft text-risk-critical"
+                  }`}
+                >
+                  <AlertCircle className="size-3.5 shrink-0" />
+                  {generationNotice.message}
+                </p>
+              ) : null}
               <ScrollArea className="h-[420px] pr-3">
                 <div className="space-y-3">
                   {fieldOrder.map((key) => (
@@ -432,6 +482,9 @@ function RecordWorkflowPage() {
                             <SelectValue placeholder="선택되지 않음" />
                           </SelectTrigger>
                           <SelectContent>
+                            {record.outcome && !outcomeOptions.includes(record.outcome) ? (
+                              <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
+                            ) : null}
                             {outcomeOptions.map((o) => (
                               <SelectItem key={o} value={o}>
                                 {o}
@@ -442,7 +495,7 @@ function RecordWorkflowPage() {
                       ) : (
                         <Textarea
                           value={record[key]}
-                          rows={key === "presentIllness" ? 3 : 2}
+                          rows={key === "presentIllness" || key === "treatmentPlan" ? 3 : 2}
                           placeholder="미확인"
                           onChange={(e) => setField(key, e.target.value)}
                         />
