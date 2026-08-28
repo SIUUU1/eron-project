@@ -118,6 +118,7 @@
             "model": {"type": ["string", "null"]},
             "clinical_prompt": {"type": ["string", "null"]},
             "candidate_prompt": {"type": ["string", "null"]},
+            "draft_normalization_prompt": {"type": ["string", "null"]},
             "alias_db": {"type": ["integer", "null"]}
           },
           "additionalProperties": false

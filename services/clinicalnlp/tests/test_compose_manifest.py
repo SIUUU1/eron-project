@@ -38,11 +38,26 @@ class ClinicalNlpComposeManifestTests(unittest.TestCase):
         self.assertIn("target: /runtime/state\n", service)
         self.assertIn("      - eron-network\n", service)
 
-        for base_service in ("postgres", "backend", "frontend", "nginx"):
+        for base_service in ("postgres", "frontend", "nginx"):
             self.assertNotIn(
                 "clinicalnlp",
                 _service_block(compose, base_service),
             )
+
+    def test_backend_can_call_clinicalnlp_without_forcing_the_profile(self):
+        compose = COMPOSE_PATH.read_text(encoding="utf-8").replace("\r\n", "\n")
+        backend = _service_block(compose, "backend")
+
+        self.assertIn(
+            "RECORD_AI_URL: ${RECORD_AI_URL:-http://clinicalnlp:8765}",
+            backend,
+        )
+        self.assertIn(
+            "CLINICAL_RECORD_AI_TIMEOUT_SECONDS: "
+            "${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}",
+            backend,
+        )
+        self.assertNotIn("      clinicalnlp:", backend)
 
 
 if __name__ == "__main__":

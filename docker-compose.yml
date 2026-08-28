@@ -51,6 +51,10 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       PREDICT_AI_URL: ${PREDICT_AI_URL:-}
+      # clinical profile이 꺼져 있어도 backend 자체는 기동하며,
+      # 초안 endpoint만 연결 실패를 503으로 반환한다.
+      RECORD_AI_URL: ${RECORD_AI_URL:-http://clinicalnlp:8765}
+      CLINICAL_RECORD_AI_TIMEOUT_SECONDS: ${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}
       # nginx 뒤에서는 동일 오리진이라 CORS 가 필요 없다.
       # 컨테이너 밖에서 vite dev 를 띄울 때만 채운다.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
