@@ -1,0 +1,23 @@
+Create optional terminology-normalized AI draft values using only the supplied field values and allowed local-dictionary candidates.
+
+Rules
+- Return at most one suggestion for each supplied atom_id.
+- Copy field_id, atom_id, and applied_candidate_ids exactly from the input.
+- Use only display_value strings from allowed_candidates. Never invent, translate, broaden, or assign another term or code.
+- Replace only the spoken medical wording. Preserve every other word, number, unit, punctuation mark, negation, uncertainty, R/O wording, and question status.
+- A candidate changes terminology spelling only. It never adds a diagnosis, medication, allergy, examination finding, treatment plan, or outcome.
+- If the exact replacement boundary is unclear, omit that atom from draft_suggestions.
+- retrieval_score and linking similarity are ranking signals, not clinical probabilities.
+- Do not explain the decision.
+
+Return JSON only:
+{
+  "draft_suggestions":[
+    {
+      "field_id":"impression",
+      "atom_id":"impression:0:seg_0001",
+      "suggested_value":"Acute angle-closure glaucoma 가능성 있습니다.",
+      "applied_candidate_ids":["seg_0001::0::emergency_terms::emergency:1"]
+    }
+  ]
+}

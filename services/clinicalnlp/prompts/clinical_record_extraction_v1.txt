@@ -1,0 +1,39 @@
+Return one grounded emergency clinical record from the whole supplied dialogue.
+
+Input segments contain id, start, end, raw_text, and corrected_text only when an approved deterministic correction differs from RAW. Segment text is immutable evidence. Read the whole supplied dialogue because segments normally have no speaker labels; link questions and answers by order and meaning. Preserve negation, uncertainty, questions, numbers, units, and medication wording. Never infer a finding merely because a clinician asked about it.
+
+Extraction rules
+- Never guess or add a fact absent from the dialogue. Omitted or unasked information must stay omitted for program-side NOT_ASSESSED normalization.
+- Keep the source clinical wording verbatim in raw_value. Do not paraphrase, broaden, or silently standardize it.
+- Use corrected_text only when present, but raw_value must remain a meaningful phrase supported by one segment.
+- The explicit symptom answer after an opening discomfort question is chief_complaint.
+- Keep onset to its time phrase. Preserve explicit negative and uncertain answers.
+- Pain assessment uses explicit NRS only. Do not infer an NRS score from pain adjectives, location, or quality; omit non-NRS pain fields.
+- Past history may include both medical and surgical history. Put diagnosed or denied diseases in underlying_conditions and actual operations/procedures in surgery_history.
+- Do not emit a bare generic noun such as "약", "증상", "병", "진단", or "수술" as raw_value; copy the smallest complete meaningful phrase.
+- If medication use is stated but its name is unknown, copy the complete answer as needs_confirmation and invent no drug.
+- Never put an unanswered question in a confirmed field.
+- Never infer physical_examination from a symptom or patient statement. Include it only when the dialogue explicitly states an observed examination finding.
+- For impression, preserve confirmed, suspected, and rule-out certainty. A suspected or rule-out diagnosis must keep its uncertainty wording and use needs_confirmation.
+- Local dictionaries, not Gemma, own standard terminology and KCD codes. Do not invent or assign a standard term or KCD code.
+- review_of_systems contains explicitly stated positive, negative, or uncertain answers to symptom review. Use needs_confirmation for uncertainty. physical_examination contains only observed findings; impression only stated diagnoses or differentials; treatment_plan only stated tests, treatments, or orders.
+
+Value V is {"raw_value":"exact supported phrase","status":"confirmed|needs_confirmation","evidence":{"source_segment_id":"seg_0001"}}. Use confirmed only for explicit facts and needs_confirmation for uncertainty. Omit any unmentioned value or empty section; the validator supplies not_mentioned defaults. For a genuinely unanswered question only, add {"source_segment_id":"seg_0001","topic":"medications"} to unresolved_questions.
+
+Return JSON only:
+{
+  "clinical_record":{
+    "chief_complaint":V,
+    "pain_assessment":{"nrs":V,"location":V,"quality":V,"radiation":V},
+    "history_of_present_illness":{"onset":V,"course":V,"associated_symptoms":[V]},
+    "past_history":{"underlying_conditions":[V],"surgery_history":[V]},
+    "medications":{"items":[V],"last_dose":V},
+    "drug_allergy":V,
+    "social_history":{"smoking":V,"alcohol":V},
+    "review_of_systems":[V],
+    "physical_examination":[V],
+    "impression":[V],
+    "treatment_plan":[V]
+  },
+  "unresolved_questions":[]
+}

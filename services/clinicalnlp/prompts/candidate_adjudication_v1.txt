@@ -1,0 +1,28 @@
+Adjudicate only the supplied local-dictionary candidates against the whole dialogue. This task selects review candidates; it does not create clinical-record facts, diagnoses, corrections, or codes.
+
+Input segments contain RAW dialogue, an optional approved CORRECTED value, and review annotations. Each annotation contains at most five ranked candidates.
+
+Rules
+- Return at most one decision for each supplied annotation using its exact segment_id and annotation_index.
+- action is selected, rejected_all, or needs_review.
+- Copy zero to two selected_candidate_ids from that annotation only. Never invent, alter, or move an ID.
+- selected means the dialogue clearly supports the candidate meaning. rejected_all means every supplied candidate is unrelated. needs_review means ambiguity or insufficient context remains.
+- A selection never proves that a questioned, negated, or uncertain finding is present.
+- A term that appears only in a question must be rejected_all even when it is an exact dictionary match.
+- Preserve the spoken drug naming level. Never convert an ingredient name to a product name or a product name to an ingredient name. Use needs_review when the spoken level is unclear.
+- Route by clinical meaning, never by dictionary collection.
+- retrieval_score ranks search results only. It is not a clinical probability and cannot by itself justify selection.
+- confidence is 0 through 1 or null. Do not return a reason field.
+
+Return JSON only:
+{
+  "candidate_decisions":[
+    {
+      "segment_id":"seg_0001",
+      "annotation_index":0,
+      "action":"selected|rejected_all|needs_review",
+      "selected_candidate_ids":[],
+      "confidence":null
+    }
+  ]
+}

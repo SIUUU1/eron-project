@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:eron:clinical-workflow-v2",
+  "title": "ER:ON Clinical Workflow v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "processing_status",
+    "record_status",
+    "workflow_phase",
+    "validation",
+    "completed_at",
+    "api3",
+    "api2",
+    "query_expansion",
+    "candidate_decisions",
+    "audit",
+    "draft",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "clinical-workflow-v2"
+    },
+    "processing_status": {
+      "enum": ["completed", "partial", "failed"]
+    },
+    "record_status": {
+      "enum": ["NOT_STARTED", "DRAFT", "COMPLETED"]
+    },
+    "workflow_phase": {
+      "enum": [
+        "STT_INPUT",
+        "DRAFT_GENERATION",
+        "CLINICIAN_REVIEW",
+        "FINALIZATION",
+        "POST_SIGN_EDIT"
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "required": ["status", "issues", "rule_applicability"],
+      "properties": {
+        "status": {
+          "enum": ["PASS", "REVIEW_REQUIRED", "BLOCK"]
+        },
+        "issues": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/validationIssue"}
+        },
+        "rule_applicability": {
+          "type": "object",
+          "required": ["G16", "G17", "G18"],
+          "properties": {
+            "G16": {"enum": ["APPLICABLE", "NOT_APPLICABLE"]},
+            "G17": {"enum": ["APPLICABLE", "NOT_APPLICABLE"]},
+            "G18": {"enum": ["APPLICABLE", "NOT_APPLICABLE"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "completed_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "format": "date-time"}
+      ]
+    },
+    "api3": {"type": "object"},
+    "api2": {
+      "oneOf": [
+        {"type": "object"},
+        {"type": "null"}
+      ]
+    },
+    "query_expansion": {"type": "object"},
+    "query_resolution": {"$ref": "#/$defs/queryResolution"},
+    "candidate_decisions": {"type": "array"},
+    "audit": {
+      "type": "object",
+      "required": ["schema_version", "references", "versions", "timestamps"],
+      "properties": {
+        "schema_version": {"const": "clinical-workflow-audit-v1"},
+        "references": {
+          "type": "object",
+          "required": [
+            "query_expansion_path",
+            "segments_path",
+            "clinical_record_path",
+            "candidate_decisions_path",
+            "errors_path"
+          ],
+          "properties": {
+            "query_expansion_path": {"const": "$.query_expansion"},
+            "segments_path": {"const": "$.api3.segments"},
+            "clinical_record_path": {"const": "$.api2.clinical_record"},
+            "candidate_decisions_path": {"const": "$.candidate_decisions"},
+            "errors_path": {"const": "$.errors"}
+          },
+          "additionalProperties": false
+        },
+        "versions": {
+          "type": "object",
+          "required": [
+            "workflow_schema",
+            "api3_schema",
+            "clinical_record_schema",
+            "model",
+            "clinical_prompt",
+            "candidate_prompt",
+            "alias_db"
+          ],
+          "properties": {
+            "workflow_schema": {"type": "string"},
+            "api3_schema": {"type": ["string", "null"]},
+            "clinical_record_schema": {"type": ["string", "null"]},
+            "model": {"type": ["string", "null"]},
+            "clinical_prompt": {"type": ["string", "null"]},
+            "candidate_prompt": {"type": ["string", "null"]},
+            "alias_db": {"type": ["integer", "null"]}
+          },
+          "additionalProperties": false
+        },
+        "timestamps": {
+          "type": "object",
+          "required": ["api3_created_at", "clinical_record_created_at"],
+          "properties": {
+            "api3_created_at": {"type": ["string", "null"]},
+            "clinical_record_created_at": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "draft": {
+      "type": "object",
+      "required": ["fields", "review_items"],
+      "properties": {
+        "fields": {
+          "type": "object",
+          "required": [
+            "chief_complaint",
+            "pain_assessment",
+            "history_of_present_illness",
+            "past_history",
+            "medications",
+            "drug_allergy",
+            "social_history",
+            "review_of_systems",
+            "physical_examination",
+            "treatment_plan",
+            "impression",
+            "outcome"
+          ],
+          "additionalProperties": false,
+          "patternProperties": {
+            "^(chief_complaint|pain_assessment|history_of_present_illness|past_history|medications|drug_allergy|social_history|review_of_systems|physical_examination|treatment_plan|impression|outcome)$": {
+              "$ref": "#/$defs/draftField"
+            }
+          }
+        },
+        "review_items": {"type": "array"}
+      },
+      "additionalProperties": true
+    },
+    "errors": {"type": "array"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "queryResolution": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "mode",
+        "status",
+        "policy_version",
+        "fallback_used"
+      ],
+      "properties": {
+        "schema_version": {"const": "medical-query-resolution-v1"},
+        "mode": {"enum": ["legacy", "shadow", "umls_primary"]},
+        "status": {"enum": ["complete", "partial"]},
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fallback_used": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "validationIssue": {
+      "type": "object",
+      "required": [
+        "rule_id",
+        "severity",
+        "field_id",
+        "message",
+        "evidence",
+        "suggested_action",
+        "policy_evidence",
+        "policy_evidence_status"
+      ],
+      "properties": {
+        "rule_id": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["REVIEW_REQUIRED", "BLOCK"]},
+        "field_id": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array"},
+        "suggested_action": {"type": "string", "minLength": 1},
+        "policy_evidence": {"type": "array"},
+        "policy_evidence_status": {
+          "enum": ["available", "unavailable", "not_applicable"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "draftField": {
+      "type": "object",
+      "required": [
+        "field_id",
+        "value",
+        "ai_original_value",
+        "suggestion_status",
+        "applied_candidates",
+        "information_status",
+        "evidence"
+      ],
+      "properties": {
+        "field_id": {"type": "string"},
+        "value": {"type": "string"},
+        "ai_original_value": {"type": "string"},
+        "suggestion_status": {
+          "enum": ["UNCHANGED", "AUTO_SUGGESTED", "UNRESOLVED"]
+        },
+        "applied_candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["collection", "entity_id", "display_value", "source"],
+            "properties": {
+              "collection": {"type": "string", "minLength": 1},
+              "entity_id": {"type": "string", "minLength": 1},
+              "display_value": {"type": "string", "minLength": 1},
+              "source": {"enum": ["RAW_EXACT", "UMLS"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "information_status": {
+          "enum": ["PRESENT", "NONE", "NOT_ASSESSED", "UNCERTAIN"]
+        },
+        "evidence": {"type": "array"}
+      },
+      "additionalProperties": true
+    }
+  }
+}
