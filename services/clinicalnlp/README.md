@@ -93,6 +93,44 @@ cp "$LEGACY_CLINICALNLP_ROOT/data/policy_vectors.sqlite" \
   runtime/clinicalnlp/policy/
 ```
 
+### Prepare the optional scispaCy/UMLS runtime
+
+Run this step from WSL or another Linux `amd64` environment with Docker. Reuse
+only the standalone project's platform-independent UMLS cache; never copy its
+Windows `.venv` into the container runtime.
+
+```sh
+python3 services/clinicalnlp/scripts/setup_scispacy_runtime.py \
+  --runtime-root "$PWD/runtime/clinicalnlp/scispacy" \
+  --cache-source "$LEGACY_CLINICALNLP_ROOT/runtime/scispacy/cache"
+```
+
+The setup command copies the cache, creates a Linux Python 3.12 environment
+through the same `python:3.12-slim` base used by ClinicalNLP, installs the pinned
+packages from `services/clinicalnlp/scispacy-requirements.txt`, and starts the
+real worker once. It succeeds only after the worker loads the local UMLS 2022AB
+snapshot and reports `ready`.
+
+Re-run the non-mutating verification independently when troubleshooting:
+
+```sh
+python3 services/clinicalnlp/scripts/verify_scispacy_runtime.py \
+  --runtime-root "$PWD/runtime/clinicalnlp/scispacy" \
+  --timeout 180
+```
+
+Restart only ClinicalNLP after preparing or replacing the runtime:
+
+```sh
+docker compose --profile clinical restart clinicalnlp
+```
+
+The first UMLS load can take several minutes and consumes substantially more
+memory than n-gram fallback. Confirm container memory and end-to-end latency on
+the deployment host. A healthy HTTP service alone does not prove that optional
+UMLS linking is active; verify that a synthetic request emits candidates whose
+source is `UMLS`.
+
 Verify the required assets before starting Docker:
 
 ```sh
