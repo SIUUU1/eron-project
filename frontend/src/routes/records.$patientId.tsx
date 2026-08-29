@@ -16,9 +16,10 @@ import {
   Sparkles,
   Square,
   Stethoscope,
+  Upload,
   XCircle,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -26,8 +27,12 @@ import {
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
   dialogueToWhisperDraftRequest,
+  parseWhisperDraftJson,
+  whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
+  type DraftDialogueTurn,
 } from "@/api/clinical-records";
+import type { WhisperDraftRequest } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -62,7 +67,6 @@ import {
   recordFieldLabels,
   sampleDialogue,
   type CheckStatus,
-  type DialogueTurn,
   type EmergencyRecord,
   type RecordFieldKey,
 } from "@/lib/mock-data";
@@ -144,7 +148,10 @@ function RecordWorkflowPage() {
   const { patient } = Route.useLoaderData();
 
   const [step, setStep] = useState(1);
-  const [dialogue, setDialogue] = useState<DialogueTurn[]>([]);
+  const [dialogue, setDialogue] = useState<DraftDialogueTurn[]>([]);
+  const [uploadedWhisperPayload, setUploadedWhisperPayload] =
+    useState<WhisperDraftRequest | null>(null);
+  const [uploadedWhisperFileName, setUploadedWhisperFileName] = useState<string | null>(null);
   const [recording, setRecording] = useState<"idle" | "on" | "paused">("idle");
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
@@ -165,6 +172,7 @@ function RecordWorkflowPage() {
   const [certifiedAt, setCertifiedAt] = useState<string | null>(null);
 
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({});
+  const whisperFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const statuses = useMemo(() => {
     const out = {} as Record<RecordFieldKey, CheckStatus>;
@@ -186,7 +194,39 @@ function RecordWorkflowPage() {
 
   const loadSample = () => {
     setDialogue(sampleDialogue);
+    setUploadedWhisperPayload(null);
+    setUploadedWhisperFileName(null);
+    setGenerated(false);
+    setGenerationNotice(null);
     toast.success("샘플 환자-의료진 대화를 불러왔습니다.");
+  };
+
+  const loadWhisperJson = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+
+    try {
+      const payload = parseWhisperDraftJson(await file.text());
+      if (payload.segments.length === 0) {
+        throw new Error("Whisper JSON에 대화 segment가 없습니다.");
+      }
+      setUploadedWhisperPayload(payload);
+      setUploadedWhisperFileName(file.name);
+      setDialogue(whisperDraftToDialogue(payload));
+      setGenerated(false);
+      setChecked(false);
+      setGenerationNotice(null);
+      toast.success("Whisper JSON을 불러왔습니다.", {
+        description: `${payload.segments.length}개 segment의 원문과 화자 정보를 유지합니다.`,
+      });
+    } catch (error) {
+      toast.error("Whisper JSON을 불러오지 못했습니다.", {
+        description:
+          error instanceof Error ? error.message : "JSON 파일 형식을 확인해 주세요.",
+      });
+    }
   };
 
   const generateRecord = async () => {
@@ -197,7 +237,9 @@ function RecordWorkflowPage() {
     setGenerating(true);
     setGenerationNotice(null);
     try {
-      const workflow = await createClinicalRecordDraft(dialogueToWhisperDraftRequest(dialogue));
+      const request =
+        uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue);
+      const workflow = await createClinicalRecordDraft(request);
       setRecord(workflowDraftToEmergencyRecord(workflow));
       setGenerated(true);
       setChecked(false);
@@ -379,7 +421,28 @@ function RecordWorkflowPage() {
                 <Button size="sm" variant="secondary" onClick={loadSample}>
                   <Sparkles className="size-4" /> 샘플 대화 불러오기
                 </Button>
+                <input
+                  ref={whisperFileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={loadWhisperJson}
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => whisperFileInputRef.current?.click()}
+                  disabled={generating}
+                >
+                  <Upload className="size-4" /> Whisper JSON 불러오기
+                </Button>
               </div>
+              {uploadedWhisperFileName && uploadedWhisperPayload ? (
+                <p className="text-xs text-muted-foreground">
+                  입력 파일: {uploadedWhisperFileName} · {uploadedWhisperPayload.segments.length}개
+                  segment · 브라우저 메모리에서만 사용
+                </p>
+              ) : null}
               {recording !== "idle" && (
                 <p className="flex items-center gap-2 text-xs text-risk-critical">
                   <span className="size-2 animate-pulse rounded-full bg-risk-critical" />

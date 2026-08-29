@@ -1,6 +1,57 @@
 import { ApiError, apiPost } from "./client.ts";
 import type { ClinicalRecordWorkflowResponse, WhisperDraftRequest } from "./types.ts";
-import type { DialogueTurn, EmergencyRecord } from "../lib/mock-data.ts";
+import type { EmergencyRecord } from "../lib/mock-data.ts";
+
+export interface DraftDialogueTurn {
+  speaker: string;
+  text: string;
+}
+
+export function parseWhisperDraftJson(source: string): WhisperDraftRequest {
+  const value: unknown = JSON.parse(source);
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !Array.isArray((value as { segments?: unknown }).segments)
+  ) {
+    throw new Error("Whisper JSON에는 segments 배열이 필요합니다.");
+  }
+  const segments = (value as { segments: unknown[] }).segments;
+  const segmentIds = new Set<string | number>();
+  segments.forEach((segment, index) => {
+    if (typeof segment !== "object" || segment === null) {
+      throw new Error(`Whisper segment ${index + 1} 형식이 올바르지 않습니다.`);
+    }
+    const candidate = segment as Record<string, unknown>;
+    const { id, start, end, text } = candidate;
+    if (
+      (typeof id !== "string" && typeof id !== "number") ||
+      typeof start !== "number" ||
+      !Number.isFinite(start) ||
+      typeof end !== "number" ||
+      !Number.isFinite(end) ||
+      start > end ||
+      typeof text !== "string" ||
+      segmentIds.has(id)
+    ) {
+      throw new Error(`Whisper segment ${index + 1} 형식이 올바르지 않습니다.`);
+    }
+    segmentIds.add(id);
+  });
+  return value as WhisperDraftRequest;
+}
+
+export function whisperDraftToDialogue(
+  request: WhisperDraftRequest,
+): DraftDialogueTurn[] {
+  return request.segments.map((segment) => ({
+    speaker:
+      typeof segment.speaker === "string" && segment.speaker.length > 0
+        ? segment.speaker
+        : "화자 미확인",
+    text: segment.text,
+  }));
+}
 
 export function createClinicalRecordDraft(
   request: WhisperDraftRequest,
@@ -43,7 +94,9 @@ export function clinicalDraftPartialMessage(
     : "일부 처리 단계가 완료되지 않았습니다. 생성된 초안을 확인해 주세요.";
 }
 
-export function dialogueToWhisperDraftRequest(dialogue: DialogueTurn[]): WhisperDraftRequest {
+export function dialogueToWhisperDraftRequest(
+  dialogue: readonly DraftDialogueTurn[],
+): WhisperDraftRequest {
   return {
     segments: dialogue.map((turn, index) => ({
       id: `ui_seg_${String(index + 1).padStart(4, "0")}`,

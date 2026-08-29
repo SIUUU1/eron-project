@@ -8,11 +8,13 @@ export interface WhisperDraftSegment {
   start: number;
   end: number;
   text: string;
-  speaker?: "의료진" | "환자";
+  speaker?: string;
+  [key: string]: unknown;
 }
 
 export interface WhisperDraftRequest {
   segments: WhisperDraftSegment[];
+  [key: string]: unknown;
 }
 
 export interface ClinicalDraftField {

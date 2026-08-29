@@ -7,8 +7,59 @@ import {
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
   dialogueToWhisperDraftRequest,
+  parseWhisperDraftJson,
+  whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
 } from "../src/api/clinical-records.ts";
+
+test("Whisper JSON의 원문 segment와 추가 필드를 변경하지 않고 읽는다", () => {
+  const source = {
+    language: "ko",
+    processing_metadata: { model: "whisper-turbo" },
+    segments: [
+      {
+        id: "seg_original_001",
+        start: 30.43,
+        end: 32.99,
+        text: "어큐트 앵글 클로저 글루코마 가능성 있습니다.",
+        speaker: "SPEAKER_00",
+        words: [{ word: "어큐트", start: 30.43, end: 30.81 }],
+      },
+    ],
+  };
+
+  assert.deepEqual(parseWhisperDraftJson(JSON.stringify(source)), source);
+});
+
+test("형식이 잘못된 Whisper segment는 파일 입력 단계에서 거부한다", () => {
+  assert.throws(
+    () =>
+      parseWhisperDraftJson(
+        JSON.stringify({
+          segments: [
+            { id: "seg_1", start: 2, end: 1, text: "첫 문장" },
+            { id: "seg_1", start: 2, end: 3, text: "중복 ID" },
+          ],
+        }),
+      ),
+    /Whisper segment/,
+  );
+});
+
+test("Whisper 화자명은 화면 표시에서도 유지하고 누락된 화자만 구분한다", () => {
+  assert.deepEqual(
+    whisperDraftToDialogue({
+      segments: [
+        { id: "seg_1", start: 1, end: 2, text: "첫 문장", speaker: "SPEAKER_00" },
+        { id: "seg_2", start: 2, end: 3, text: "둘째 문장" },
+      ],
+    }),
+    [
+      { speaker: "SPEAKER_00", text: "첫 문장" },
+      { speaker: "화자 미확인", text: "둘째 문장" },
+    ],
+  );
+});
 
 test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 변환한다", () => {
   const field = (fieldId, value) => ({ field_id: fieldId, value });
