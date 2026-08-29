@@ -1,10 +1,35 @@
 import { ApiError, apiPost } from "./client.ts";
 import type {
+  ClinicalAppliedCandidate,
+  ClinicalCandidateProvenance,
   ClinicalDraftField,
+  ClinicalDraftReviewItem,
   ClinicalRecordWorkflowResponse,
   WhisperDraftRequest,
 } from "./types.ts";
+import type {
+  CandidateSource,
+  FieldProvenance,
+  FieldProvenanceMap,
+  PatientEvidence,
+  TerminologyCandidate,
+} from "../lib/clinical-provenance.ts";
 import type { CheckStatus, EmergencyRecord, RecordFieldKey } from "../lib/mock-data.ts";
+
+const recordFieldKeyByClinicalId: Record<string, RecordFieldKey> = {
+  chief_complaint: "chiefComplaint",
+  pain_assessment: "painAssessment",
+  history_of_present_illness: "presentIllness",
+  past_history: "pastHistory",
+  medications: "medication",
+  drug_allergy: "allergy",
+  social_history: "socialHistory",
+  review_of_systems: "systemReview",
+  physical_examination: "physicalExam",
+  treatment_plan: "treatmentPlan",
+  impression: "impression",
+  outcome: "outcome",
+};
 
 export interface DraftDialogueTurn {
   speaker: string;
@@ -161,4 +186,161 @@ export function workflowDraftToFieldStatuses(
     impression: clinicalDraftFieldStatus(fields.impression),
     outcome: clinicalDraftFieldStatus(fields.outcome),
   };
+}
+
+function timestampPart(seconds: number | undefined): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = (seconds - minutes * 60).toFixed(2).padStart(5, "0");
+  return `${String(minutes).padStart(2, "0")}:${remainder}`;
+}
+
+function evidenceTimestamp(start: number | undefined, end: number | undefined): string {
+  const startLabel = timestampPart(start);
+  const endLabel = timestampPart(end);
+  if (startLabel && endLabel) return `${startLabel}–${endLabel}`;
+  return startLabel ?? endLabel ?? "시간 정보 없음";
+}
+
+function candidateSource(value: unknown): CandidateSource | null {
+  return value === "RAW_EXACT" || value === "UMLS" || value === "NGRAM_FALLBACK"
+    ? value
+    : null;
+}
+
+function candidateSimilarity(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function appliedCandidate(
+  fieldId: string,
+  index: number,
+  candidate: ClinicalAppliedCandidate,
+): TerminologyCandidate {
+  return {
+    id: `${fieldId}:applied:${index}`,
+    query: candidate.display_value,
+    canonicalValue: candidate.display_value,
+    source: candidate.source,
+    cui: null,
+    semanticType: null,
+    similarity: null,
+  };
+}
+
+function reviewCandidate(
+  item: ClinicalDraftReviewItem,
+  index: number,
+  provenance: ClinicalCandidateProvenance,
+): TerminologyCandidate | null {
+  const source = candidateSource(provenance.source);
+  if (!source || !provenance.display_value.trim()) return null;
+  const semanticTypes = (provenance.semantic_types ?? []).filter(Boolean);
+  return {
+    id: `${item.id}:candidate:${index}`,
+    query: item.search_terms_en?.[0] ?? item.source ?? provenance.display_value,
+    canonicalValue: provenance.display_value,
+    source,
+    cui: provenance.cui?.trim() || null,
+    semanticType: semanticTypes.length > 0 ? semanticTypes.join(", ") : null,
+    similarity: candidateSimilarity(provenance.similarity),
+  };
+}
+
+function unresolvedCandidate(item: ClinicalDraftReviewItem): TerminologyCandidate {
+  return {
+    id: `${item.id}:unresolved`,
+    query: item.search_terms_en?.[0] ?? item.source ?? "검색어 없음",
+    canonicalValue: null,
+    source: "UNRESOLVED",
+    cui: null,
+    semanticType: null,
+    similarity: null,
+  };
+}
+
+export function workflowDraftToFieldProvenance(
+  workflow: Pick<ClinicalRecordWorkflowResponse, "api3" | "draft">,
+): FieldProvenanceMap {
+  const segments = new Map(
+    workflow.api3.segments.map((segment) => [String(segment.id), segment]),
+  );
+  const output: FieldProvenanceMap = {};
+  const fields = workflow.draft.fields as unknown as Record<string, ClinicalDraftField>;
+
+  const ensureField = (clinicalFieldId: string): FieldProvenance | null => {
+    const fieldKey = recordFieldKeyByClinicalId[clinicalFieldId];
+    if (!fieldKey) return null;
+    output[fieldKey] ??= { fieldKey, evidence: [], candidates: [] };
+    return output[fieldKey] ?? null;
+  };
+
+  const addEvidence = (
+    fieldId: string,
+    segmentId: string | number | undefined,
+    fallback?: ClinicalDraftReviewItem,
+  ) => {
+    if (segmentId === undefined) return;
+    const target = ensureField(fieldId);
+    if (!target || target.evidence.some((item) => item.segmentId === String(segmentId))) return;
+    const segment = segments.get(String(segmentId));
+    const raw = segment?.raw_text ?? fallback?.evidence ?? "";
+    if (!raw) return;
+    const correctedText = segment?.corrected_text?.trim();
+    const corrected = correctedText && correctedText !== raw ? correctedText : null;
+    const field = fields[fieldId];
+    const evidence: PatientEvidence = {
+      segmentId: String(segmentId),
+      timestamp: evidenceTimestamp(
+        segment?.start ?? fallback?.evidence_start,
+        segment?.end ?? fallback?.evidence_end,
+      ),
+      speaker: segment?.speaker?.trim() || "화자 미확인",
+      raw,
+      corrected,
+      appliedValue: field?.value ?? "",
+    };
+    target.evidence.push(evidence);
+  };
+
+  Object.entries(fields).forEach(([fieldId, field]) => {
+    field.evidence.forEach((evidence) =>
+      addEvidence(fieldId, evidence.source_segment_id ?? evidence.segment_id),
+    );
+    const target = ensureField(fieldId);
+    field.applied_candidates.forEach((candidate, index) => {
+      target?.candidates.push(appliedCandidate(fieldId, index, candidate));
+    });
+  });
+
+  workflow.draft.review_items.forEach((item) => {
+    const target = ensureField(item.field_id);
+    if (!target) return;
+    addEvidence(item.field_id, item.segment_id, item);
+    const candidates = (item.candidate_provenance ?? [])
+      .map((provenance, index) => reviewCandidate(item, index, provenance))
+      .filter((candidate): candidate is TerminologyCandidate => candidate !== null);
+    if (candidates.length > 0) {
+      target.candidates.push(...candidates);
+    } else if (item.needs_review === true) {
+      target.candidates.push(unresolvedCandidate(item));
+    }
+  });
+
+  Object.values(output).forEach((field) => {
+    if (!field) return;
+    const seen = new Set<string>();
+    field.candidates = field.candidates.filter((candidate) => {
+      const identity = [candidate.source, candidate.canonicalValue, candidate.cui].join("|");
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
+  });
+
+  return Object.fromEntries(
+    Object.entries(output).filter(
+      ([, field]) => field && (field.evidence.length > 0 || field.candidates.length > 0),
+    ),
+  ) as FieldProvenanceMap;
 }

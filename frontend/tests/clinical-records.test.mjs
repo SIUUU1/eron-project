@@ -10,6 +10,7 @@ import {
   parseWhisperDraftJson,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
+  workflowDraftToFieldProvenance,
   workflowDraftToFieldStatuses,
 } from "../src/api/clinical-records.ts";
 
@@ -139,6 +140,173 @@ test("ClinicalNLP의 구조화 상태를 응급기록 필드 상태로 변환한
     impression: "complete",
     outcome: "complete",
   });
+});
+
+test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필드별로 연결한다", () => {
+  const field = (fieldId) => ({
+    field_id: fieldId,
+    value: "",
+    information_status: "PRESENT",
+    suggestion_status: "UNCHANGED",
+    evidence: [],
+    applied_candidates: [],
+  });
+  const fields = {
+    chief_complaint: field("chief_complaint"),
+    pain_assessment: field("pain_assessment"),
+    history_of_present_illness: field("history_of_present_illness"),
+    past_history: field("past_history"),
+    medications: field("medications"),
+    drug_allergy: field("drug_allergy"),
+    social_history: field("social_history"),
+    review_of_systems: field("review_of_systems"),
+    physical_examination: field("physical_examination"),
+    treatment_plan: field("treatment_plan"),
+    impression: field("impression"),
+    outcome: field("outcome"),
+  };
+  fields.chief_complaint.value = "호흡곤란";
+  fields.chief_complaint.evidence = [{ source_segment_id: "seg_1" }];
+  fields.chief_complaint.applied_candidates = [
+    {
+      collection: "symptom_terms",
+      entity_id: "symptom:dyspnea",
+      display_value: "호흡곤란",
+      source: "RAW_EXACT",
+    },
+  ];
+  fields.impression.value = "급성 폐쇄각 녹내장 가능성";
+  fields.impression.evidence = [{ source_segment_id: "seg_2" }];
+  fields.medications.value = "암로디핀 확인 필요";
+
+  const result = workflowDraftToFieldProvenance({
+    api3: {
+      segments: [
+        {
+          id: "seg_1",
+          start: 12.4,
+          end: 15.8,
+          speaker: "환자",
+          raw_text: "숨이 차요.",
+          corrected_text: "숨이 차요.",
+        },
+        {
+          id: "seg_2",
+          start: 30.43,
+          end: 32.99,
+          speaker: "의료진",
+          raw_text: "어큐트 앵글 클로저 글루코마 가능성입니다.",
+          corrected_text: "Acute angle-closure glaucoma 가능성입니다.",
+        },
+      ],
+    },
+    draft: {
+      fields,
+      review_items: [
+        {
+          id: "seg_2:0",
+          field_id: "impression",
+          segment_id: "seg_2",
+          source: "어큐트 앵글 클로저 글루코마",
+          evidence: "어큐트 앵글 클로저 글루코마 가능성입니다.",
+          evidence_start: 30.43,
+          evidence_end: 32.99,
+          search_terms_en: ["acute angle closure glaucoma"],
+          candidate_provenance: [
+            {
+              display_value: "Acute angle-closure glaucoma",
+              source: "UMLS",
+              cui: "C0154946",
+              semantic_types: ["T047"],
+              similarity: 0.91,
+            },
+            {
+              display_value: "Angle-closure glaucoma",
+              source: "NGRAM_FALLBACK",
+              cui: null,
+              semantic_types: [],
+              similarity: 0.83,
+            },
+          ],
+          needs_review: true,
+        },
+        {
+          id: "seg_3:0",
+          field_id: "medications",
+          segment_id: "seg_3",
+          source: "암로디핀",
+          evidence: "암로디핀을 복용합니다.",
+          evidence_start: 45,
+          evidence_end: 48,
+          search_terms_en: ["amlodipine"],
+          candidate_provenance: [],
+          candidates: [],
+          needs_review: true,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(result.chiefComplaint, {
+    fieldKey: "chiefComplaint",
+    evidence: [
+      {
+        segmentId: "seg_1",
+        timestamp: "00:12.40–00:15.80",
+        speaker: "환자",
+        raw: "숨이 차요.",
+        corrected: null,
+        appliedValue: "호흡곤란",
+      },
+    ],
+    candidates: [
+      {
+        id: "chief_complaint:applied:0",
+        query: "호흡곤란",
+        canonicalValue: "호흡곤란",
+        source: "RAW_EXACT",
+        cui: null,
+        semanticType: null,
+        similarity: null,
+      },
+    ],
+  });
+  assert.deepEqual(
+    result.impression.candidates.map((candidate) => ({
+      canonicalValue: candidate.canonicalValue,
+      source: candidate.source,
+      cui: candidate.cui,
+      semanticType: candidate.semanticType,
+      similarity: candidate.similarity,
+    })),
+    [
+      {
+        canonicalValue: "Acute angle-closure glaucoma",
+        source: "UMLS",
+        cui: "C0154946",
+        semanticType: "T047",
+        similarity: 0.91,
+      },
+      {
+        canonicalValue: "Angle-closure glaucoma",
+        source: "NGRAM_FALLBACK",
+        cui: null,
+        semanticType: null,
+        similarity: 0.83,
+      },
+    ],
+  );
+  assert.deepEqual(result.medication.candidates, [
+    {
+      id: "seg_3:0:unresolved",
+      query: "amlodipine",
+      canonicalValue: null,
+      source: "UNRESOLVED",
+      cui: null,
+      semanticType: null,
+      similarity: null,
+    },
+  ]);
 });
 
 test("초안 API 오류를 의료진이 이해할 수 있는 안내로 구분한다", () => {

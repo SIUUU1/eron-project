@@ -30,10 +30,12 @@ import {
   parseWhisperDraftJson,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
+  workflowDraftToFieldProvenance,
   workflowDraftToFieldStatuses,
   type DraftDialogueTurn,
 } from "@/api/clinical-records";
 import type { WhisperDraftRequest } from "@/api/types";
+import { FieldProvenancePanel } from "@/components/records/field-provenance-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,6 +73,7 @@ import {
   type EmergencyRecord,
   type RecordFieldKey,
 } from "@/lib/mock-data";
+import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
   loader: ({ params }) => {
@@ -156,6 +159,8 @@ function RecordWorkflowPage() {
   const [recording, setRecording] = useState<"idle" | "on" | "paused">("idle");
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
+  const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>({});
+  const [provenanceRevision, setProvenanceRevision] = useState(0);
   const [clinicalFieldStatuses, setClinicalFieldStatuses] = useState<Record<
     RecordFieldKey,
     CheckStatus
@@ -201,6 +206,7 @@ function RecordWorkflowPage() {
     setDialogue(sampleDialogue);
     setUploadedWhisperPayload(null);
     setUploadedWhisperFileName(null);
+    setFieldProvenance({});
     setClinicalFieldStatuses(null);
     setGenerated(false);
     setGenerationNotice(null);
@@ -221,6 +227,7 @@ function RecordWorkflowPage() {
       setUploadedWhisperPayload(payload);
       setUploadedWhisperFileName(file.name);
       setDialogue(whisperDraftToDialogue(payload));
+      setFieldProvenance({});
       setClinicalFieldStatuses(null);
       setGenerated(false);
       setChecked(false);
@@ -248,6 +255,8 @@ function RecordWorkflowPage() {
         uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue);
       const workflow = await createClinicalRecordDraft(request);
       setRecord(workflowDraftToEmergencyRecord(workflow));
+      setFieldProvenance(workflowDraftToFieldProvenance(workflow));
+      setProvenanceRevision((revision) => revision + 1);
       setClinicalFieldStatuses(workflowDraftToFieldStatuses(workflow));
       setGenerated(true);
       setChecked(false);
@@ -538,45 +547,57 @@ function RecordWorkflowPage() {
               ) : null}
               <ScrollArea className="h-[420px] pr-3">
                 <div className="space-y-3">
-                  {fieldOrder.map((key) => (
-                    <div key={key}>
-                      <label className="mb-1 flex items-center justify-between text-xs font-semibold">
-                        {recordFieldLabels[key]}
-                        {generated && (
-                          <Badge variant="outline" className={checkStatusMeta[statuses[key]].badge}>
-                            {checkStatusMeta[statuses[key]].label}
-                          </Badge>
+                  {fieldOrder.map((key) => {
+                    const provenance = fieldProvenance[key];
+                    return (
+                      <div key={key}>
+                        <label className="mb-1 flex items-center justify-between text-xs font-semibold">
+                          {recordFieldLabels[key]}
+                          {generated && (
+                            <Badge
+                              variant="outline"
+                              className={checkStatusMeta[statuses[key]].badge}
+                            >
+                              {checkStatusMeta[statuses[key]].label}
+                            </Badge>
+                          )}
+                        </label>
+                        {key === "outcome" ? (
+                          <Select
+                            {...(record.outcome ? { value: record.outcome } : {})}
+                            onValueChange={(val) => setField("outcome", val)}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="선택되지 않음" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {record.outcome && !outcomeOptions.includes(record.outcome) ? (
+                                <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
+                              ) : null}
+                              {outcomeOptions.map((o) => (
+                                <SelectItem key={o} value={o}>
+                                  {o}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Textarea
+                            value={record[key]}
+                            rows={key === "presentIllness" || key === "treatmentPlan" ? 3 : 2}
+                            placeholder="미확인"
+                            onChange={(e) => setField(key, e.target.value)}
+                          />
                         )}
-                      </label>
-                      {key === "outcome" ? (
-                        <Select
-                          {...(record.outcome ? { value: record.outcome } : {})}
-                          onValueChange={(val) => setField("outcome", val)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="선택되지 않음" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {record.outcome && !outcomeOptions.includes(record.outcome) ? (
-                              <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
-                            ) : null}
-                            {outcomeOptions.map((o) => (
-                              <SelectItem key={o} value={o}>
-                                {o}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <Textarea
-                          value={record[key]}
-                          rows={key === "presentIllness" || key === "treatmentPlan" ? 3 : 2}
-                          placeholder="미확인"
-                          onChange={(e) => setField(key, e.target.value)}
-                        />
-                      )}
-                    </div>
-                  ))}
+                        {generated && provenance ? (
+                          <FieldProvenancePanel
+                            key={`${provenanceRevision}:${key}`}
+                            provenance={provenance}
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  })}
                 </div>
               </ScrollArea>
               <div className="flex justify-end gap-2 border-t pt-3">

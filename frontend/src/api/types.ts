@@ -20,8 +20,58 @@ export interface WhisperDraftRequest {
 export interface ClinicalDraftField {
   field_id: string;
   value: string;
+  ai_original_value: string;
   suggestion_status: "UNCHANGED" | "AUTO_SUGGESTED" | "UNRESOLVED";
+  applied_candidates: ClinicalAppliedCandidate[];
   information_status: "PRESENT" | "NONE" | "NOT_ASSESSED" | "UNCERTAIN";
+  evidence: ClinicalDraftEvidence[];
+}
+
+export interface ClinicalAppliedCandidate {
+  collection: string;
+  entity_id: string;
+  display_value: string;
+  source: "RAW_EXACT" | "UMLS";
+}
+
+export interface ClinicalDraftEvidence {
+  source_segment_id?: string | number;
+  segment_id?: string | number;
+  [key: string]: unknown;
+}
+
+export interface ClinicalCandidateProvenance {
+  display_value: string;
+  source: "RAW_EXACT" | "UMLS" | "NGRAM_FALLBACK";
+  cui?: string | null;
+  semantic_types?: string[];
+  similarity?: number | null;
+}
+
+export interface ClinicalDraftReviewItem {
+  id: string;
+  type?: string;
+  field_id: string;
+  segment_id?: string | number;
+  source?: string;
+  evidence?: string;
+  evidence_start?: number;
+  evidence_end?: number;
+  candidates?: string[];
+  candidate_provenance?: ClinicalCandidateProvenance[];
+  search_terms_en?: string[];
+  needs_review?: boolean;
+  [key: string]: unknown;
+}
+
+export interface ClinicalApi3Segment {
+  id: string | number;
+  start?: number;
+  end?: number;
+  speaker?: string;
+  raw_text?: string;
+  corrected_text?: string;
+  [key: string]: unknown;
 }
 
 export interface ClinicalDraftFields {
@@ -45,9 +95,13 @@ export interface ClinicalRecordWorkflowResponse {
   record_status: "DRAFT";
   workflow_phase: "DRAFT_GENERATION";
   completed_at: null;
+  api3: {
+    segments: ClinicalApi3Segment[];
+    [key: string]: unknown;
+  };
   draft: {
     fields: ClinicalDraftFields;
-    review_items: unknown[];
+    review_items: ClinicalDraftReviewItem[];
   };
   errors: unknown[];
 }
