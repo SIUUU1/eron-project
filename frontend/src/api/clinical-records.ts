@@ -1,6 +1,10 @@
 import { ApiError, apiPost } from "./client.ts";
-import type { ClinicalRecordWorkflowResponse, WhisperDraftRequest } from "./types.ts";
-import type { EmergencyRecord } from "../lib/mock-data.ts";
+import type {
+  ClinicalDraftField,
+  ClinicalRecordWorkflowResponse,
+  WhisperDraftRequest,
+} from "./types.ts";
+import type { CheckStatus, EmergencyRecord, RecordFieldKey } from "../lib/mock-data.ts";
 
 export interface DraftDialogueTurn {
   speaker: string;
@@ -125,5 +129,36 @@ export function workflowDraftToEmergencyRecord(
     treatmentPlan: fields.treatment_plan.value,
     impression: fields.impression.value,
     outcome: fields.outcome.value,
+  };
+}
+
+function clinicalDraftFieldStatus(field: ClinicalDraftField): CheckStatus {
+  if (
+    field.information_status === "UNCERTAIN" ||
+    field.suggestion_status === "UNRESOLVED"
+  ) {
+    return "review";
+  }
+  if (field.information_status === "NOT_ASSESSED") return "missing";
+  return "complete";
+}
+
+export function workflowDraftToFieldStatuses(
+  workflow: Pick<ClinicalRecordWorkflowResponse, "draft">,
+): Record<RecordFieldKey, CheckStatus> {
+  const fields = workflow.draft.fields;
+  return {
+    chiefComplaint: clinicalDraftFieldStatus(fields.chief_complaint),
+    painAssessment: clinicalDraftFieldStatus(fields.pain_assessment),
+    presentIllness: clinicalDraftFieldStatus(fields.history_of_present_illness),
+    pastHistory: clinicalDraftFieldStatus(fields.past_history),
+    medication: clinicalDraftFieldStatus(fields.medications),
+    allergy: clinicalDraftFieldStatus(fields.drug_allergy),
+    socialHistory: clinicalDraftFieldStatus(fields.social_history),
+    systemReview: clinicalDraftFieldStatus(fields.review_of_systems),
+    physicalExam: clinicalDraftFieldStatus(fields.physical_examination),
+    treatmentPlan: clinicalDraftFieldStatus(fields.treatment_plan),
+    impression: clinicalDraftFieldStatus(fields.impression),
+    outcome: clinicalDraftFieldStatus(fields.outcome),
   };
 }

@@ -20,6 +20,8 @@ export interface WhisperDraftRequest {
 export interface ClinicalDraftField {
   field_id: string;
   value: string;
+  suggestion_status: "UNCHANGED" | "AUTO_SUGGESTED" | "UNRESOLVED";
+  information_status: "PRESENT" | "NONE" | "NOT_ASSESSED" | "UNCERTAIN";
 }
 
 export interface ClinicalDraftFields {

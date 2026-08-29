@@ -30,6 +30,7 @@ import {
   parseWhisperDraftJson,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
+  workflowDraftToFieldStatuses,
   type DraftDialogueTurn,
 } from "@/api/clinical-records";
 import type { WhisperDraftRequest } from "@/api/types";
@@ -155,6 +156,10 @@ function RecordWorkflowPage() {
   const [recording, setRecording] = useState<"idle" | "on" | "paused">("idle");
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
+  const [clinicalFieldStatuses, setClinicalFieldStatuses] = useState<Record<
+    RecordFieldKey,
+    CheckStatus
+  > | null>(null);
   const [generated, setGenerated] = useState(false);
   const [generationNotice, setGenerationNotice] = useState<{
     kind: "partial" | "error";
@@ -176,9 +181,9 @@ function RecordWorkflowPage() {
 
   const statuses = useMemo(() => {
     const out = {} as Record<RecordFieldKey, CheckStatus>;
-    fieldOrder.forEach((k) => (out[k] = statusOf(record[k])));
+    fieldOrder.forEach((k) => (out[k] = clinicalFieldStatuses?.[k] ?? statusOf(record[k])));
     return out;
-  }, [record]);
+  }, [clinicalFieldStatuses, record]);
 
   const missingRequired = requiredFields.filter((k) => statuses[k] === "missing");
   const reviewCount = fieldOrder.filter((k) => statuses[k] === "review").length;
@@ -196,6 +201,7 @@ function RecordWorkflowPage() {
     setDialogue(sampleDialogue);
     setUploadedWhisperPayload(null);
     setUploadedWhisperFileName(null);
+    setClinicalFieldStatuses(null);
     setGenerated(false);
     setGenerationNotice(null);
     toast.success("샘플 환자-의료진 대화를 불러왔습니다.");
@@ -215,6 +221,7 @@ function RecordWorkflowPage() {
       setUploadedWhisperPayload(payload);
       setUploadedWhisperFileName(file.name);
       setDialogue(whisperDraftToDialogue(payload));
+      setClinicalFieldStatuses(null);
       setGenerated(false);
       setChecked(false);
       setGenerationNotice(null);
@@ -241,6 +248,7 @@ function RecordWorkflowPage() {
         uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue);
       const workflow = await createClinicalRecordDraft(request);
       setRecord(workflowDraftToEmergencyRecord(workflow));
+      setClinicalFieldStatuses(workflowDraftToFieldStatuses(workflow));
       setGenerated(true);
       setChecked(false);
       const partialMessage = clinicalDraftPartialMessage(workflow);
@@ -290,8 +298,12 @@ function RecordWorkflowPage() {
     setStep(3);
   };
 
-  const setField = (key: RecordFieldKey, value: string) =>
+  const setField = (key: RecordFieldKey, value: string) => {
     setRecord((prev) => ({ ...prev, [key]: value }));
+    setClinicalFieldStatuses((prev) =>
+      prev ? { ...prev, [key]: statusOf(value) } : prev,
+    );
+  };
 
   return (
     <div className="space-y-5">

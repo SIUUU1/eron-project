@@ -10,6 +10,7 @@ import {
   parseWhisperDraftJson,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
+  workflowDraftToFieldStatuses,
 } from "../src/api/clinical-records.ts";
 
 test("Whisper JSON의 원문 segment와 추가 필드를 변경하지 않고 읽는다", () => {
@@ -95,6 +96,48 @@ test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 �
     treatmentPlan: "산소 적용 및 모니터링",
     impression: "폐렴 의증",
     outcome: "진료 진행 중",
+  });
+});
+
+test("ClinicalNLP의 구조화 상태를 응급기록 필드 상태로 변환한다", () => {
+  const field = (fieldId, informationStatus, suggestionStatus = "UNCHANGED") => ({
+    field_id: fieldId,
+    value: `${fieldId} 값`,
+    information_status: informationStatus,
+    suggestion_status: suggestionStatus,
+  });
+  const workflow = {
+    draft: {
+      fields: {
+        chief_complaint: field("chief_complaint", "PRESENT"),
+        pain_assessment: field("pain_assessment", "NONE"),
+        history_of_present_illness: field("history_of_present_illness", "NOT_ASSESSED"),
+        past_history: field("past_history", "UNCERTAIN"),
+        medications: field("medications", "PRESENT", "UNRESOLVED"),
+        drug_allergy: field("drug_allergy", "NONE"),
+        social_history: field("social_history", "PRESENT"),
+        review_of_systems: field("review_of_systems", "PRESENT"),
+        physical_examination: field("physical_examination", "PRESENT"),
+        treatment_plan: field("treatment_plan", "PRESENT"),
+        impression: field("impression", "PRESENT"),
+        outcome: field("outcome", "PRESENT"),
+      },
+    },
+  };
+
+  assert.deepEqual(workflowDraftToFieldStatuses(workflow), {
+    chiefComplaint: "complete",
+    painAssessment: "complete",
+    presentIllness: "missing",
+    pastHistory: "review",
+    medication: "review",
+    allergy: "complete",
+    socialHistory: "complete",
+    systemReview: "complete",
+    physicalExam: "complete",
+    treatmentPlan: "complete",
+    impression: "complete",
+    outcome: "complete",
   });
 });
 
