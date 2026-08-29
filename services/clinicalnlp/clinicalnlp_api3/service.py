@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
 from typing import Any, Mapping
 
 from .http_service import ClinicalNlpHttpServer, create_http_server
@@ -218,34 +219,22 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
 
     os.environ["CLINICALNLP_POLICY_INDEX"] = str(settings.policy_index)
 
-    from .alias_feedback import (
-        VersionedAliasStore,
-        VersionedApprovedAliasRetriever,
-    )
     from .clinical_llm import OllamaCloudClinicalLlmClient
     from .medical_span_worker import MedicalSpanWorker
+    from .official_raw_exact import OfficialRawExactRetriever
     from .query_expansion import LlamaServerMedicalQueryExpander
     from .record_extractor import LlamaServerClinicalExtractor
-    from .retrieval import HybridRetriever, SqliteDictionaryRetriever
     from .runtime import create_clinical_runtime
     from .umls_query_resolver import (
         UmlsPrimaryMedicalQueryResolver,
         VerifiedLocalDictionary,
     )
-    from .vector_store import SqliteVectorRetriever
 
     try:
-        lexical = SqliteDictionaryRetriever(settings.db_root)
-        vector = (
-            SqliteVectorRetriever(settings.vector_index)
-            if settings.vector_index.is_file()
-            else None
-        )
-        base_retriever = HybridRetriever(lexical=lexical, vector=vector)
-        alias_store = VersionedAliasStore(settings.alias_db)
-        retriever = VersionedApprovedAliasRetriever(base_retriever, alias_store)
-    except (OSError, ValueError) as error:
+        official_raw_exact = OfficialRawExactRetriever(settings.db_root)
+    except (OSError, sqlite3.Error, ValueError) as error:
         raise AssetError("ClinicalNLP dictionary assets are unavailable") from error
+    vector_enabled = settings.vector_index.is_file()
 
     clinical_client = OllamaCloudClinicalLlmClient(
         settings.ollama_base_url,
@@ -292,8 +281,8 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         )
         verified_dictionary = VerifiedLocalDictionary(
             settings.db_root,
-            raw_retriever=retriever,
-            vector_index=settings.vector_index if vector is not None else None,
+            raw_retriever=official_raw_exact,
+            vector_index=settings.vector_index if vector_enabled else None,
         )
         medical_query_resolver = UmlsPrimaryMedicalQueryResolver(
             dictionary=verified_dictionary,
@@ -302,7 +291,10 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         span_worker.start()
 
     runtime = create_clinical_runtime(
-        retriever=retriever,
+        # This is also the resolver-failure/UMLS-disabled fallback. Keep it
+        # intentionally narrower than the translated UMLS dictionary search:
+        # no aliases, KCD, fuzzy matching, or vector lookup.
+        retriever=official_raw_exact,
         clinical_extractor=clinical_extractor,
         query_expander=query_expander,
         medical_query_resolver=medical_query_resolver,
@@ -310,7 +302,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
     return ServiceRuntimeBundle(
         runtime=runtime,
         span_worker=span_worker,
-        vector_enabled=vector is not None,
+        vector_enabled=vector_enabled,
     )
 
 

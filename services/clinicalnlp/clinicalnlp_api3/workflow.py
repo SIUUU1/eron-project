@@ -4,7 +4,6 @@ import copy
 import re
 from typing import Any, Iterable
 
-from .annotations import build_annotations, detect_numeric_annotations
 from .pipeline import run_api3
 
 
@@ -32,46 +31,6 @@ _CLINICIAN_REVIEW_ONLY_MATCH_TYPES = frozenset(
     }
 )
 
-
-def _pre_retrieve_for_query_expansion(
-    segments: list[dict[str, Any]], retriever: Any | None
-) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
-    if retriever is None:
-        return {}, []
-    candidates_by_segment: dict[str, list[dict[str, Any]]] = {}
-    covered_spans: list[dict[str, Any]] = []
-    seen_spans: set[tuple[Any, Any, Any, Any]] = set()
-    for segment in segments:
-        try:
-            candidates = list(
-                retriever.retrieve(raw_text=segment["text"], context=segments)
-            )
-        except Exception:
-            continue
-        candidates_by_segment[segment["id"]] = candidates
-        annotations = build_annotations(
-            segment["text"], candidates, max_candidates_per_span=5
-        ) + detect_numeric_annotations(segment["text"])
-        for annotation in annotations:
-            span = annotation.get("source_span") or {}
-            key = (
-                segment["id"],
-                span.get("start_char"),
-                span.get("end_char"),
-                span.get("text"),
-            )
-            if key in seen_spans or not isinstance(span.get("text"), str):
-                continue
-            seen_spans.add(key)
-            covered_spans.append(
-                {
-                    "segment_id": segment["id"],
-                    "text": span["text"],
-                    "start_char": span["start_char"],
-                    "end_char": span["end_char"],
-                }
-            )
-    return candidates_by_segment, covered_spans
 
 _SUPPORTED_FIELD_SOURCES = {
     "chief": "chief_complaint",
@@ -1805,9 +1764,10 @@ def run_clinical_workflow(
     from .query_expansion import run_query_expansion
 
     validated_segments = validate_whisper_payload(whisper_payload)
-    pre_retrieved_candidates, covered_spans = _pre_retrieve_for_query_expansion(
-        validated_segments, retriever
-    )
+    # Translation is the first retrieval preparation stage. Running the hybrid
+    # retriever here used to scan every dictionary and vector collection before
+    # translation, then repeat the same work in the resolver.
+    covered_spans: list[dict[str, Any]] = []
     query_expansion = run_query_expansion(
         query_expander,
         validated_segments,
@@ -1887,7 +1847,6 @@ def run_clinical_workflow(
         retriever=retriever,
         max_candidates_per_span=5,
         query_expansion=query_expansion,
-        pre_retrieved_candidates=pre_retrieved_candidates,
         resolved_candidates_by_segment=resolved_candidates_by_segment,
     )
     enriched_query_expansion = api3_document.pop("query_expansion", None)

@@ -5,8 +5,10 @@ from urllib.request import urlopen
 import json
 import threading
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from clinicalnlp_api3.service import (
+    build_service_runtime,
     ConfigurationError,
     ServiceSettings,
     prepare_service,
@@ -14,6 +16,28 @@ from clinicalnlp_api3.service import (
 
 
 class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
+    def test_umls_disabled_runtime_uses_only_official_raw_exact_fallback(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_UMLS_ENABLED": "false",
+                "CLINICALNLP_API3_DB_ROOT": "unused-dictionaries",
+                "CLINICALNLP_API3_VECTOR_INDEX": "unused-vector.sqlite",
+            }
+        )
+        official_fallback = object()
+
+        with patch(
+            "clinicalnlp_api3.official_raw_exact.OfficialRawExactRetriever",
+            return_value=official_fallback,
+        ), patch(
+            "clinicalnlp_api3.retrieval.SqliteDictionaryRetriever"
+        ) as legacy_lexical:
+            bundle = build_service_runtime(settings)
+
+        self.assertIs(bundle.runtime.retriever, official_fallback)
+        legacy_lexical.assert_not_called()
+
     def test_default_internal_http_port_is_8765(self):
         settings = ServiceSettings.from_mapping(
             {

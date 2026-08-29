@@ -19,6 +19,7 @@ from .medical_query_resolver import (
     ResolvedCandidate,
     UmlsCandidateProvenance,
 )
+from .official_raw_exact import OFFICIAL_REVIEW_STATUSES
 from .retrieval import DictionaryPaths
 from .vector_store import (
     MedicalHashEmbedder,
@@ -50,7 +51,6 @@ _ROUTE_ORDER = {
     "umls": 3,
     "ngram_fallback": 4,
 }
-_OFFICIAL_STATUSES = {"approved", "official", "verified"}
 _ENGLISH_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’/-]*")
 _ASCII_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _NGRAM_STOPWORDS = {
@@ -640,10 +640,10 @@ class VerifiedLocalDictionary:
                         if candidate.get("match_type") == "stt_alias_exact"
                         else (
                             "official"
-                            if entity.review_status in _OFFICIAL_STATUSES
+                            if entity.review_status in OFFICIAL_REVIEW_STATUSES
                             and str(
                                 candidate.get("review_status") or ""
-                            ).casefold() in _OFFICIAL_STATUSES
+                            ).casefold() in OFFICIAL_REVIEW_STATUSES
                             else "needs_review"
                         )
                     ),
@@ -1158,39 +1158,9 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             {"id": segment.segment_id, "text": segment.raw_text}
             for segment in document.segments
         ]
-        raw_identities_by_segment: dict[str, set[tuple[str, str]]] = {
+        resolved_identities_by_segment: dict[str, set[tuple[str, str]]] = {
             segment.segment_id: set() for segment in document.segments
         }
-        for segment in document.segments:
-            try:
-                raw_hits = self._dictionary.raw_matches(
-                    raw_text=segment.raw_text,
-                    context=context,
-                )
-            except Exception:
-                add_issue(
-                    "DICTIONARY_UNAVAILABLE",
-                    "dictionary_search",
-                    "baseline",
-                    segment.segment_id,
-                )
-                raw_hits = ()
-            for hit in raw_hits:
-                raw_identities_by_segment[segment.segment_id].add(
-                    (hit.match.collection, hit.match.entity_id)
-                )
-                candidates.append(
-                    ResolvedCandidate(
-                        segment_id=segment.segment_id,
-                        route=hit.route,
-                        review_status=hit.review_status,
-                        dictionary_match=hit.match,
-                        evidence=CandidateEvidence(
-                            scope="exact_raw_span",
-                            raw_span=hit.span,
-                        ),
-                    )
-                )
 
         projections = {
             segment.segment_id: _TranslatedProjection.build(
@@ -1271,9 +1241,9 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 segment_budget = min(MAX_QUERIES_PER_SEGMENT, document_budget)
                 worker_intervals: list[tuple[int, int]] = []
                 fallback_regions: list[tuple[int, int]] = []
-                translated_identities = set(
-                    raw_identities_by_segment[segment.segment_id]
-                )
+                translated_identities = resolved_identities_by_segment[
+                    segment.segment_id
+                ]
                 for source_span in sorted(
                     spans_by_segment.get(segment.segment_id, []),
                     key=lambda item: (
@@ -1458,6 +1428,43 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                             )
                     if planned_any and not region_matched:
                         unresolved_count += 1
+
+        # Official RAW matches are a post-UMLS safety net. They recover exact
+        # Korean canonical terms that translation/linking missed without
+        # allowing the RAW lane to suppress translated candidates.
+        for segment in document.segments:
+            try:
+                raw_hits = self._dictionary.raw_matches(
+                    raw_text=segment.raw_text,
+                    context=context,
+                )
+            except Exception:
+                add_issue(
+                    "DICTIONARY_UNAVAILABLE",
+                    "dictionary_search",
+                    "baseline",
+                    segment.segment_id,
+                )
+                raw_hits = ()
+            translated_identities = frozenset(
+                resolved_identities_by_segment[segment.segment_id]
+            )
+            for hit in raw_hits:
+                identity = (hit.match.collection, hit.match.entity_id)
+                if identity in translated_identities:
+                    continue
+                candidates.append(
+                    ResolvedCandidate(
+                        segment_id=segment.segment_id,
+                        route=hit.route,
+                        review_status=hit.review_status,
+                        dictionary_match=hit.match,
+                        evidence=CandidateEvidence(
+                            scope="exact_raw_span",
+                            raw_span=hit.span,
+                        ),
+                    )
+                )
 
         segment_order = {
             segment.segment_id: index

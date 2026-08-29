@@ -138,6 +138,30 @@ HTTP 상태 계약:
 - `partial` 응답도 유효한 초안·번역·후보를 보존한다.
 - frontend는 `partial`·`failed`·fallback 상태를 성공 초안처럼 숨기지 않는다.
 
+## Medical-term retrieval order
+
+운영 초안 생성은 다음 순서를 고정한다.
+
+```text
+RAW 보존
+→ 전체 문장 영문 번역
+→ UMLS span 추출
+→ UMLS surface·canonical 사전/Vector 검색
+→ 미해결 번역 구간 n-gram fallback
+→ 공식 한국어 정본 RAW exact fallback
+→ 후보 병합
+```
+
+번역 전에 전체 사전이나 VectorDB를 조회하지 않는다. RAW exact는 응급의학,
+검사·처치, 해부학, 의약품 성분의 공식 한국어 정본만 서비스 시작 시 만든 인메모리
+인덱스로 검색한다. 제품명, KCD, 별칭, 퍼지·Vector 검색은 RAW exact 경로에 포함하지
+않는다. UMLS가 이미 해결한 동일 사전 entity는 RAW exact 후보로 중복 추가하지 않으며,
+UMLS 장애 시에는 RAW exact가 비차단 안전망으로 동작한다.
+
+승인 별칭 저장소와 계약은 향후 의료진 검토·승인 체계를 위해 보존하지만 현재 운영
+검색 경로에서는 읽거나 후보에 반영하지 않는다. 어떠한 검색 후보도 초안에 자동
+확정하지 않는다.
+
 ## Configuration ownership
 
 ER:ON backend가 읽는 값:

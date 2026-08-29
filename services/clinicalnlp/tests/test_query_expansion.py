@@ -815,7 +815,7 @@ class ExpandedRetrievalTests(unittest.TestCase):
         self.assertEqual(observed["expanded_segments"], payload["segments"])
         self.assertEqual(
             observed["retrieval"],
-            ["코프가 심해졌어요.", "COPD가 있습니다.", "cough"],
+            ["코프가 심해졌어요.", "cough", "COPD가 있습니다."],
         )
         self.assertEqual(result["query_expansion"]["status"], "available")
         self.assertNotIn("query_expansion", result["api3"])
@@ -863,13 +863,13 @@ class ExpandedRetrievalTests(unittest.TestCase):
         self.assertEqual(feedback_candidate["entity_id"], "symptom:cough")
         self.assertEqual(feedback_candidate["source_entity_type"], "symptom")
 
-    def test_workflow_masks_existing_dictionary_spans_and_reuses_the_probe_results(self):
-        calls = []
+    def test_workflow_translates_before_dictionary_retrieval(self):
+        events = []
         text = "코프와 새증상"
 
         class Retriever:
             def retrieve(self, *, raw_text, context):
-                calls.append(raw_text)
+                events.append(("retrieve", raw_text))
                 if raw_text == text:
                     return [{
                         "collection": "emergency_terms",
@@ -902,6 +902,7 @@ class ExpandedRetrievalTests(unittest.TestCase):
 
         class Expander:
             def expand(self, segments, *, covered_spans):
+                events.append(("expand", None))
                 self.covered_spans = covered_spans
                 return {
                     "status": "available",
@@ -940,8 +941,15 @@ class ExpandedRetrievalTests(unittest.TestCase):
             clinical_extractor=Extractor(),
         )
 
-        self.assertEqual(calls, [text, "novel symptom"])
-        self.assertEqual(expander.covered_spans[0]["text"], "코프")
+        self.assertEqual(
+            events,
+            [
+                ("expand", None),
+                ("retrieve", text),
+                ("retrieve", "novel symptom"),
+            ],
+        )
+        self.assertEqual(expander.covered_spans, [])
         sources = [
             annotation["source_span"]["text"]
             for annotation in result["api3"]["segments"][0]["annotations"]
@@ -1002,6 +1010,72 @@ class ExpandedRetrievalTests(unittest.TestCase):
         self.assertEqual(result["query_expansion"]["status"], "unavailable")
         self.assertTrue(result["query_expansion"]["fallback_used"])
         self.assertEqual(result["query_expansion"]["error_code"], "TimeoutError")
+
+    def test_resolver_failure_preserves_official_raw_exact_fallback(self):
+        calls = []
+
+        class Expander:
+            def expand(self, segments, *, covered_spans):
+                return {
+                    "status": "available",
+                    "fallback_used": False,
+                    "items": [],
+                }
+
+        class Resolver:
+            mode = "umls_primary"
+
+            def resolve(self, document):
+                raise RuntimeError("UMLS worker crashed")
+
+        class OfficialRawExactFallback:
+            def retrieve(self, *, raw_text, context):
+                calls.append(raw_text)
+                return [{
+                    "collection": "emergency_terms",
+                    "entity_id": "emergency:cough",
+                    "canonical_ko": "기침",
+                    "canonical_en": "cough",
+                    "source_text": "기침",
+                    "start_char": 0,
+                    "end_char": 2,
+                    "match_type": "official_exact",
+                    "review_status": "official",
+                    "retrieval_score": 1.0,
+                }]
+
+        class Extractor:
+            def extract(self, payload):
+                return {
+                    "clinical_record": {},
+                    "unresolved_questions": [],
+                    "candidate_decisions": [],
+                }
+
+        result = run_clinical_workflow(
+            {
+                "segments": [{
+                    "id": "seg_0001",
+                    "start": 0,
+                    "end": 1,
+                    "text": "기침",
+                }]
+            },
+            retriever=OfficialRawExactFallback(),
+            query_expander=Expander(),
+            medical_query_resolver=Resolver(),
+            clinical_extractor=Extractor(),
+            include_query_resolution_summary=True,
+        )
+
+        self.assertEqual(calls, ["기침"])
+        self.assertEqual(
+            result["api3"]["segments"][0]["annotations"][0]["candidates"][0][
+                "match_type"
+            ],
+            "official_exact",
+        )
+        self.assertEqual(result["query_resolution"]["status"], "partial")
 
 if __name__ == "__main__":
     unittest.main()

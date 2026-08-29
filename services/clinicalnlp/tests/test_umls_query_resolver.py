@@ -18,6 +18,7 @@ from clinicalnlp_api3.medical_query_resolver import (
     MedicalQuerySegment,
 )
 from clinicalnlp_api3.medical_span_worker import MedicalSpanLinkOutcome
+from clinicalnlp_api3.official_raw_exact import OfficialRawExactRetriever
 from clinicalnlp_api3.retrieval import SqliteDictionaryRetriever
 from clinicalnlp_api3.umls_query_resolver import (
     UmlsPrimaryMedicalQueryResolver,
@@ -31,7 +32,8 @@ def _create_dictionary_fixture(root: Path) -> None:
         db.executescript(
             """
             CREATE TABLE ingredients(
-                ingredient_id INTEGER, canonical_ko TEXT, canonical_en TEXT
+                ingredient_id INTEGER, canonical_ko TEXT, canonical_en TEXT,
+                concept_status TEXT DEFAULT 'OFFICIAL_CODED'
             );
             CREATE TABLE products(
                 item_id TEXT, product_name_ko TEXT, product_name_en TEXT
@@ -242,7 +244,157 @@ class _ScoreByQueryDictionary:
         )
 
 
+class OfficialRawExactRetrieverTests(unittest.TestCase):
+    def test_matches_only_official_canonical_korean_terms(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _create_dictionary_fixture(root)
+            with closing(
+                sqlite3.connect(root / "ERON_의약품용어_DB_v1.sqlite")
+            ) as db:
+                db.execute(
+                    "INSERT INTO ingredients VALUES"
+                    "(10, '암로디핀', 'amlodipine', 'OFFICIAL_CODED')"
+                )
+                db.execute(
+                    "INSERT INTO ingredients VALUES"
+                    "(11, '시험성분', 'test ingredient', 'PENDING')"
+                )
+                db.execute(
+                    "INSERT INTO products VALUES('20', '엠로딘정', 'M-lodipine Tab.')"
+                )
+                db.commit()
+            with closing(
+                sqlite3.connect(root / "ERON_검사처치시술용어_DB_v1.sqlite")
+            ) as db:
+                db.execute(
+                    "INSERT INTO clinical_terms VALUES"
+                    "(2, '검사', '흉부 CT', 'chest CT', 'official')"
+                )
+                db.commit()
+            with closing(sqlite3.connect(root / "ERON_anatomy_terms.sqlite")) as db:
+                db.execute(
+                    "INSERT INTO anatomical_terms VALUES"
+                    "(3, '심방', 'atrium', 'atrium', 'verified')"
+                )
+                db.commit()
+            with closing(
+                sqlite3.connect(root / "ERON_응급의학용어_DB_v1.sqlite")
+            ) as db:
+                db.execute("INSERT INTO aliases VALUES(4, 1, '숨참', 'colloquial', 'official')")
+                db.commit()
+            with closing(sqlite3.connect(root / "hira_kcd9.sqlite")) as db:
+                db.execute(
+                    "INSERT INTO kcd_terms VALUES"
+                    "(4, 'I489', '심방세동', 'atrial fibrillation', 1)"
+                )
+                db.commit()
+
+            retriever = OfficialRawExactRetriever(root)
+            raw_text = (
+                "기침과 암로디핀 및 시험성분 복용, "
+                "흉부 CT에서 심방 확인. 숨참과 심방세동"
+            )
+            matches = retriever.retrieve(raw_text=raw_text, context=[])
+
+        self.assertEqual(
+            {(match["collection"], match["entity_id"]) for match in matches},
+            {
+                ("emergency_terms", "emergency:1"),
+                ("drug_terms", "drug:ingredient:10"),
+                ("procedure_terms", "procedure:2"),
+                ("anatomy_terms", "anatomy:3"),
+            },
+        )
+        self.assertNotIn("숨참", {match["source_text"] for match in matches})
+        self.assertNotIn("심방세동", {match["source_text"] for match in matches})
+        self.assertNotIn("시험성분", {match["source_text"] for match in matches})
+        self.assertTrue(all(match["match_type"] == "official_exact" for match in matches))
+        self.assertTrue(
+            all(
+                raw_text[match["start_char"] : match["end_char"]]
+                == match["source_text"]
+                for match in matches
+            )
+        )
+
+
 class UmlsPrimaryResolverTests(unittest.TestCase):
+    def test_umls_resolves_before_official_raw_exact_fallback(self):
+        events: list[str] = []
+
+        class Linker:
+            def link(self, translated_segments, *, lane):
+                del translated_segments, lane
+                events.append("umls")
+                return MedicalSpanLinkOutcome(
+                    status="linked",
+                    spans=(
+                        {
+                            "segment_id": "seg_1",
+                            "text": "cough",
+                            "start_char": 0,
+                            "end_char": 5,
+                            "umls_candidates": [
+                                {
+                                    "cui": "C0010200",
+                                    "canonical_name": "cough",
+                                    "semantic_types": ["T184"],
+                                    "linking_score": 0.99,
+                                }
+                            ],
+                        },
+                    ),
+                    extractor=MappingProxyType({"threshold": 0.8}),
+                    generation=1,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _create_dictionary_fixture(root)
+            delegate = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+            )
+
+            class Dictionary:
+                def raw_matches(self, *, raw_text, context):
+                    events.append("raw_exact")
+                    return delegate.raw_matches(raw_text=raw_text, context=context)
+
+                def search(self, query_text, *, limit, collections=None):
+                    events.append("dictionary_search")
+                    return delegate.search(
+                        query_text,
+                        limit=limit,
+                        collections=collections,
+                    )
+
+                def search_exact(self, query_text, *, limit, collections=None):
+                    return delegate.search_exact(
+                        query_text,
+                        limit=limit,
+                        collections=collections,
+                    )
+
+            resolution = UmlsPrimaryMedicalQueryResolver(
+                dictionary=Dictionary(),
+                span_linker=Linker(),
+            ).resolve(
+                MedicalQueryDocument(
+                    segments=(
+                        MedicalQuerySegment(
+                            segment_id="seg_1",
+                            raw_text="기침",
+                            translated_text_en="cough",
+                        ),
+                    )
+                )
+            )
+
+        self.assertEqual(events, ["umls", "dictionary_search", "raw_exact"])
+        self.assertEqual([candidate.route for candidate in resolution.candidates], ["umls"])
+
     def test_approved_stt_loanword_alias_stays_review_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -472,7 +624,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
 
         self.assertEqual(resolution.candidates, ())
 
-    def test_raw_identity_wins_over_duplicate_translated_candidate(self):
+    def test_umls_identity_wins_over_duplicate_raw_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _create_dictionary_fixture(root)
@@ -519,7 +671,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertEqual(resolution.umls_query_count, 1)
         self.assertEqual(
             [candidate.route for candidate in resolution.candidates],
-            ["raw_exact"],
+            ["umls"],
         )
 
     def test_worker_requests_are_batched_at_fifty_segments(self):

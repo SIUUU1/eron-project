@@ -22,7 +22,14 @@ docker run --rm --env-file services/clinicalnlp/.env -p 8765:8765 \
 
 The dictionary, medical-vector, policy-vector, and scispaCy/UMLS assets are
 runtime mounts and must not be committed or copied into the image. The alias
-database is the only writable runtime artifact.
+database mount is reserved for a future clinician-approved feedback workflow;
+the current draft runtime does not read, promote, or apply approved aliases.
+
+Runtime medical-term retrieval translates the dialogue before retrieval, runs
+UMLS and bounded translated-term lookup, then applies an official Korean RAW
+exact fallback. The RAW fallback is built once in memory from canonical
+emergency, procedure, anatomy, and drug-ingredient terms. It excludes product
+names, KCD codes, aliases, fuzzy matching, and vector search.
 
 `GET /health` returns HTTP 200 only when required configuration and dictionary
 assets are ready. Missing configuration or assets keeps the process available
