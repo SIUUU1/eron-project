@@ -1,2 +1,23 @@
 # eron-project
 위험 신호는 놓치지 않고, 기록의 빈틈은 남기지 않게.  ER:ON, 더 이로운 응급실을 만들다.
+
+## 음성 기반 응급기록 초안
+
+선택적 `stt` 프로필은 API1의 비동기 계약을 유지하는 Groq Whisper 내부 서비스를 실행합니다.
+
+1. `services/whisper/.env.example`을 `services/whisper/.env`로 복사하고 Groq 키를 입력합니다.
+2. 다음 명령으로 Whisper와 ClinicalNLP를 함께 실행합니다.
+
+```sh
+docker compose --profile clinical --profile stt up -d --build
+```
+
+브라우저에서 음성 파일을 선택하면 multipart `audio` 필드를 받는
+`POST /api/clinical-records/transcribe`가 즉시 API1을 실행합니다. 반환된 Whisper
+segment는 대화 기록에 표시되고, 사용자가 초안 생성을 누르면 같은 Whisper JSON을
+`POST /api/clinical-records/draft`로 전달합니다. 기존 통합 경로인
+`POST /api/clinical-records/draft/audio`도 호환성을 위해 유지합니다. Whisper
+컨테이너는 호스트 포트를 공개하지 않으므로 OCI ingress 규칙이 필요하지 않습니다.
+
+음성은 Groq Cloud로 전송됩니다. 합성 또는 적절히 비식별화되었고 외부 전송이
+승인된 데이터만 사용해야 합니다.

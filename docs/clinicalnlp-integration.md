@@ -97,17 +97,24 @@ errors
 
 ## ER:ON backend interface
 
-프론트가 호출하는 공개 endpoint는 다음 하나로 제한한다.
+프론트가 호출하는 공개 endpoint는 다음과 같다.
 
 ```http
+POST /api/clinical-records/transcribe
+Content-Type: multipart/form-data
+
 POST /api/clinical-records/draft
 Content-Type: application/json
 ```
 
-요청 본문은 Internal ClinicalNLP interface와 동일한 Whisper JSON이다. backend
-adapter는 payload를 임상적으로 해석하거나 재작성하지 않는다. 입력 계약을 확인한 뒤
-`RECORD_AI_URL`의 `/v2/clinical-workflows`로 전달하고, 응답을 정본 Schema로 검증해
-반환한다.
+음성 파일을 선택하면 `/transcribe`가 API1의 Whisper JSON을 반환하고 프론트는 그
+segment를 대화 기록에 먼저 표시한다. 초안 생성 요청 본문은 Internal ClinicalNLP
+interface와 동일한 Whisper JSON이다. backend adapter는 payload를 임상적으로
+해석하거나 재작성하지 않는다. 입력 계약을 확인한 뒤 `RECORD_AI_URL`의
+`/v2/clinical-workflows`로 전달하고, 응답을 정본 Schema로 검증해 반환한다.
+
+기존 `POST /api/clinical-records/draft/audio` 통합 경로는 호환성을 위해 유지하지만,
+운영 UI는 STT 결과를 먼저 확인할 수 있도록 `/transcribe`와 `/draft`를 순서대로 호출한다.
 
 HTTP 상태 계약:
 

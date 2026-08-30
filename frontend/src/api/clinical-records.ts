@@ -1,4 +1,4 @@
-import { ApiError, apiPost } from "./client.ts";
+import { ApiError, apiPost, apiPostFormData } from "./client.ts";
 import type {
   ClinicalAppliedCandidate,
   ClinicalCandidateProvenance,
@@ -91,6 +91,54 @@ export function createClinicalRecordDraft(
     request,
     signal,
   );
+}
+
+export function createClinicalRecordDraftFromAudio(
+  audio: File,
+  signal?: AbortSignal,
+): Promise<ClinicalRecordWorkflowResponse> {
+  const body = new FormData();
+  body.append("audio", audio);
+  return apiPostFormData<ClinicalRecordWorkflowResponse>(
+    "/api/clinical-records/draft/audio",
+    body,
+    signal,
+  );
+}
+
+export function transcribeClinicalRecordAudio(
+  audio: File,
+  signal?: AbortSignal,
+): Promise<WhisperDraftRequest> {
+  const body = new FormData();
+  body.append("audio", audio);
+  return apiPostFormData<WhisperDraftRequest>(
+    "/api/clinical-records/transcribe",
+    body,
+    signal,
+  );
+}
+
+export function clinicalAudioTranscriptionErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) {
+    return "음성 파일을 인식하지 못했습니다.";
+  }
+  switch (error.status) {
+    case 0:
+      return "서버에 연결할 수 없습니다.";
+    case 400:
+      return "음성 파일을 읽을 수 없습니다.";
+    case 413:
+      return "음성 파일은 25MB 이하여야 합니다.";
+    case 502:
+      return "음성 인식 결과를 확인하지 못했습니다. 다시 시도해 주세요.";
+    case 503:
+      return "음성 인식 서비스를 사용할 수 없습니다.";
+    case 504:
+      return "음성 인식 시간이 초과되었습니다. 다시 시도해 주세요.";
+    default:
+      return "음성 파일을 인식하지 못했습니다.";
+  }
 }
 
 export function clinicalDraftErrorMessage(error: unknown): string {

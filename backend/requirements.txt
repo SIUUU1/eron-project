@@ -4,3 +4,4 @@ jsonschema
 uvicorn[standard]
 SQLAlchemy
 psycopg[binary]
+python-multipart

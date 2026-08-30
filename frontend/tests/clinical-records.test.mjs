@@ -3,11 +3,14 @@ import test from "node:test";
 
 import { ApiError } from "../src/api/client.ts";
 import {
+  clinicalAudioTranscriptionErrorMessage,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
+  createClinicalRecordDraftFromAudio,
   dialogueToWhisperDraftRequest,
   parseWhisperDraftJson,
+  transcribeClinicalRecordAudio,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
   workflowDraftToFieldProvenance,
@@ -396,4 +399,99 @@ test("응급기록 초안 API에 Whisper JSON을 POST하고 응답을 보존한�
   assert.equal(receivedInit.headers["Content-Type"], "application/json");
   assert.deepEqual(JSON.parse(receivedInit.body), request);
   assert.deepEqual(result, workflow);
+});
+
+test("STT API 오류를 음성 인식 단계에 맞는 안내로 구분한다", () => {
+  assert.deepEqual(
+    [400, 413, 502, 503, 504, 0].map((status) =>
+      clinicalAudioTranscriptionErrorMessage(new ApiError(status, "internal_error")),
+    ),
+    [
+      "음성 파일을 읽을 수 없습니다.",
+      "음성 파일은 25MB 이하여야 합니다.",
+      "음성 인식 결과를 확인하지 못했습니다. 다시 시도해 주세요.",
+      "음성 인식 서비스를 사용할 수 없습니다.",
+      "음성 인식 시간이 초과되었습니다. 다시 시도해 주세요.",
+      "서버에 연결할 수 없습니다.",
+    ],
+  );
+});
+
+test("음성 파일은 multipart로 STT 통합 초안 API에 직접 전달한다", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const audio = new File(["synthetic-audio"], "synthetic.wav", { type: "audio/wav" });
+  const workflow = {
+    schema_version: "clinical-workflow-v2",
+    processing_status: "completed",
+    record_status: "DRAFT",
+    errors: [],
+  };
+  let receivedUrl;
+  let receivedInit;
+  globalThis.fetch = async (url, init) => {
+    receivedUrl = url;
+    receivedInit = init;
+    return new Response(JSON.stringify(workflow), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await createClinicalRecordDraftFromAudio(audio);
+
+  assert.equal(receivedUrl, "/api/clinical-records/draft/audio");
+  assert.equal(receivedInit.method, "POST");
+  assert.equal(receivedInit.headers.Accept, "application/json");
+  assert.equal(receivedInit.headers["Content-Type"], undefined);
+  assert.equal(receivedInit.body.get("audio"), audio);
+  assert.deepEqual(result, workflow);
+});
+
+test("음성 파일은 STT 전용 API에서 Whisper segment를 받아 대화 입력으로 사용한다", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const audio = new File(["synthetic-audio"], "synthetic.wav", { type: "audio/wav" });
+  const whisperPayload = {
+    api_version: "v1",
+    status: "completed",
+    language: "ko",
+    segments: [
+      {
+        id: "seg_0001",
+        start: 0,
+        end: 1.5,
+        text: "합성 흉통 문장",
+        speaker: "SPEAKER_00",
+      },
+    ],
+  };
+  let receivedUrl;
+  let receivedInit;
+  globalThis.fetch = async (url, init) => {
+    receivedUrl = url;
+    receivedInit = init;
+    return new Response(JSON.stringify(whisperPayload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await transcribeClinicalRecordAudio(audio);
+
+  assert.equal(receivedUrl, "/api/clinical-records/transcribe");
+  assert.equal(receivedInit.method, "POST");
+  assert.equal(receivedInit.headers.Accept, "application/json");
+  assert.equal(receivedInit.headers["Content-Type"], undefined);
+  assert.equal(receivedInit.body.get("audio"), audio);
+  assert.deepEqual(result, whisperPayload);
+  assert.deepEqual(whisperDraftToDialogue(result), [
+    { speaker: "SPEAKER_00", text: "합성 흉통 문장" },
+  ]);
 });

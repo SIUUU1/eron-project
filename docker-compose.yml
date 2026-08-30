@@ -55,6 +55,11 @@ services:
       # 초안 endpoint만 연결 실패를 503으로 반환한다.
       RECORD_AI_URL: ${RECORD_AI_URL:-http://clinicalnlp:8765}
       CLINICAL_RECORD_AI_TIMEOUT_SECONDS: ${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}
+      # stt profile이 꺼져 있으면 음성 초안 endpoint만 503을 반환한다.
+      # 오래된 로컬 STT_URL이 내부 서비스 주소를 덮어쓰지 못하게 고정한다.
+      STT_URL: http://whisper:8780
+      STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-300}
+      STT_POLL_INTERVAL_SECONDS: ${STT_POLL_INTERVAL_SECONDS:-0.5}
       # nginx 뒤에서는 동일 오리진이라 CORS 가 필요 없다.
       # 컨테이너 밖에서 vite dev 를 띄울 때만 채운다.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
@@ -115,6 +120,43 @@ services:
       - eron-network
 
 
+  whisper:
+    profiles:
+      - stt
+
+    build:
+      context: ./services/whisper
+      dockerfile: Dockerfile
+
+    container_name: eron-whisper
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+    # Groq API key는 이 Git 제외 파일에만 둔다.
+    env_file:
+      - path: ./services/whisper/.env
+        required: false
+
+    environment:
+      STT_PROVIDER: groq
+      STT_RUNTIME_DIR: /runtime/state
+      STT_CLOUD_WORKERS: ${STT_CLOUD_WORKERS:-3}
+      STT_MAX_UPLOAD_MB: ${STT_MAX_UPLOAD_MB:-25}
+      STT_MAX_AUDIO_DURATION_SECONDS: ${STT_MAX_AUDIO_DURATION_SECONDS:-7200}
+      TZ: ${TZ:-Asia/Seoul}
+
+    # backend가 Docker 내부 DNS 이름 whisper:8780으로만 호출한다.
+    expose:
+      - "8780"
+
+    volumes:
+      - eron_whisper_state:/runtime/state
+
+    networks:
+      - eron-network
+
+
   frontend:
     build:
       context: ./frontend
@@ -165,6 +207,9 @@ volumes:
 
   eron_postgres_data:
     name: eron-postgres-data
+
+  eron_whisper_state:
+    name: eron-whisper-state
 
 
 networks:

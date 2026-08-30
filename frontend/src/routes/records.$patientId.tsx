@@ -13,7 +13,6 @@ import {
   Mic,
   Pause,
   Save,
-  Sparkles,
   Square,
   Stethoscope,
   Upload,
@@ -23,11 +22,13 @@ import { type ChangeEvent, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
+  clinicalAudioTranscriptionErrorMessage,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
   dialogueToWhisperDraftRequest,
   parseWhisperDraftJson,
+  transcribeClinicalRecordAudio,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
   workflowDraftToFieldProvenance,
@@ -68,7 +69,6 @@ import {
   kcdCandidates,
   outcomeOptions,
   recordFieldLabels,
-  sampleDialogue,
   type CheckStatus,
   type EmergencyRecord,
   type RecordFieldKey,
@@ -156,6 +156,9 @@ function RecordWorkflowPage() {
   const [uploadedWhisperPayload, setUploadedWhisperPayload] =
     useState<WhisperDraftRequest | null>(null);
   const [uploadedWhisperFileName, setUploadedWhisperFileName] = useState<string | null>(null);
+  const [uploadedAudioFile, setUploadedAudioFile] = useState<File | null>(null);
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcribingFileName, setTranscribingFileName] = useState<string | null>(null);
   const [recording, setRecording] = useState<"idle" | "on" | "paused">("idle");
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
@@ -183,6 +186,7 @@ function RecordWorkflowPage() {
 
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({});
   const whisperFileInputRef = useRef<HTMLInputElement | null>(null);
+  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const statuses = useMemo(() => {
     const out = {} as Record<RecordFieldKey, CheckStatus>;
@@ -202,17 +206,6 @@ function RecordWorkflowPage() {
   const selectedCandidate = kcdCandidates.find((c) => c.code === selectedCode);
   const v = patient.vitals;
 
-  const loadSample = () => {
-    setDialogue(sampleDialogue);
-    setUploadedWhisperPayload(null);
-    setUploadedWhisperFileName(null);
-    setFieldProvenance({});
-    setClinicalFieldStatuses(null);
-    setGenerated(false);
-    setGenerationNotice(null);
-    toast.success("샘플 환자-의료진 대화를 불러왔습니다.");
-  };
-
   const loadWhisperJson = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -226,6 +219,7 @@ function RecordWorkflowPage() {
       }
       setUploadedWhisperPayload(payload);
       setUploadedWhisperFileName(file.name);
+      setUploadedAudioFile(null);
       setDialogue(whisperDraftToDialogue(payload));
       setFieldProvenance({});
       setClinicalFieldStatuses(null);
@@ -243,6 +237,51 @@ function RecordWorkflowPage() {
     }
   };
 
+  const loadAudioFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (file.size === 0) {
+      toast.error("빈 음성 파일은 사용할 수 없습니다.");
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      toast.error("음성 파일은 25MB 이하여야 합니다.");
+      return;
+    }
+    setTranscribing(true);
+    setTranscribingFileName(file.name);
+    toast.info("음성 인식을 시작했습니다.", {
+      description: "완료되면 대화 기록에 자동으로 표시됩니다.",
+    });
+    try {
+      const payload = await transcribeClinicalRecordAudio(file);
+      if (payload.segments.length === 0) {
+        throw new Error("음성에서 대화 segment를 찾지 못했습니다.");
+      }
+      setUploadedAudioFile(file);
+      setUploadedWhisperPayload(payload);
+      setUploadedWhisperFileName(null);
+      setDialogue(whisperDraftToDialogue(payload));
+      setFieldProvenance({});
+      setClinicalFieldStatuses(null);
+      setGenerated(false);
+      setChecked(false);
+      setGenerationNotice(null);
+      toast.success("음성 인식이 완료되었습니다.", {
+        description: `${payload.segments.length}개 segment를 대화 기록에 표시했습니다.`,
+      });
+    } catch (error) {
+      toast.error("음성 파일을 인식하지 못했습니다.", {
+        description: clinicalAudioTranscriptionErrorMessage(error),
+      });
+    } finally {
+      setTranscribing(false);
+      setTranscribingFileName(null);
+    }
+  };
+
   const generateRecord = async () => {
     if (dialogue.length === 0) {
       toast.error("먼저 대화를 불러오거나 녹음을 진행해 주세요.");
@@ -251,9 +290,9 @@ function RecordWorkflowPage() {
     setGenerating(true);
     setGenerationNotice(null);
     try {
-      const request =
-        uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue);
-      const workflow = await createClinicalRecordDraft(request);
+      const workflow = await createClinicalRecordDraft(
+        uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue),
+      );
       setRecord(workflowDraftToEmergencyRecord(workflow));
       setFieldProvenance(workflowDraftToFieldProvenance(workflow));
       setProvenanceRevision((revision) => revision + 1);
@@ -439,9 +478,6 @@ function RecordWorkflowPage() {
                 <Button size="sm" variant="outline" onClick={() => setRecording("idle")}>
                   <Square className="size-4" /> 녹음 종료
                 </Button>
-                <Button size="sm" variant="secondary" onClick={loadSample}>
-                  <Sparkles className="size-4" /> 샘플 대화 불러오기
-                </Button>
                 <input
                   ref={whisperFileInputRef}
                   type="file"
@@ -453,15 +489,47 @@ function RecordWorkflowPage() {
                   size="sm"
                   variant="secondary"
                   onClick={() => whisperFileInputRef.current?.click()}
-                  disabled={generating}
+                  disabled={generating || transcribing}
                 >
                   <Upload className="size-4" /> Whisper JSON 불러오기
+                </Button>
+                <input
+                  ref={audioFileInputRef}
+                  type="file"
+                  accept="audio/*,.wav,.mp3,.m4a,.mp4,.webm,.ogg,.flac"
+                  className="hidden"
+                  onChange={loadAudioFile}
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => audioFileInputRef.current?.click()}
+                  disabled={generating || transcribing}
+                >
+                  {transcribing ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Upload className="size-4" />
+                  )}
+                  {transcribing ? " 음성 인식 중" : " 음성 파일 불러오기"}
                 </Button>
               </div>
               {uploadedWhisperFileName && uploadedWhisperPayload ? (
                 <p className="text-xs text-muted-foreground">
                   입력 파일: {uploadedWhisperFileName} · {uploadedWhisperPayload.segments.length}개
                   segment · 브라우저 메모리에서만 사용
+                </p>
+              ) : null}
+              {uploadedAudioFile ? (
+                <p className="text-xs text-muted-foreground">
+                  입력 음성: {uploadedAudioFile.name} ·
+                  {` ${(uploadedAudioFile.size / (1024 * 1024)).toFixed(1)}MB`} · API1 STT 완료 ·
+                  {` ${uploadedWhisperPayload?.segments.length ?? 0}개 segment`}
+                </p>
+              ) : null}
+              {transcribing && transcribingFileName ? (
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" /> {transcribingFileName} 음성 인식 중
                 </p>
               ) : null}
               {recording !== "idle" && (
@@ -474,7 +542,9 @@ function RecordWorkflowPage() {
               <ScrollArea className="h-[420px] rounded-md border bg-secondary/30 p-3">
                 {dialogue.length === 0 ? (
                   <p className="py-20 text-center text-sm text-muted-foreground">
-                    대화 기록이 없습니다. “샘플 대화 불러오기”를 눌러 주세요.
+                    {transcribing
+                      ? "음성을 인식하고 있습니다. 완료되면 대화 기록이 표시됩니다."
+                      : "대화 기록이 없습니다. Whisper JSON이나 음성 파일을 불러와 주세요."}
                   </p>
                 ) : (
                   <ul className="space-y-2">
@@ -504,7 +574,7 @@ function RecordWorkflowPage() {
           <Card>
             <CardHeader className="flex-row items-center justify-between border-b py-3">
               <CardTitle className="text-base">AI 응급진료기록</CardTitle>
-              <Button size="sm" onClick={generateRecord} disabled={generating}>
+              <Button size="sm" onClick={generateRecord} disabled={generating || transcribing}>
                 {generating ? (
                   <>
                     <Loader2 className="size-4 animate-spin" /> 생성 중
@@ -529,7 +599,9 @@ function RecordWorkflowPage() {
                   className="flex gap-1.5 rounded-md bg-secondary px-3 py-2 text-xs text-muted-foreground"
                 >
                   <Loader2 className="size-3.5 shrink-0 animate-spin" />
-                  대화를 분석하여 응급기록 초안을 생성하고 있습니다. 약 40초 정도 걸릴 수 있습니다.
+                  {uploadedAudioFile
+                    ? "음성을 전사한 뒤 응급기록 초안을 생성하고 있습니다. 잠시 기다려 주세요."
+                    : "대화를 분석하여 응급기록 초안을 생성하고 있습니다. 잠시 기다려 주세요."}
                 </p>
               ) : null}
               {generationNotice ? (

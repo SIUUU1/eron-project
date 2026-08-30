@@ -41,6 +41,11 @@ class Settings:
     record_ai_url: str | None = None
     clinical_record_ai_timeout_seconds: float = 180.0
 
+    # 음성 파일을 Whisper JSON으로 변환하는 내부 비동기 STT 서비스.
+    stt_url: str | None = None
+    stt_timeout_seconds: float = 300.0
+    stt_poll_interval_seconds: float = 0.5
+
     # DB 세션 타임존.
     # PostgreSQL 서버 기본값은 Etc/UTC 이고, 컨테이너의 TZ 는 세션에 전달되지 않는다.
     # 명시하지 않으면 API 가 돌려주는 데모 시각이 실제 시각보다 9시간 뒤처진다.
@@ -67,6 +72,12 @@ def load_settings() -> Settings:
         clinical_record_ai_timeout_seconds=_float_env(
             "CLINICAL_RECORD_AI_TIMEOUT_SECONDS",
             180.0,
+        ),
+        stt_url=os.getenv("STT_URL") or None,
+        stt_timeout_seconds=_float_env("STT_TIMEOUT_SECONDS", 300.0),
+        stt_poll_interval_seconds=_float_env(
+            "STT_POLL_INTERVAL_SECONDS",
+            0.5,
         ),
         db_timezone=os.getenv("DB_TIMEZONE") or os.getenv("TZ") or "Asia/Seoul",
     )
