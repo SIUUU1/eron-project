@@ -232,6 +232,8 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(result["items"], [])
         self.assertEqual(len(captured["payloads"]), 3)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 3)
+        self.assertGreaterEqual(result["_telemetry"]["translation_ms"], 0)
         for payload in captured["payloads"]:
             supplied = json.loads(payload["messages"][1]["content"])
             self.assertLessEqual(len(supplied["target_segment_ids"]), 2)
@@ -279,6 +281,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             captured["target_batches"],
             [["t0001", "t0002", "t0003"], ["t0001"], ["t0002"], ["t0003"]],
         )
+        self.assertEqual(result["_telemetry"]["translation_calls"], 4)
 
     def test_single_segment_failure_preserves_other_batch_translations(self):
         segments = [

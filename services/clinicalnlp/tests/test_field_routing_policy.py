@@ -1,0 +1,191 @@
+import unittest
+
+from clinicalnlp_api3.field_routing_policy import (
+    FieldEvidence,
+    candidate_allowed_for_field,
+    choose_evidence_field,
+    evidence_fields_by_segment,
+    filter_candidates_for_field,
+)
+from clinicalnlp_api3.workflow import build_draft
+
+
+def _candidate(
+    entity_id,
+    canonical_en,
+    semantic_types,
+    *,
+    collection="emergency_terms",
+    entity_type=None,
+):
+    return {
+        "collection": collection,
+        "entity_id": entity_id,
+        "canonical_ko": "",
+        "canonical_en": canonical_en,
+        "entity_type": entity_type,
+        "match_type": "umls_dictionary_search",
+        "retrieval_score": 0.95,
+        "provenance": {
+            "source": "UMLS",
+            "cui": f"C{entity_id}",
+            "semantic_types": semantic_types,
+            "similarity": 0.94,
+        },
+    }
+
+
+def _atom(raw_value, segment_id="seg_0001", status="confirmed"):
+    return {
+        "raw_value": raw_value,
+        "status": status,
+        "evidence": {"source_segment_id": segment_id},
+    }
+
+
+class FieldRoutingPolicyTests(unittest.TestCase):
+    def test_evidence_index_preserves_multiple_atomic_fields_for_one_segment(self):
+        record = {
+            "history_of_present_illness": {
+                "course": _atom("어제부터 숨이 찼습니다.")
+            },
+            "physical_examination": [_atom("산소포화도 88%")],
+            "impression": [_atom("폐렴이 의심됩니다.", status="needs_confirmation")],
+        }
+
+        routed = evidence_fields_by_segment(record)
+
+        self.assertEqual(
+            [(item.field_id, item.raw_value) for item in routed["seg_0001"]],
+            [
+                ("history_of_present_illness", "어제부터 숨이 찼습니다."),
+                ("physical_examination", "산소포화도 88%"),
+                ("impression", "폐렴이 의심됩니다."),
+            ],
+        )
+
+    def test_exact_atomic_span_routes_disease_to_past_history_not_impression(self):
+        disease = _candidate("copd", "COPD", ["T047"])
+        evidence = (
+            FieldEvidence("past_history", "COPD 병력이 있습니다."),
+            FieldEvidence("impression", "폐렴이 의심됩니다."),
+        )
+
+        field_id = choose_evidence_field(
+            evidence,
+            source_text="COPD",
+            candidates=[disease],
+            annotation_term_type="disease_or_diagnosis",
+        )
+
+        self.assertEqual(field_id, "past_history")
+
+    def test_umls_semantic_type_overrides_misleading_collection(self):
+        disease_in_drug_collection = _candidate(
+            "pneumonia",
+            "Pneumonia",
+            ["T047"],
+            collection="drug_terms",
+            entity_type="product",
+        )
+
+        self.assertTrue(
+            candidate_allowed_for_field("impression", disease_in_drug_collection)
+        )
+        self.assertFalse(
+            candidate_allowed_for_field("medication", disease_in_drug_collection)
+        )
+
+    def test_field_filter_keeps_only_compatible_candidate_types(self):
+        disease = _candidate("pneumonia", "Pneumonia", ["T047"])
+        drug = _candidate(
+            "amlodipine",
+            "Amlodipine",
+            ["T121"],
+            collection="drug_terms",
+            entity_type="ingredient",
+        )
+
+        filtered = filter_candidates_for_field(
+            "impression",
+            [drug, disease],
+            annotation_term_type="disease_or_diagnosis",
+        )
+
+        self.assertEqual([item["entity_id"] for item in filtered], ["pneumonia"])
+
+    def test_review_items_use_clinical_evidence_and_filter_candidate_provenance(self):
+        disease = _candidate("pneumonia", "Pneumonia", ["T047"])
+        drug = _candidate(
+            "amlodipine",
+            "Amlodipine",
+            ["T121"],
+            collection="drug_terms",
+            entity_type="ingredient",
+        )
+        api3 = {
+            "segments": [
+                {
+                    "id": "seg_0001",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "raw_text": "폐렴이 의심되어 흉부 CT를 시행하겠습니다.",
+                    "annotations": [
+                        {
+                            "type": "medical_term_candidate",
+                            "term_type": "disease_or_diagnosis",
+                            "source_span": {
+                                "text": "폐렴",
+                                "start_char": 0,
+                                "end_char": 2,
+                            },
+                            "candidates": [drug, disease],
+                            "needs_review": True,
+                        },
+                        {
+                            "type": "medical_term_candidate",
+                            "term_type": "test_procedure_or_surgery",
+                            "source_span": {
+                                "text": "흉부 CT",
+                                "start_char": 9,
+                                "end_char": 14,
+                            },
+                            "candidates": [
+                                _candidate(
+                                    "chest-ct",
+                                    "Chest CT",
+                                    ["T060"],
+                                    collection="procedure_terms",
+                                )
+                            ],
+                            "needs_review": True,
+                        },
+                    ],
+                }
+            ]
+        }
+        api2 = {
+            "clinical_record": {
+                "impression": [
+                    _atom("폐렴이 의심되어", status="needs_confirmation")
+                ],
+                "treatment_plan": [_atom("흉부 CT를 시행하겠습니다.")],
+            }
+        }
+
+        draft = build_draft(api2, api3)
+
+        self.assertEqual(
+            [item["field_id"] for item in draft["review_items"]],
+            ["impression", "treatment-plan"],
+        )
+        impression = draft["review_items"][0]
+        self.assertEqual(impression["candidates"], ["Pneumonia"])
+        self.assertEqual(
+            [item["display_value"] for item in impression["candidate_provenance"]],
+            ["Pneumonia"],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

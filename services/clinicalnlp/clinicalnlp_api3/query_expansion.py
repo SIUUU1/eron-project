@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -315,13 +316,19 @@ class LlamaServerMedicalQueryExpander:
         *,
         context_segments: list[dict[str, str]],
         target_segment_ids: list[str],
+        call_counter: list[int] | None = None,
     ) -> tuple[dict[str, str], list[tuple[str, Exception]]]:
+        def request(ids: list[str]) -> dict[str, str]:
+            if call_counter is not None:
+                call_counter[0] += 1
+            return self._request_compact_translation(
+                context_segments=context_segments,
+                target_segment_ids=ids,
+            )
+
         try:
             return (
-                self._request_compact_translation(
-                    context_segments=context_segments,
-                    target_segment_ids=target_segment_ids,
-                ),
+                request(target_segment_ids),
                 [],
             )
         except Exception as error:
@@ -331,12 +338,7 @@ class LlamaServerMedicalQueryExpander:
         failures: list[tuple[str, Exception]] = []
         for target_id in target_segment_ids:
             try:
-                translations.update(
-                    self._request_compact_translation(
-                        context_segments=context_segments,
-                        target_segment_ids=[target_id],
-                    )
-                )
+                translations.update(request([target_id]))
             except Exception as error:
                 failures.append((target_id, error))
         return translations, failures
@@ -907,6 +909,8 @@ class LlamaServerMedicalQueryExpander:
             transport["segment_id"]: compact["id"]
             for transport, compact in zip(transport_segments, compact_segments)
         }
+        translation_started = time.perf_counter()
+        translation_calls = [0]
         try:
             translated_segments: list[dict[str, Any]] = []
             failed_translations: list[tuple[str, Exception]] = []
@@ -920,6 +924,7 @@ class LlamaServerMedicalQueryExpander:
                 translations, failures = self._request_translation_batch_with_retry(
                     context_segments=transport_segments,
                     target_segment_ids=target_ids,
+                    call_counter=translation_calls,
                 )
                 failed_translations.extend(failures)
                 translated_segments.extend(
@@ -938,6 +943,13 @@ class LlamaServerMedicalQueryExpander:
                 "translated_segments": [],
                 "items": [],
                 "error_code": self._error_code(error),
+                "_telemetry": {
+                    "translation_ms": round(
+                        (time.perf_counter() - translation_started) * 1000,
+                        3,
+                    ),
+                    "translation_calls": translation_calls[0],
+                },
             }
         if not translated_segments and failed_translations:
             return {
@@ -951,6 +963,13 @@ class LlamaServerMedicalQueryExpander:
                     for target_id, _ in failed_translations
                 ],
                 "error_code": self._error_code(failed_translations[0][1]),
+                "_telemetry": {
+                    "translation_ms": round(
+                        (time.perf_counter() - translation_started) * 1000,
+                        3,
+                    ),
+                    "translation_calls": translation_calls[0],
+                },
             }
         partial = bool(failed_translations)
         return {
@@ -969,6 +988,13 @@ class LlamaServerMedicalQueryExpander:
                 if partial
                 else {}
             ),
+            "_telemetry": {
+                "translation_ms": round(
+                    (time.perf_counter() - translation_started) * 1000,
+                    3,
+                ),
+                "translation_calls": translation_calls[0],
+            },
         }
 
 

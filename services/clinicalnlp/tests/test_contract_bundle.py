@@ -47,14 +47,14 @@ class ClinicalContractBundleTests(unittest.TestCase):
 
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
-            "clinical_record_extraction_v1.txt": (
-                "a4317fd316ccb2c1640ab72a25fe67f6fdc86a3b63d1d10fc3d6dd35266bab0f"
+            "clinical_record_extraction_v2.txt": (
+                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
             ),
             "candidate_adjudication_v1.txt": (
-                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
+                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "draft_normalization_v1.txt": (
-                "75d0735d66183c46b4d640e718b07f8463f8a899f5f6c05d1658fa7c3664fa1f"
+                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
             ),
         }
 
@@ -73,16 +73,16 @@ class ClinicalContractBundleTests(unittest.TestCase):
         )
         expected_assets = {
             "contracts/clinical-workflow-v2.schema.json": (
-                "a632bca137050e5d8644ee405c804f597ddcb198cfb8c527c54c1222821ccb79"
+                "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
             ),
-            "prompts/clinical_record_extraction_v1.txt": (
-                "a4317fd316ccb2c1640ab72a25fe67f6fdc86a3b63d1d10fc3d6dd35266bab0f"
+            "prompts/clinical_record_extraction_v2.txt": (
+                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
             ),
             "prompts/candidate_adjudication_v1.txt": (
-                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
+                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "prompts/draft_normalization_v1.txt": (
-                "75d0735d66183c46b4d640e718b07f8463f8a899f5f6c05d1658fa7c3664fa1f"
+                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
             ),
         }
 

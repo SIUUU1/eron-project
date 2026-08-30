@@ -31,10 +31,27 @@ exact fallback. The RAW fallback is built once in memory from canonical
 emergency, procedure, anatomy, and drug-ingredient terms. It excludes product
 names, KCD codes, aliases, fuzzy matching, and vector search.
 
+Clinical field routing and terminology retrieval are separate decisions. The
+extractor first assigns atomic, conversation-grounded facts to emergency-record
+fields. Candidate review items then reuse those evidence assignments and expose
+only semantic types allowed by the target field (for example, drug candidates
+for medications and disease candidates for impression). A segment may support
+multiple fields, but an individual source span is routed to its matching atomic
+fact. Filtering never confirms a candidate, rewrites RAW evidence, or invents a
+missing clinical fact.
+
 `GET /health` returns HTTP 200 only when required configuration and dictionary
 assets are ready. Missing configuration or assets keeps the process available
 for diagnostics but returns HTTP 503. Missing optional UMLS assets use the
 existing n-gram fallback.
+
+Every draft response includes non-clinical `telemetry` with
+`translation_ms`, `translation_calls`, `umls_ms`, `dictionary_ms`, `vector_ms`,
+and `clinical_extraction_ms`. These values diagnose latency only; they are not
+confidence scores and must not affect candidate ranking or validation results.
+Dictionary queries reuse read-only SQLite handles for the duration of one
+resolver request. Exact lookups are grouped into batches of at most 64 queries
+per collection, and sqlite-vec is loaded at most once per request.
 
 ## Docker Compose profile
 

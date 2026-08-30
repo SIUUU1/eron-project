@@ -7,6 +7,7 @@ from types import MappingProxyType
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from clinicalnlp_api3.alias_feedback import (
     VersionedAliasStore,
@@ -320,6 +321,58 @@ class OfficialRawExactRetrieverTests(unittest.TestCase):
 
 
 class UmlsPrimaryResolverTests(unittest.TestCase):
+    def test_dictionary_batch_reuses_read_only_connections_for_sixty_four_queries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+            )
+            real_connect = sqlite3.connect
+            with patch(
+                "clinicalnlp_api3.umls_query_resolver.sqlite3.connect",
+                wraps=real_connect,
+            ) as connect:
+                with dictionary.request_session():
+                    batch = dictionary.search_many(
+                        tuple(
+                            ("cough" if index == 0 else f"unknown-{index}", None)
+                            for index in range(64)
+                        ),
+                        limit=5,
+                    )
+
+        self.assertEqual(len(batch.matches), 64)
+        self.assertEqual(batch.matches[0][0].entity_id, "emergency:1")
+        self.assertTrue(all(not matches for matches in batch.matches[1:]))
+        self.assertLessEqual(connect.call_count, 4)
+        self.assertLessEqual(batch.exact_statement_count, 4)
+        self.assertEqual(batch.vector_statement_count, 0)
+
+    def test_sqlite_vec_extension_loads_once_per_request_session(self):
+        import sqlite_vec
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            vector_index = root / "medical-vectors.sqlite"
+            build_vector_indexes(root, vector_index)
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+                vector_index=vector_index,
+            )
+            with patch("sqlite_vec.load", wraps=sqlite_vec.load) as load:
+                with dictionary.request_session():
+                    dictionary.search_many((("cough", None),), limit=5)
+                    dictionary.search_many(
+                        (("acute angle closure glaucoma", None),),
+                        limit=5,
+                    )
+
+        self.assertEqual(load.call_count, 1)
+
     def test_umls_resolves_before_official_raw_exact_fallback(self):
         events: list[str] = []
 

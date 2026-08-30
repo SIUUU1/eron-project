@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .field_routing_policy import filter_candidates_for_field
+
 
 UMLS_LINK_THRESHOLD = 0.8
 TOP_CANDIDATE_MARGIN = 0.10
@@ -225,17 +227,18 @@ def build_draft_normalization_plan(
             for annotation_index, annotation in enumerate(segment.get("annotations", [])):
                 if not isinstance(annotation, dict):
                     continue
+                annotation_term_type = annotation.get("term_type")
                 source_span = annotation.get("source_span")
                 source_text = (
                     str(source_span.get("text") or "")
                     if isinstance(source_span, dict)
                     else ""
                 )
-                candidates = [
-                    candidate
-                    for candidate in annotation.get("candidates", [])
-                    if isinstance(candidate, dict)
-                ]
+                candidates = filter_candidates_for_field(
+                    field_id,
+                    annotation.get("candidates", []),
+                    annotation_term_type=annotation_term_type,
+                )
                 exact = [
                     candidate
                     for candidate in candidates

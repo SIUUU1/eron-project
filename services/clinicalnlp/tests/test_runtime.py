@@ -82,6 +82,23 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             result["draft"]["fields"]["chief_complaint"]["value"],
             "배가 아파요",
         )
+        self.assertEqual(
+            set(result["telemetry"]),
+            {
+                "translation_ms",
+                "translation_calls",
+                "umls_ms",
+                "dictionary_ms",
+                "vector_ms",
+                "clinical_extraction_ms",
+            },
+        )
+        self.assertTrue(
+            all(
+                isinstance(value, (int, float)) and value >= 0
+                for value in result["telemetry"].values()
+            )
+        )
 
 
 if __name__ == "__main__":

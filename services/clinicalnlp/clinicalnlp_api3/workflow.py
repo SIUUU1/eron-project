@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
+import time
 from typing import Any, Iterable
 
+from .field_routing_policy import (
+    CANONICAL_TO_DRAFT_FIELD,
+    choose_evidence_field,
+    evidence_fields_by_segment,
+    fallback_field_for_term_type,
+    filter_candidates_for_field,
+)
 from .pipeline import run_api3
 
 
@@ -1054,8 +1063,10 @@ def _candidate_field(
 def _review_items(
     api3_document: dict[str, Any],
     candidate_decisions: list[dict[str, Any]] | None = None,
+    clinical_record: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    evidence_routes = evidence_fields_by_segment(clinical_record or {})
     decision_actions = {
         (decision.get("segment_id"), decision.get("annotation_index")): decision.get(
             "action"
@@ -1079,7 +1090,34 @@ def _review_items(
                 "needs_review",
             ) != "needs_review":
                 continue
-            candidates = annotation.get("candidates", [])
+            raw_candidates = [
+                candidate
+                for candidate in annotation.get("candidates", [])
+                if isinstance(candidate, dict)
+            ]
+            source_span = annotation.get("source_span") or {}
+            term_type = annotation.get("term_type")
+            canonical_field = choose_evidence_field(
+                evidence_routes.get(str(segment.get("id")), ()),
+                source_text=str(source_span.get("text") or ""),
+                candidates=raw_candidates,
+                annotation_term_type=term_type,
+            )
+            if canonical_field is None:
+                canonical_field = fallback_field_for_term_type(term_type)
+            previous_segment = (
+                segments[segment_position - 1] if segment_position > 0 else None
+            )
+            field_id = (
+                CANONICAL_TO_DRAFT_FIELD.get(canonical_field)
+                if canonical_field is not None
+                else None
+            ) or _candidate_field(segment, previous_segment, raw_candidates)
+            candidates = filter_candidates_for_field(
+                field_id,
+                raw_candidates,
+                annotation_term_type=term_type,
+            )
             names = _deduplicated(
                 str(
                     candidate.get("canonical_en")
@@ -1095,7 +1133,11 @@ def _review_items(
                 for term in annotation.get("search_terms_en", [])
                 if str(term).strip()
             ]
-            if not names and annotation.get("type") != "unresolved_medical_term":
+            if (
+                not names
+                and not raw_candidates
+                and annotation.get("type") != "unresolved_medical_term"
+            ):
                 continue
             explicit_drug_type = _explicit_drug_entity_type(annotation)
             candidate_details: list[dict[str, Any]] = []
@@ -1164,22 +1206,6 @@ def _review_items(
                         ),
                     }
                 )
-            previous_segment = (
-                segments[segment_position - 1] if segment_position > 0 else None
-            )
-            unresolved_field_by_type = {
-                "drug": "medication",
-                "allergy": "allergy",
-                "disease_or_diagnosis": "impression",
-                "test_procedure_or_surgery": "treatment-plan",
-                "vital_or_numeric": "physical",
-                "device": "treatment-plan",
-            }
-            field_id = unresolved_field_by_type.get(
-                annotation.get("term_type"),
-                _candidate_field(segment, previous_segment, candidates),
-            )
-            source_span = annotation.get("source_span") or {}
             assertion = _candidate_assertion(segment, dict(source_span))
             items.append(
                 {
@@ -1195,7 +1221,7 @@ def _review_items(
                     "candidate_details": candidate_details,
                     "candidate_provenance": candidate_provenance,
                     "search_terms_en": search_terms_en,
-                    "term_type": annotation.get("term_type"),
+                    "term_type": term_type,
                     "assertion": assertion,
                     "needs_review": True,
                 }
@@ -1477,6 +1503,7 @@ def build_draft(
 ) -> dict[str, Any]:
     fields = _empty_draft_fields()
     api3_segments = list(api3_document.get("segments", []))
+    record: dict[str, Any] = {}
     if api2_document is not None:
         record = api2_document.get("clinical_record") or {}
         for field_id, source_key in _SUPPORTED_FIELD_SOURCES.items():
@@ -1506,7 +1533,11 @@ def build_draft(
     else:
         _apply_draft_suggestions(fields, None)
 
-    review_items = _review_items(api3_document, candidate_decisions)
+    review_items = _review_items(
+        api3_document,
+        candidate_decisions,
+        record,
+    )
     for item in review_items:
         field = fields[item["field_id"]]
         field["status"] = "needs_review"
@@ -1763,16 +1794,53 @@ def run_clinical_workflow(
     from .contracts import validate_whisper_payload
     from .query_expansion import run_query_expansion
 
+    def telemetry_number(value: object, default: float = 0.0) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            return default
+        return float(value)
+
+    def telemetry_count(value: object) -> int:
+        return value if type(value) is int and value >= 0 else 0
+
     validated_segments = validate_whisper_payload(whisper_payload)
     # Translation is the first retrieval preparation stage. Running the hybrid
     # retriever here used to scan every dictionary and vector collection before
     # translation, then repeat the same work in the resolver.
     covered_spans: list[dict[str, Any]] = []
+    translation_started = time.perf_counter()
     query_expansion = run_query_expansion(
         query_expander,
         validated_segments,
         covered_spans=covered_spans,
     )
+    measured_translation_ms = round(
+        (time.perf_counter() - translation_started) * 1000,
+        3,
+    )
+    query_expansion_telemetry = query_expansion.pop("_telemetry", None)
+    if not isinstance(query_expansion_telemetry, dict):
+        query_expansion_telemetry = {}
+    telemetry = {
+        "translation_ms": telemetry_number(
+            query_expansion_telemetry.get(
+                "translation_ms",
+                measured_translation_ms,
+            ),
+            measured_translation_ms,
+        ),
+        "translation_calls": telemetry_count(
+            query_expansion_telemetry.get("translation_calls", 0)
+        ),
+        "umls_ms": 0.0,
+        "dictionary_ms": 0.0,
+        "vector_ms": 0.0,
+        "clinical_extraction_ms": 0.0,
+    }
     errors: list[dict[str, str]] = []
     if query_expansion.get("status") == "unavailable":
         errors.append(
@@ -1825,6 +1893,17 @@ def run_clinical_workflow(
                 "policy_version": query_resolution.policy_version,
                 "fallback_used": query_resolution.fallback_used,
             }
+            resolution_telemetry = getattr(query_resolution, "telemetry", None)
+            if resolution_telemetry is not None:
+                telemetry["umls_ms"] = telemetry_number(
+                    getattr(resolution_telemetry, "umls_ms", 0.0)
+                )
+                telemetry["dictionary_ms"] = telemetry_number(
+                    getattr(resolution_telemetry, "dictionary_ms", 0.0)
+                )
+                telemetry["vector_ms"] = telemetry_number(
+                    getattr(resolution_telemetry, "vector_ms", 0.0)
+                )
             if query_resolution.mode != "shadow":
                 resolved_candidates_by_segment = projected_candidates_by_segment
         except Exception as error:
@@ -1853,6 +1932,7 @@ def run_clinical_workflow(
     if isinstance(enriched_query_expansion, dict):
         query_expansion = enriched_query_expansion
     api2_document: dict[str, Any] | None = None
+    clinical_extraction_started = time.perf_counter()
     try:
         api2_document = clinical_extractor.extract(
             _api2_payload(whisper_payload, api3_document)
@@ -1891,6 +1971,11 @@ def run_clinical_workflow(
                 "detail": str(error),
             }
         )
+    finally:
+        telemetry["clinical_extraction_ms"] = round(
+            (time.perf_counter() - clinical_extraction_started) * 1000,
+            3,
+        )
 
     api3_status = (api3_document.get("metadata") or {}).get("processing_status")
     processing_status = (
@@ -1919,6 +2004,10 @@ def run_clinical_workflow(
             candidate_decisions,
         ),
         "errors": errors,
+        "telemetry": {
+            key: round(value, 3) if isinstance(value, float) else value
+            for key, value in telemetry.items()
+        },
     }
     if include_query_resolution_summary and query_resolution_summary is not None:
         result["query_resolution"] = query_resolution_summary

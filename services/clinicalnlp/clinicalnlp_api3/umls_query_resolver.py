@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import math
 from pathlib import Path
 import re
 import sqlite3
+import threading
+import time
 from typing import Any, Iterable, Literal, Sequence
 
 from .medical_query_resolver import (
@@ -15,6 +18,7 @@ from .medical_query_resolver import (
     MedicalQueryResolver,
     QueryResolution,
     QueryResolutionIssue,
+    QueryResolutionTelemetry,
     QueryTextSpan,
     ResolvedCandidate,
     UmlsCandidateProvenance,
@@ -96,6 +100,22 @@ class _VerifiedRawHit:
 class _NgramQuery:
     search_text: str
     evidence_span: QueryTextSpan
+
+
+@dataclass(frozen=True, slots=True)
+class _DictionarySearchBatch:
+    matches: tuple[tuple[LocalDictionaryMatch, ...], ...]
+    dictionary_ms: float
+    vector_ms: float
+    exact_statement_count: int
+    vector_statement_count: int
+
+
+@dataclass(slots=True)
+class _ConnectionSession:
+    connections: dict[Path, sqlite3.Connection]
+    vector_paths: set[Path]
+    depth: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,19 +315,6 @@ def _collections_for_semantic_types(values: object) -> frozenset[str] | None:
     return frozenset(collections) if collections else None
 
 
-def _read_rows(
-    path: Path,
-    query: str,
-    parameters: Sequence[Any],
-) -> list[sqlite3.Row]:
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    try:
-        return list(connection.execute(query, tuple(parameters)))
-    finally:
-        connection.close()
-
-
 def _dictionary_bundle_version(
     paths: DictionaryPaths,
     source_hashes: dict[str, str],
@@ -359,6 +366,9 @@ class VerifiedLocalDictionary:
             raw_retriever,
         )
         self._alias_store = getattr(raw_retriever, "alias_store", None)
+        self._connection_local = threading.local()
+        self._entity_cache: dict[tuple[str, str], _DictionaryEntity | None] = {}
+        self._entity_cache_lock = threading.Lock()
         self._vector_index = Path(vector_index) if vector_index is not None else None
         if self._vector_index is not None and not self._vector_index.is_file():
             raise ValueError(f"vector index not found: {self._vector_index}")
@@ -368,13 +378,70 @@ class VerifiedLocalDictionary:
             if self._vector_index is not None
             else None
         )
-        self._verified_vector_collections = self._read_verified_vector_collections()
+        with self.request_session():
+            self._verified_vector_collections = self._read_verified_vector_collections()
         self._minimum_vector_similarity = float(minimum_vector_similarity)
         self._embedder = (
             MedicalHashEmbedder()
             if self._vector_index and self._verified_vector_collections
             else None
         )
+
+    @contextmanager
+    def request_session(self):
+        """Reuse read-only SQLite handles for one resolver request/thread."""
+
+        session = getattr(self._connection_local, "session", None)
+        if session is None:
+            session = _ConnectionSession(connections={}, vector_paths=set())
+            self._connection_local.session = session
+        else:
+            session.depth += 1
+        try:
+            yield self
+        finally:
+            session.depth -= 1
+            if session.depth == 0:
+                for connection in session.connections.values():
+                    try:
+                        connection.close()
+                    except sqlite3.Error:
+                        pass
+                session.connections.clear()
+                session.vector_paths.clear()
+                del self._connection_local.session
+
+    def _connection(self, path: Path, *, vector: bool = False) -> sqlite3.Connection:
+        session = getattr(self._connection_local, "session", None)
+        if session is None:
+            raise RuntimeError("dictionary access requires a request session")
+        resolved = path.resolve()
+        connection = session.connections.get(resolved)
+        if connection is None:
+            connection = sqlite3.connect(
+                f"file:{resolved}?mode=ro",
+                uri=True,
+            )
+            connection.row_factory = sqlite3.Row
+            session.connections[resolved] = connection
+        if vector and resolved not in session.vector_paths:
+            import sqlite_vec
+
+            connection.enable_load_extension(True)
+            try:
+                sqlite_vec.load(connection)
+            finally:
+                connection.enable_load_extension(False)
+            session.vector_paths.add(resolved)
+        return connection
+
+    def _read_rows(
+        self,
+        path: Path,
+        query: str,
+        parameters: Sequence[Any],
+    ) -> list[sqlite3.Row]:
+        return list(self._connection(path).execute(query, tuple(parameters)))
 
     @staticmethod
     def _file_stat(path: Path) -> tuple[int, int] | None:
@@ -412,7 +479,7 @@ class VerifiedLocalDictionary:
         if self._vector_index is None:
             return frozenset()
         try:
-            rows = _read_rows(
+            rows = self._read_rows(
                 self._vector_index,
                 """
                 SELECT collection, source_sha256, schema_version, dimensions
@@ -451,7 +518,7 @@ class VerifiedLocalDictionary:
                 if prefix != "drug" or kind not in {"ingredient", "product"}:
                     return None
                 if kind == "ingredient":
-                    rows = _read_rows(
+                    rows = self._read_rows(
                         self.paths.drug,
                         """
                         SELECT canonical_ko, canonical_en, 'official' review_status
@@ -461,7 +528,7 @@ class VerifiedLocalDictionary:
                         (local_id,),
                     )
                 else:
-                    rows = _read_rows(
+                    rows = self._read_rows(
                         self.paths.drug,
                         """
                         SELECT product_name_ko canonical_ko,
@@ -476,7 +543,7 @@ class VerifiedLocalDictionary:
                 prefix, local_id = entity_id.split(":", 1)
                 if prefix != "procedure":
                     return None
-                rows = _read_rows(
+                rows = self._read_rows(
                     self.paths.procedure,
                     """
                     SELECT canonical_name_ko canonical_ko,
@@ -491,7 +558,7 @@ class VerifiedLocalDictionary:
                 prefix, local_id = entity_id.split(":", 1)
                 if prefix != "anatomy":
                     return None
-                rows = _read_rows(
+                rows = self._read_rows(
                     self.paths.anatomy,
                     """
                     SELECT korean_name canonical_ko, english_name canonical_en,
@@ -505,7 +572,7 @@ class VerifiedLocalDictionary:
                 prefix, local_id = entity_id.split(":", 1)
                 if prefix != "emergency":
                     return None
-                rows = _read_rows(
+                rows = self._read_rows(
                     self.paths.emergency,
                     """
                     SELECT standard_ko canonical_ko, standard_en canonical_en,
@@ -519,7 +586,7 @@ class VerifiedLocalDictionary:
                 prefix, local_id = entity_id.split(":", 1)
                 if prefix != "kcd":
                     return None
-                rows = _read_rows(
+                rows = self._read_rows(
                     self.paths.kcd9,
                     """
                     SELECT canonical_ko_name canonical_ko,
@@ -554,8 +621,16 @@ class VerifiedLocalDictionary:
         collection: str,
         entity_id: str,
     ) -> _DictionaryEntity | None:
-        self._ensure_assets_are_current()
-        return self._lookup_uncached(collection, entity_id)
+        with self.request_session():
+            self._ensure_assets_are_current()
+            key = (collection, entity_id)
+            with self._entity_cache_lock:
+                if key in self._entity_cache:
+                    return self._entity_cache[key]
+            entity = self._lookup_uncached(collection, entity_id)
+            with self._entity_cache_lock:
+                self._entity_cache.setdefault(key, entity)
+                return self._entity_cache[key]
 
     def _match(
         self,
@@ -588,11 +663,17 @@ class VerifiedLocalDictionary:
         raw_text: str,
         context: list[dict[str, Any]],
     ) -> tuple[_VerifiedRawHit, ...]:
+        with self.request_session():
+            return self._raw_matches_in_session(raw_text=raw_text, context=context)
+
+    def _raw_matches_in_session(
+        self,
+        *,
+        raw_text: str,
+        context: list[dict[str, Any]],
+    ) -> tuple[_VerifiedRawHit, ...]:
         self._ensure_assets_are_current()
-        raw_candidates = self._raw_retriever.retrieve(
-            raw_text=raw_text,
-            context=context,
-        )
+        raw_candidates = self._raw_retriever.retrieve(raw_text=raw_text, context=context)
         verified: list[_VerifiedRawHit] = []
         for candidate in raw_candidates:
             if not isinstance(candidate, dict) or candidate.get("match_type") not in {
@@ -794,13 +875,156 @@ class VerifiedLocalDictionary:
         identities: list[tuple[str, str]] = []
         for collection, path, sql, parameters in queries:
             try:
-                rows = _read_rows(path, sql, parameters)
+                rows = self._read_rows(path, sql, parameters)
             except (OSError, sqlite3.Error):
                 continue
             identities.extend(
                 (collection, str(row["entity_id"])) for row in rows
             )
         return identities
+
+    @staticmethod
+    def _normalize_search_requests(
+        requests: Sequence[tuple[str, Iterable[str] | None]],
+    ) -> tuple[tuple[str, frozenset[str]], ...]:
+        if len(requests) > 64:
+            raise ValueError("dictionary batch may contain at most 64 queries")
+        supported = frozenset(
+            {
+                "drug_terms",
+                "procedure_terms",
+                "anatomy_terms",
+                "emergency_terms",
+            }
+        )
+        normalized: list[tuple[str, frozenset[str]]] = []
+        for query_text, collections in requests:
+            if not isinstance(query_text, str):
+                raise TypeError("dictionary query text must be a string")
+            selected = (
+                supported
+                if collections is None
+                else frozenset(collections) & supported
+            )
+            normalized.append((query_text.strip(), selected))
+        return tuple(normalized)
+
+    def _exact_query_identities_many(
+        self,
+        requests: tuple[tuple[str, frozenset[str]], ...],
+    ) -> tuple[dict[int, list[tuple[str, str]]], int]:
+        identities: dict[int, list[tuple[str, str]]] = {
+            index: [] for index in range(len(requests))
+        }
+        definitions = {
+            "drug_terms": (
+                self.paths.drug,
+                """
+                SELECT lower(trim(t.term)) query_key,
+                       'drug:' || lower(t.entity_type) || ':' || t.entity_id entity_id
+                  FROM drug_terms t
+                 WHERE lower(trim(t.term)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(i.canonical_en)),
+                       'drug:ingredient:' || i.ingredient_id
+                  FROM ingredients i
+                 WHERE lower(trim(i.canonical_en)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(p.product_name_en)), 'drug:product:' || p.item_id
+                  FROM products p
+                 WHERE lower(trim(p.product_name_en)) IN ({placeholders})
+                """,
+                3,
+            ),
+            "procedure_terms": (
+                self.paths.procedure,
+                """
+                SELECT lower(trim(t.canonical_name_en)) query_key,
+                       'procedure:' || t.term_id entity_id
+                  FROM clinical_terms t
+                 WHERE lower(trim(t.canonical_name_en)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(t.canonical_name_ko)), 'procedure:' || t.term_id
+                  FROM clinical_terms t
+                 WHERE lower(trim(t.canonical_name_ko)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(a.alias)), 'procedure:' || a.term_id
+                  FROM term_aliases a
+                 WHERE lower(trim(a.alias)) IN ({placeholders})
+                """,
+                3,
+            ),
+            "anatomy_terms": (
+                self.paths.anatomy,
+                """
+                SELECT lower(trim(t.english_name)) query_key,
+                       'anatomy:' || t.term_id entity_id
+                  FROM anatomical_terms t
+                 WHERE lower(trim(t.english_name)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(t.latin_name)), 'anatomy:' || t.term_id
+                  FROM anatomical_terms t
+                 WHERE lower(trim(t.latin_name)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(t.korean_name)), 'anatomy:' || t.term_id
+                  FROM anatomical_terms t
+                 WHERE lower(trim(t.korean_name)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(a.alias)), 'anatomy:' || a.term_id
+                  FROM anatomical_aliases a
+                 WHERE lower(trim(a.alias)) IN ({placeholders})
+                """,
+                4,
+            ),
+            "emergency_terms": (
+                self.paths.emergency,
+                """
+                SELECT lower(trim(t.standard_en)) query_key,
+                       'emergency:' || t.term_id entity_id
+                  FROM terms t
+                 WHERE lower(trim(t.standard_en)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(t.standard_ko)), 'emergency:' || t.term_id
+                  FROM terms t
+                 WHERE lower(trim(t.standard_ko)) IN ({placeholders})
+                UNION
+                SELECT lower(trim(a.alias)), 'emergency:' || a.term_id
+                  FROM aliases a
+                 WHERE lower(trim(a.alias)) IN ({placeholders})
+                """,
+                3,
+            ),
+        }
+        statement_count = 0
+        for collection in sorted(definitions, key=_COLLECTION_ORDER.__getitem__):
+            selected = [
+                (index, query_text)
+                for index, (query_text, collections) in enumerate(requests)
+                if query_text and collection in collections
+            ]
+            if not selected:
+                continue
+            key_to_indexes: dict[str, list[int]] = {}
+            for index, query_text in selected:
+                key_to_indexes.setdefault(query_text.lower(), []).append(index)
+            query_keys = tuple(key_to_indexes)
+            placeholders = ", ".join("?" for _ in query_keys)
+            path, body, repetitions = definitions[collection]
+            try:
+                rows = self._read_rows(
+                    path,
+                    body.format(placeholders=placeholders),
+                    query_keys * repetitions,
+                )
+            except (OSError, sqlite3.Error):
+                continue
+            statement_count += 1
+            for row in rows:
+                for query_index in key_to_indexes.get(str(row["query_key"]), []):
+                    identities[query_index].append(
+                        (collection, str(row["entity_id"]))
+                    )
+        return identities, statement_count
 
     def search(
         self,
@@ -809,63 +1033,11 @@ class VerifiedLocalDictionary:
         limit: int = MAX_CANDIDATES_PER_QUERY,
         collections: Iterable[str] | None = None,
     ) -> tuple[LocalDictionaryMatch, ...]:
-        self._ensure_assets_are_current()
-        if not isinstance(query_text, str) or not query_text.strip():
-            return ()
-        bounded_limit = min(MAX_CANDIDATES_PER_QUERY, max(0, int(limit)))
-        selected_collections = frozenset(
-            collections
-            if collections is not None
-            else (
-                "drug_terms",
-                "procedure_terms",
-                "anatomy_terms",
-                "emergency_terms",
-            )
-        ) & frozenset(
-            {
-                "drug_terms",
-                "procedure_terms",
-                "anatomy_terms",
-                "emergency_terms",
-            }
+        batch = self.search_many(
+            ((query_text, collections),),
+            limit=limit,
         )
-        if not selected_collections:
-            return ()
-        matches: dict[tuple[str, str], tuple[LocalDictionaryMatch, bool]] = {}
-        for collection, entity_id in self._exact_query_identities(query_text):
-            if collection not in selected_collections:
-                continue
-            match = self._match(collection, entity_id, 1.0)
-            if match is not None:
-                matches.setdefault((collection, entity_id), (match, True))
-        for collection, entity_id, score in self._vector_query_identities(
-            query_text,
-            limit=max(MAX_CANDIDATES_PER_QUERY * 4, bounded_limit * 4),
-            collections=selected_collections,
-        ):
-            match = self._match(collection, entity_id, score)
-            if match is None:
-                continue
-            key = (collection, entity_id)
-            current = matches.get(key)
-            if current is None or (
-                not current[1]
-                and match.retrieval_score > current[0].retrieval_score
-            ):
-                matches[key] = (match, False)
-        return tuple(
-            item[0]
-            for item in sorted(
-                matches.values(),
-                key=lambda item: (
-                    -int(item[1]),
-                    -item[0].retrieval_score,
-                    _COLLECTION_ORDER[item[0].collection],
-                    item[0].entity_id,
-                ),
-            )[:bounded_limit]
-        )
+        return batch.matches[0]
 
     def search_exact(
         self,
@@ -874,89 +1046,134 @@ class VerifiedLocalDictionary:
         limit: int = MAX_CANDIDATES_PER_QUERY,
         collections: Iterable[str] | None = None,
     ) -> tuple[LocalDictionaryMatch, ...]:
-        self._ensure_assets_are_current()
-        if not isinstance(query_text, str) or not query_text.strip():
-            return ()
-        bounded_limit = min(MAX_CANDIDATES_PER_QUERY, max(0, int(limit)))
-        selected_collections = frozenset(
-            collections
-            if collections is not None
-            else (
-                "drug_terms",
-                "procedure_terms",
-                "anatomy_terms",
-                "emergency_terms",
-            )
-        ) & frozenset(
-            {
-                "drug_terms",
-                "procedure_terms",
-                "anatomy_terms",
-                "emergency_terms",
-            }
+        batch = self.search_many(
+            ((query_text, collections),),
+            limit=limit,
+            exact_only=True,
         )
-        if not selected_collections:
-            return ()
-        matches: dict[tuple[str, str], LocalDictionaryMatch] = {}
-        for collection, entity_id in self._exact_query_identities(query_text):
-            if collection not in selected_collections:
-                continue
-            match = self._match(collection, entity_id, 1.0)
-            if match is not None:
-                matches.setdefault((collection, entity_id), match)
-        return tuple(
-            sorted(
-                matches.values(),
-                key=lambda match: (
-                    _COLLECTION_ORDER[match.collection],
-                    match.entity_id,
-                ),
-            )[:bounded_limit]
+        return batch.matches[0]
+
+    def search_many(
+        self,
+        requests: Sequence[tuple[str, Iterable[str] | None]],
+        *,
+        limit: int = MAX_CANDIDATES_PER_QUERY,
+        exact_only: bool = False,
+    ) -> _DictionarySearchBatch:
+        bounded_limit = min(MAX_CANDIDATES_PER_QUERY, max(0, int(limit)))
+        normalized = self._normalize_search_requests(requests)
+        if not normalized:
+            return _DictionarySearchBatch((), 0.0, 0.0, 0, 0)
+        with self.request_session():
+            self._ensure_assets_are_current()
+            started = time.perf_counter()
+            exact_identities, exact_statements = self._exact_query_identities_many(
+                normalized
+            )
+            if exact_only:
+                vector_identities = {
+                    index: [] for index in range(len(normalized))
+                }
+                vector_ms = 0.0
+                vector_statements = 0
+            else:
+                (
+                    vector_identities,
+                    vector_ms,
+                    vector_statements,
+                ) = self._vector_query_identities_many(
+                    normalized,
+                    limit=max(MAX_CANDIDATES_PER_QUERY * 4, bounded_limit * 4),
+                )
+            output: list[tuple[LocalDictionaryMatch, ...]] = []
+            for index in range(len(normalized)):
+                matches: dict[
+                    tuple[str, str], tuple[LocalDictionaryMatch, bool]
+                ] = {}
+                for collection, entity_id in exact_identities[index]:
+                    match = self._match(collection, entity_id, 1.0)
+                    if match is not None:
+                        matches.setdefault((collection, entity_id), (match, True))
+                for collection, entity_id, score in vector_identities[index]:
+                    match = self._match(collection, entity_id, score)
+                    if match is None:
+                        continue
+                    key = (collection, entity_id)
+                    current = matches.get(key)
+                    if current is None or (
+                        not current[1]
+                        and match.retrieval_score > current[0].retrieval_score
+                    ):
+                        matches[key] = (match, False)
+                output.append(
+                    tuple(
+                        item[0]
+                        for item in sorted(
+                            matches.values(),
+                            key=lambda item: (
+                                -int(item[1]),
+                                -item[0].retrieval_score,
+                                _COLLECTION_ORDER[item[0].collection],
+                                item[0].entity_id,
+                            ),
+                        )[:bounded_limit]
+                    )
+                )
+            elapsed_ms = (time.perf_counter() - started) * 1000
+        return _DictionarySearchBatch(
+            matches=tuple(output),
+            dictionary_ms=round(max(0.0, elapsed_ms - vector_ms), 3),
+            vector_ms=round(vector_ms, 3),
+            exact_statement_count=exact_statements,
+            vector_statement_count=vector_statements,
         )
 
-    def _vector_query_identities(
+    def _vector_query_identities_many(
         self,
-        query_text: str,
+        requests: tuple[tuple[str, frozenset[str]], ...],
         *,
         limit: int,
-        collections: frozenset[str],
-    ) -> list[tuple[str, str, float]]:
-        active_collections = collections & self._current_vector_collections()
+    ) -> tuple[dict[int, list[tuple[str, str, float]]], float, int]:
+        identities: dict[int, list[tuple[str, str, float]]] = {
+            index: [] for index in range(len(requests))
+        }
+        active = self._current_vector_collections()
         if (
             self._vector_index is None
             or self._embedder is None
             or limit <= 0
-            or not active_collections
+            or not active
         ):
-            return []
-        query_vector = self._embedder.embed(query_text)
+            return identities, 0.0, 0
+        started = time.perf_counter()
         try:
             import numpy as np
-            import sqlite_vec
-
-            if not np.any(query_vector):
-                return []
-            connection = sqlite3.connect(
-                f"file:{self._vector_index}?mode=ro",
-                uri=True,
-            )
-            connection.row_factory = sqlite3.Row
-            connection.enable_load_extension(True)
-            sqlite_vec.load(connection)
-            connection.enable_load_extension(False)
+            connection = self._connection(self._vector_index, vector=True)
         except (ImportError, OSError, sqlite3.Error):
-            return []
-        identities: list[tuple[str, str, float]] = []
-        query_tokens = {
-            token.casefold()
-            for token in _ASCII_QUERY_TOKEN_RE.findall(query_text)
-            if len(token) >= 3
+            return identities, round((time.perf_counter() - started) * 1000, 3), 0
+        query_vectors = {
+            index: self._embedder.embed(query_text)
+            for index, (query_text, collections) in enumerate(requests)
+            if query_text and collections & active
         }
-        try:
-            for collection in sorted(
-                active_collections,
-                key=_COLLECTION_ORDER.__getitem__,
-            ):
+        query_tokens = {
+            index: {
+                token.casefold()
+                for token in _ASCII_QUERY_TOKEN_RE.findall(query_text)
+                if len(token) >= 3
+            }
+            for index, (query_text, _) in enumerate(requests)
+        }
+        statement_count = 0
+        for collection in sorted(active, key=_COLLECTION_ORDER.__getitem__):
+            for index, (_, selected_collections) in enumerate(requests):
+                query_vector = query_vectors.get(index)
+                if (
+                    collection not in selected_collections
+                    or query_vector is None
+                    or not np.any(query_vector)
+                ):
+                    continue
                 entity_types: tuple[str | None, ...] = (
                     ("ingredient", "product")
                     if collection == "drug_terms"
@@ -980,6 +1197,7 @@ class VerifiedLocalDictionary:
                         ).fetchall()
                     except sqlite3.Error:
                         continue
+                    statement_count += 1
                     for row in rows:
                         row_tokens = {
                             token.casefold()
@@ -993,7 +1211,7 @@ class VerifiedLocalDictionary:
                             )
                             if len(token) >= 3
                         }
-                        if query_tokens and not query_tokens & row_tokens:
+                        if query_tokens[index] and not query_tokens[index] & row_tokens:
                             continue
                         distance = row["distance"]
                         if (
@@ -1005,23 +1223,26 @@ class VerifiedLocalDictionary:
                         similarity = 1.0 - float(distance)
                         if similarity < self._minimum_vector_similarity:
                             continue
-                        identities.append(
+                        identities[index].append(
                             (
                                 collection,
                                 str(row["entity_id"]),
                                 min(1.0, max(0.0, similarity)),
                             )
                         )
-        finally:
-            connection.close()
-        identities.sort(
-            key=lambda item: (
-                -item[2],
-                _COLLECTION_ORDER[item[0]],
-                item[1],
+        for values in identities.values():
+            values.sort(
+                key=lambda item: (
+                    -item[2],
+                    _COLLECTION_ORDER[item[0]],
+                    item[1],
+                )
             )
+        return (
+            identities,
+            round((time.perf_counter() - started) * 1000, 3),
+            statement_count,
         )
-        return identities
 
 
 class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
@@ -1064,9 +1285,23 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
         )
 
     def _resolve(self, document: MedicalQueryDocument, /) -> QueryResolution:
+        request_session = getattr(self._dictionary, "request_session", None)
+        if callable(request_session):
+            with request_session():
+                return self._resolve_in_session(document)
+        return self._resolve_in_session(document)
+
+    def _resolve_in_session(
+        self,
+        document: MedicalQueryDocument,
+        /,
+    ) -> QueryResolution:
         candidates: list[ResolvedCandidate] = []
         issues: list[QueryResolutionIssue] = []
         issue_keys: set[tuple[str, str, str, str | None]] = set()
+        umls_ms = 0.0
+        dictionary_ms = 0.0
+        vector_ms = 0.0
 
         def add_issue(
             code: str,
@@ -1087,16 +1322,35 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 )
             )
 
-        def safe_search(
+        def legacy_search(
             query_text: str,
             allowed_collections: frozenset[str] | None = None,
+            *,
+            exact_only: bool = False,
         ) -> tuple[LocalDictionaryMatch, ...]:
+            nonlocal dictionary_ms
+            started = time.perf_counter()
             try:
-                values = self._dictionary.search(
-                    query_text,
-                    limit=MAX_CANDIDATES_PER_QUERY,
-                    collections=allowed_collections,
-                )
+                search_exact = getattr(self._dictionary, "search_exact", None)
+                if exact_only and callable(search_exact):
+                    values = search_exact(
+                        query_text,
+                        limit=MAX_CANDIDATES_PER_QUERY,
+                        collections=allowed_collections,
+                    )
+                else:
+                    values = self._dictionary.search(
+                        query_text,
+                        limit=MAX_CANDIDATES_PER_QUERY,
+                        collections=allowed_collections,
+                    )
+                    if exact_only:
+                        values = tuple(
+                            match
+                            for match in values
+                            if isinstance(match, LocalDictionaryMatch)
+                            and match.retrieval_score >= 0.999999
+                        )
             except Exception:
                 add_issue(
                     "DICTIONARY_UNAVAILABLE",
@@ -1104,6 +1358,8 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     "baseline",
                 )
                 return ()
+            finally:
+                dictionary_ms += (time.perf_counter() - started) * 1000
             return _bounded_dictionary_matches(
                 value
                 for value in values
@@ -1114,45 +1370,72 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 )
             )
 
-        def safe_exact_search(
-            query_text: str,
-            allowed_collections: frozenset[str] | None = None,
-        ) -> tuple[LocalDictionaryMatch, ...]:
-            try:
-                search_exact = getattr(self._dictionary, "search_exact", None)
-                if callable(search_exact):
-                    values = search_exact(
+        def safe_search_many(
+            requests: Sequence[tuple[str, frozenset[str] | None]],
+            *,
+            exact_only: bool = False,
+        ) -> tuple[tuple[LocalDictionaryMatch, ...], ...]:
+            nonlocal dictionary_ms, vector_ms
+            if not requests:
+                return ()
+            search_many = getattr(self._dictionary, "search_many", None)
+            if not callable(search_many):
+                return tuple(
+                    legacy_search(
                         query_text,
-                        limit=MAX_CANDIDATES_PER_QUERY,
-                        collections=allowed_collections,
+                        allowed_collections,
+                        exact_only=exact_only,
                     )
-                else:
-                    values = tuple(
-                        match
-                        for match in self._dictionary.search(
-                            query_text,
-                            limit=MAX_CANDIDATES_PER_QUERY,
-                            collections=allowed_collections,
-                        )
-                        if isinstance(match, LocalDictionaryMatch)
-                        and match.retrieval_score >= 0.999999
-                    )
+                    for query_text, allowed_collections in requests
+                )
+            try:
+                batch = search_many(
+                    requests,
+                    limit=MAX_CANDIDATES_PER_QUERY,
+                    exact_only=exact_only,
+                )
             except Exception:
                 add_issue(
                     "DICTIONARY_UNAVAILABLE",
                     "dictionary_search",
                     "baseline",
                 )
-                return ()
-            return _bounded_dictionary_matches(
-                value
-                for value in values
-                if allowed_collections is None
-                or (
-                    isinstance(value, LocalDictionaryMatch)
-                    and value.collection in allowed_collections
+                return tuple(() for _ in requests)
+            dictionary_ms += float(getattr(batch, "dictionary_ms", 0.0))
+            vector_ms += float(getattr(batch, "vector_ms", 0.0))
+            values_by_request = getattr(batch, "matches", ())
+            if len(values_by_request) != len(requests):
+                return tuple(() for _ in requests)
+            return tuple(
+                _bounded_dictionary_matches(
+                    value
+                    for value in values
+                    if allowed_collections is None
+                    or (
+                        isinstance(value, LocalDictionaryMatch)
+                        and value.collection in allowed_collections
+                    )
+                )
+                for values, (_, allowed_collections) in zip(
+                    values_by_request,
+                    requests,
                 )
             )
+
+        def safe_search(
+            query_text: str,
+            allowed_collections: frozenset[str] | None = None,
+        ) -> tuple[LocalDictionaryMatch, ...]:
+            return safe_search_many(((query_text, allowed_collections),))[0]
+
+        def safe_exact_search(
+            query_text: str,
+            allowed_collections: frozenset[str] | None = None,
+        ) -> tuple[LocalDictionaryMatch, ...]:
+            return safe_search_many(
+                ((query_text, allowed_collections),),
+                exact_only=True,
+            )[0]
 
         context = [
             {"id": segment.segment_id, "text": segment.raw_text}
@@ -1186,6 +1469,7 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             batches, oversized_segment_ids = _worker_batches(translated)
             worker_unavailable = bool(oversized_segment_ids)
             for batch in batches:
+                worker_started = time.perf_counter()
                 try:
                     outcome = self._span_linker.link(
                         list(batch),
@@ -1193,6 +1477,8 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     )
                 except Exception:
                     outcome = None
+                finally:
+                    umls_ms += (time.perf_counter() - worker_started) * 1000
                 if outcome is None or outcome.fallback_used:
                     worker_unavailable = True
                     continue
@@ -1326,14 +1612,21 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         }:
                             query_variants.append(value)
 
-                    verified_matches: dict[tuple[str, str], LocalDictionaryMatch] = {}
+                    verified_matches: dict[
+                        tuple[str, str], LocalDictionaryMatch
+                    ] = {}
+                    search_requests: list[
+                        tuple[str, frozenset[str] | None]
+                    ] = []
                     for query in query_variants:
                         if segment_budget <= 0 or document_budget <= 0:
                             break
                         segment_budget -= 1
                         document_budget -= 1
                         umls_query_count += 1
-                        for match in safe_search(query, allowed_collections):
+                        search_requests.append((query, allowed_collections))
+                    for matches in safe_search_many(search_requests):
+                        for match in matches:
                             identity = (match.collection, match.entity_id)
                             current = verified_matches.get(identity)
                             if (
@@ -1382,6 +1675,7 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 for region_start, region_end, exact_only in planned_regions:
                     region_matched = False
                     planned_any = False
+                    region_plans: list[_NgramQuery] = []
                     for plan in _ngram_queries_for_region(
                         translation,
                         region_start,
@@ -1401,11 +1695,12 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         segment_budget -= 1
                         document_budget -= 1
                         ngram_query_count += 1
-                        matches = (
-                            safe_exact_search(plan.search_text)
-                            if exact_only
-                            else safe_search(plan.search_text)
-                        )
+                        region_plans.append(plan)
+                    region_matches = safe_search_many(
+                        tuple((plan.search_text, None) for plan in region_plans),
+                        exact_only=exact_only,
+                    )
+                    for plan, matches in zip(region_plans, region_matches):
                         if matches:
                             region_matched = True
                         evidence = CandidateEvidence(
@@ -1433,6 +1728,7 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
         # Korean canonical terms that translation/linking missed without
         # allowing the RAW lane to suppress translated candidates.
         for segment in document.segments:
+            raw_started = time.perf_counter()
             try:
                 raw_hits = self._dictionary.raw_matches(
                     raw_text=segment.raw_text,
@@ -1446,6 +1742,8 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     segment.segment_id,
                 )
                 raw_hits = ()
+            finally:
+                dictionary_ms += (time.perf_counter() - raw_started) * 1000
             translated_identities = frozenset(
                 resolved_identities_by_segment[segment.segment_id]
             )
@@ -1485,5 +1783,10 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             unresolved_count=unresolved_count,
             candidates=tuple(candidates),
             issues=tuple(issues),
+            telemetry=QueryResolutionTelemetry(
+                umls_ms=round(umls_ms, 3),
+                dictionary_ms=round(dictionary_ms, 3),
+                vector_ms=round(vector_ms, 3),
+            ),
         )
 

@@ -109,7 +109,26 @@ class ScispacyUmlsExtractor:
         extraction_started = time.perf_counter()
         spans: list[dict[str, Any]] = []
         texts = [segment["translated_text_en"] for segment in segments]
-        for segment, doc in zip(segments, self._nlp.pipe(texts)):
+        detection_started = time.perf_counter()
+        documents = list(self._nlp.pipe(texts))
+        mention_detection_ms = (time.perf_counter() - detection_started) * 1000
+        detected_span_count = 0
+        detected_span_characters = 0
+        linker_document_count = 0
+        linking_started = time.perf_counter()
+        for segment, doc in zip(segments, documents):
+            # Mention detection keeps the full sentence context. The expensive
+            # UMLS candidate linker is skipped for sentences with no detected
+            # medical spans and otherwise operates only on doc.ents.
+            detected_entities = tuple(doc.ents)
+            detected_span_count += len(detected_entities)
+            detected_span_characters += sum(
+                max(0, entity.end_char - entity.start_char)
+                for entity in detected_entities
+            )
+            if not detected_entities:
+                continue
+            linker_document_count += 1
             doc = self._linker(doc)
             for entity in doc.ents:
                 candidates: list[dict[str, Any]] = []
@@ -137,8 +156,17 @@ class ScispacyUmlsExtractor:
                         "umls_candidates": candidates,
                     }
                 )
+        linking_ms = (time.perf_counter() - linking_started) * 1000
+        input_characters = sum(len(text) for text in texts)
         return spans, {
             **self._metadata,
+            "input_segment_count": len(segments),
+            "input_character_count": input_characters,
+            "detected_span_count": detected_span_count,
+            "detected_span_character_count": detected_span_characters,
+            "linker_document_count": linker_document_count,
+            "mention_detection_latency_ms": round(mention_detection_ms, 3),
+            "linking_latency_ms": round(linking_ms, 3),
             "extraction_latency_ms": round(
                 (time.perf_counter() - extraction_started) * 1000,
                 3,

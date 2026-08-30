@@ -29,6 +29,7 @@ __all__ = (
     "UmlsCandidateProvenance",
     "ResolvedCandidate",
     "QueryResolutionIssue",
+    "QueryResolutionTelemetry",
     "QueryResolution",
     "MedicalQueryResolver",
 )
@@ -381,6 +382,29 @@ class QueryResolutionIssue:
 
 
 @dataclass(frozen=True)
+class QueryResolutionTelemetry:
+    umls_ms: float = 0.0
+    dictionary_ms: float = 0.0
+    vector_ms: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("umls_ms", self.umls_ms),
+            ("dictionary_ms", self.dictionary_ms),
+            ("vector_ms", self.vector_ms),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise InvalidQueryResolutionError(
+                    f"{name} must be a finite non-negative number"
+                )
+
+
+@dataclass(frozen=True)
 class QueryResolution:
     mode: QueryResolutionMode
     status: QueryResolutionStatus
@@ -390,6 +414,11 @@ class QueryResolution:
     unresolved_count: int = 0
     candidates: tuple[ResolvedCandidate, ...] = ()
     issues: tuple[QueryResolutionIssue, ...] = ()
+    telemetry: QueryResolutionTelemetry = field(
+        default_factory=QueryResolutionTelemetry,
+        repr=False,
+        compare=False,
+    )
     fallback_used: bool = field(default=False, init=False)
     raw_exact_count: int = field(default=0, init=False)
     schema_version: str = field(
@@ -436,6 +465,10 @@ class QueryResolution:
         ):
             raise InvalidQueryResolutionError(
                 "issues must be a tuple of QueryResolutionIssue values"
+            )
+        if not isinstance(self.telemetry, QueryResolutionTelemetry):
+            raise InvalidQueryResolutionError(
+                "telemetry must be a QueryResolutionTelemetry value"
             )
         if self.mode in {"legacy", "shadow"} and any(
             candidate.route == "umls" for candidate in self.candidates

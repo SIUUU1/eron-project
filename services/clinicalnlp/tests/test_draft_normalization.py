@@ -13,18 +13,23 @@ def _candidate(
     match_type="umls_dictionary_search",
     retrieval_score=0.9,
     similarity=0.95,
+    semantic_types=None,
+    collection="emergency_terms",
+    entity_type=None,
 ):
     return {
-        "collection": "emergency_terms",
+        "collection": collection,
         "entity_id": entity_id,
         "canonical_ko": "",
         "canonical_en": canonical_en,
         "match_type": match_type,
         "review_status": "needs_review",
         "retrieval_score": retrieval_score,
+        "entity_type": entity_type,
         "provenance": {
             "source": "UMLS",
             "similarity": similarity,
+            "semantic_types": semantic_types or [],
         },
     }
 
@@ -169,6 +174,32 @@ class DraftNormalizationTests(unittest.TestCase):
 
         self.assertEqual(len(accepted), 1)
         self.assertEqual(dropped, [])
+
+    def test_incompatible_semantic_type_is_not_offered_to_field_normalization(self):
+        medication_record = {
+            "medications": {
+                "items": [
+                    {
+                        "raw_value": "폐렴 약을 복용합니다.",
+                        "status": "confirmed",
+                        "evidence": {"source_segment_id": "seg_0001"},
+                    }
+                ]
+            }
+        }
+        disease = _candidate(
+            "emergency:pneumonia",
+            "Pneumonia",
+            semantic_types=["T047"],
+        )
+
+        direct, payload = build_draft_normalization_plan(
+            medication_record,
+            _segments([disease]),
+        )
+
+        self.assertEqual(direct, [])
+        self.assertEqual(payload, {"fields": []})
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from .draft_normalization import (
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
-DEFAULT_PROMPT = PROJECT_ROOT / "prompts" / "clinical_record_extraction_v1.txt"
+DEFAULT_PROMPT = PROJECT_ROOT / "prompts" / "clinical_record_extraction_v2.txt"
 DEFAULT_CANDIDATE_PROMPT = (
     PROJECT_ROOT / "prompts" / "candidate_adjudication_v1.txt"
 )
@@ -35,7 +35,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 3072
 MAX_CANDIDATES_PER_ANNOTATION = 5
 MAX_MODEL_CANDIDATES_PER_ANNOTATION = 3
 MAX_MODEL_CANDIDATE_ANNOTATIONS = 16
-CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v1"
+CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2"
 CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
 
