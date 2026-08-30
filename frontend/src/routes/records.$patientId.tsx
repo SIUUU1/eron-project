@@ -18,7 +18,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { type ChangeEvent, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -36,6 +36,11 @@ import {
   type DraftDialogueTurn,
 } from "@/api/clinical-records";
 import type { WhisperDraftRequest } from "@/api/types";
+import {
+  BrowserAudioRecorder,
+  audioRecordingErrorMessage,
+  type AudioRecorderState,
+} from "@/lib/browser-audio-recorder";
 import { FieldProvenancePanel } from "@/components/records/field-provenance-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -159,7 +164,7 @@ function RecordWorkflowPage() {
   const [uploadedAudioFile, setUploadedAudioFile] = useState<File | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const [transcribingFileName, setTranscribingFileName] = useState<string | null>(null);
-  const [recording, setRecording] = useState<"idle" | "on" | "paused">("idle");
+  const [recording, setRecording] = useState<AudioRecorderState>("idle");
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
   const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>({});
@@ -187,6 +192,15 @@ function RecordWorkflowPage() {
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({});
   const whisperFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioFileInputRef = useRef<HTMLInputElement | null>(null);
+  const audioRecorderRef = useRef<BrowserAudioRecorder | null>(null);
+
+  useEffect(
+    () => () => {
+      audioRecorderRef.current?.dispose();
+      audioRecorderRef.current = null;
+    },
+    [],
+  );
 
   const statuses = useMemo(() => {
     const out = {} as Record<RecordFieldKey, CheckStatus>;
@@ -237,11 +251,7 @@ function RecordWorkflowPage() {
     }
   };
 
-  const loadAudioFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
+  const transcribeAudioFile = async (file: File) => {
     if (file.size === 0) {
       toast.error("빈 음성 파일은 사용할 수 없습니다.");
       return;
@@ -279,6 +289,60 @@ function RecordWorkflowPage() {
     } finally {
       setTranscribing(false);
       setTranscribingFileName(null);
+    }
+  };
+
+  const loadAudioFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    await transcribeAudioFile(file);
+  };
+
+  const startRecording = async () => {
+    if (recording === "recording" || generating || transcribing) return;
+    const resuming = recording === "paused";
+    try {
+      const recorder = audioRecorderRef.current ?? new BrowserAudioRecorder();
+      audioRecorderRef.current = recorder;
+      await recorder.start();
+      setRecording(recorder.state);
+      toast.info(resuming ? "녹음을 재개했습니다." : "녹음을 시작했습니다.");
+    } catch (error) {
+      audioRecorderRef.current?.dispose();
+      audioRecorderRef.current = null;
+      setRecording("idle");
+      toast.error("음성 녹음을 시작하지 못했습니다.", {
+        description: audioRecordingErrorMessage(error),
+      });
+    }
+  };
+
+  const pauseRecording = () => {
+    const recorder = audioRecorderRef.current;
+    if (!recorder || recording !== "recording") return;
+    recorder.pause();
+    setRecording(recorder.state);
+    toast.info("녹음을 일시정지했습니다.");
+  };
+
+  const stopRecording = async () => {
+    const recorder = audioRecorderRef.current;
+    if (!recorder || recording === "idle") return;
+    try {
+      const audio = await recorder.stop();
+      setRecording("idle");
+      audioRecorderRef.current = null;
+      await transcribeAudioFile(audio);
+    } catch (error) {
+      toast.error("음성 녹음을 완료하지 못했습니다.", {
+        description: audioRecordingErrorMessage(error),
+      });
+    } finally {
+      recorder.dispose();
+      audioRecorderRef.current = null;
+      setRecording("idle");
     }
   };
 
@@ -464,18 +528,27 @@ function RecordWorkflowPage() {
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
-                  variant={recording === "on" ? "default" : "outline"}
-                  onClick={() => {
-                    setRecording("on");
-                    toast.info("녹음을 시작했습니다. (시연용)");
-                  }}
+                  variant={recording === "recording" ? "default" : "outline"}
+                  onClick={startRecording}
+                  disabled={generating || transcribing || recording === "recording"}
                 >
-                  <Mic className="size-4" /> 녹음 시작
+                  <Mic className="size-4" />
+                  {recording === "paused" ? " 녹음 재개" : " 녹음 시작"}
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setRecording("paused")}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={pauseRecording}
+                  disabled={generating || transcribing || recording !== "recording"}
+                >
                   <Pause className="size-4" /> 녹음 일시정지
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setRecording("idle")}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={stopRecording}
+                  disabled={generating || transcribing || recording === "idle"}
+                >
                   <Square className="size-4" /> 녹음 종료
                 </Button>
                 <input
@@ -489,7 +562,7 @@ function RecordWorkflowPage() {
                   size="sm"
                   variant="secondary"
                   onClick={() => whisperFileInputRef.current?.click()}
-                  disabled={generating || transcribing}
+                  disabled={generating || transcribing || recording !== "idle"}
                 >
                   <Upload className="size-4" /> Whisper JSON 불러오기
                 </Button>
@@ -504,7 +577,7 @@ function RecordWorkflowPage() {
                   size="sm"
                   variant="secondary"
                   onClick={() => audioFileInputRef.current?.click()}
-                  disabled={generating || transcribing}
+                  disabled={generating || transcribing || recording !== "idle"}
                 >
                   {transcribing ? (
                     <Loader2 className="size-4 animate-spin" />
@@ -534,9 +607,13 @@ function RecordWorkflowPage() {
               ) : null}
               {recording !== "idle" && (
                 <p className="flex items-center gap-2 text-xs text-risk-critical">
-                  <span className="size-2 animate-pulse rounded-full bg-risk-critical" />
-                  {recording === "on" ? "녹음 중" : "일시정지"} · 실제 음성인식은 시연에서
-                  제공되지 않습니다.
+                  <span
+                    className={`size-2 rounded-full bg-risk-critical ${
+                      recording === "recording" ? "animate-pulse" : ""
+                    }`}
+                  />
+                  {recording === "recording" ? "녹음 중" : "녹음 일시정지"} · 녹음 종료 시
+                  API1 음성 인식을 자동으로 시작합니다.
                 </p>
               )}
               <ScrollArea className="h-[420px] rounded-md border bg-secondary/30 p-3">
@@ -574,7 +651,11 @@ function RecordWorkflowPage() {
           <Card>
             <CardHeader className="flex-row items-center justify-between border-b py-3">
               <CardTitle className="text-base">AI 응급진료기록</CardTitle>
-              <Button size="sm" onClick={generateRecord} disabled={generating || transcribing}>
+              <Button
+                size="sm"
+                onClick={generateRecord}
+                disabled={generating || transcribing || recording !== "idle"}
+              >
                 {generating ? (
                   <>
                     <Loader2 className="size-4 animate-spin" /> 생성 중

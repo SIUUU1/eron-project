@@ -19,5 +19,10 @@ segment는 대화 기록에 표시되고, 사용자가 초안 생성을 누르�
 `POST /api/clinical-records/draft/audio`도 호환성을 위해 유지합니다. Whisper
 컨테이너는 호스트 포트를 공개하지 않으므로 OCI ingress 규칙이 필요하지 않습니다.
 
+기록 화면의 녹음 시작·일시정지·재개·종료는 브라우저 `MediaRecorder`를 사용합니다.
+녹음을 종료하면 생성된 오디오를 `/api/clinical-records/transcribe`로 자동 전달합니다.
+브라우저 마이크 권한은 `localhost` 또는 HTTPS 환경에서만 사용할 수 있으므로 OCI
+배포에서는 HTTPS가 필요합니다.
+
 음성은 Groq Cloud로 전송됩니다. 합성 또는 적절히 비식별화되었고 외부 전송이
 승인된 데이터만 사용해야 합니다.
