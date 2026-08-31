@@ -20,7 +20,7 @@ PostgreSQL이 관리하는 데이터:
 
 SQLite 원본은 PG importer와 결과 동등성 검증이 완료될 때까지 삭제하지 않는다.
 
-## Schema version 001
+## Schema version 001-002
 
 [`database/init/05_clinicalnlp.sql`](../database/init/05_clinicalnlp.sql)은 다음을
 생성한다.
@@ -32,6 +32,10 @@ SQLite 원본은 PG importer와 결과 동등성 검증이 완료될 때까지 �
 - KCD exact/FTS/trigram 검색 테이블
 - 정책 문서·청크·FTS·pgvector 검색 테이블
 - 승인 별칭 후보와 version 이력 테이블
+
+[`database/init/06_clinicalnlp_import_source_rows.sql`](../database/init/06_clinicalnlp_import_source_rows.sql)은
+정규화 문자열이 같아도 서로 다른 공식 source row를 각각 보존하도록 의료용어와
+KCD term identity를 추가한다.
 
 같은 source의 hash가 바뀌면 `source_releases`에 새로운 행으로 적재한다. 활성
 release만 교체하며 기존 release는 감사·rollback 목적으로 보존한다.
@@ -64,9 +68,26 @@ python3 database/scripts/apply_clinicalnlp_schema.py --database DATABASE_NAME
 python3 -m unittest database.tests.test_clinicalnlp_migration
 ```
 
+## 의료용어·KCD importer
+
+기존 SQLite 원본 5개를 active PostgreSQL release로 적재한다.
+
+```bash
+python3 database/scripts/import_clinicalnlp_dictionaries.py
+```
+
+Importer는 SQLite 파일 SHA-256과 importer schema version을 release identity로
+사용한다. 같은 release를 다시 실행해도 중복되지 않으며, 새 release가 완전히
+적재된 뒤에만 이전 release를 inactive로 전환한다. `ready`는 active release 수와
+SQLite에서 계산한 concept·term 기대 행 수가 PostgreSQL과 모두 일치할 때만 반환한다.
+
+```bash
+python3 -m unittest database.tests.test_clinicalnlp_dictionary_import
+```
+
 ## 이번 migration에 포함되지 않는 작업
 
-- 기존 SQLite 행과 embedding을 PostgreSQL로 복사
+- 기존 embedding을 PostgreSQL로 복사
 - ClinicalNLP 조회 adapter를 PostgreSQL로 전환
 - SQLite fallback 제거
 - UMLS runtime 자산을 PostgreSQL에 저장

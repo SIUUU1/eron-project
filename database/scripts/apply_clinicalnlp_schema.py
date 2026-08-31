@@ -12,10 +12,12 @@ import sys
 
 
 REPO = Path(__file__).resolve().parents[2]
-MIGRATION = REPO / "database" / "init" / "05_clinicalnlp.sql"
+MIGRATIONS = tuple(
+    sorted((REPO / "database" / "init").glob("0[5-9]_clinicalnlp*.sql"))
+)
 EXPECTED_TABLE_COUNT = 15
 EXPECTED_VECTOR_DIMENSIONS = 256
-EXPECTED_MIGRATION = "001"
+EXPECTED_MIGRATION = "002"
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -130,11 +132,14 @@ def main(argv: list[str] | None = None) -> int:
         label="user",
     )
 
-    _psql(
-        user=user,
-        database=database,
-        input_text=MIGRATION.read_text(encoding="utf-8"),
-    )
+    if not MIGRATIONS:
+        raise SystemExit("[FATAL] no ClinicalNLP migrations found")
+    for migration in MIGRATIONS:
+        _psql(
+            user=user,
+            database=database,
+            input_text=migration.read_text(encoding="utf-8"),
+        )
     result = json.loads(
         _psql(
             user=user,

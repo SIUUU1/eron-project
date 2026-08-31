@@ -9,7 +9,9 @@ import uuid
 
 
 REPO = Path(__file__).resolve().parents[2]
-MIGRATION = REPO / "database" / "init" / "05_clinicalnlp.sql"
+MIGRATIONS = tuple(
+    sorted((REPO / "database" / "init").glob("0[5-9]_clinicalnlp*.sql"))
+)
 RUNNER = REPO / "database" / "scripts" / "apply_clinicalnlp_schema.py"
 
 
@@ -74,21 +76,21 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         )
 
     def test_migration_is_idempotent_and_creates_the_pgvector_contract(self) -> None:
-        sql = MIGRATION.read_text(encoding="utf-8")
         for _ in range(2):
-            self._postgres(
-                "psql",
-                "-U",
-                self.pg_user,
-                "-d",
-                self.database,
-                "-v",
-                "ON_ERROR_STOP=1",
-                "--no-psqlrc",
-                "-f",
-                "-",
-                input_text=sql,
-            )
+            for migration in MIGRATIONS:
+                self._postgres(
+                    "psql",
+                    "-U",
+                    self.pg_user,
+                    "-d",
+                    self.database,
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "--no-psqlrc",
+                    "-f",
+                    "-",
+                    input_text=migration.read_text(encoding="utf-8"),
+                )
 
         expected_tables = {
             "alias_candidates",
@@ -130,9 +132,9 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             self._query(
                 "SELECT count(*) FROM clinicalnlp.schema_migrations "
-                "WHERE version = '001'"
+                "WHERE version IN ('001', '002')"
             ),
-            "1",
+            "2",
         )
 
     def test_runner_applies_and_verifies_an_existing_database(self) -> None:
@@ -151,7 +153,7 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(process.stdout),
             {
-                "migration": "001",
+                "migration": "002",
                 "schema": "clinicalnlp",
                 "status": "ready",
                 "table_count": 15,
