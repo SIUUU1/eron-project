@@ -177,7 +177,9 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                 "CLINICALNLP_GEMMA_MAX_TOKENS": "3072",
                 "CLINICALNLP_QUERY_EXPANSION_MAX_TOKENS": "1536",
                 "CLINICALNLP_QUERY_EXPANSION_PASSES": "1",
-                "CLINICALNLP_TRANSLATION_BATCH_SIZE": "3",
+                # Retained deployments may still carry this obsolete setting.
+                # Dynamic token budgeting must ignore it.
+                "CLINICALNLP_TRANSLATION_BATCH_SIZE": "not-a-number",
                 "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 "CLINICALNLP_UMLS_ENABLED": "true",
                 "CLINICALNLP_UMLS_TIMEOUT": "90",
@@ -197,7 +199,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.clinical_max_tokens, 3072)
         self.assertEqual(settings.query_max_tokens, 1536)
         self.assertEqual(settings.query_passes, 1)
-        self.assertEqual(settings.translation_batch_size, 3)
+        self.assertFalse(hasattr(settings, "translation_batch_size"))
         self.assertEqual(
             settings.database_url,
             "postgresql://clinical@postgres/eron",

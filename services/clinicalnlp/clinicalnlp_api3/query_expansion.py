@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -157,7 +158,6 @@ class LlamaServerMedicalQueryExpander:
         context_size: int = 8192,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         max_passes: int = 1,
-        translation_batch_size: int = 3,
         timeout: float = 600,
         llm_client: ClinicalLlmClient | None = None,
     ):
@@ -168,9 +168,6 @@ class LlamaServerMedicalQueryExpander:
         if not 1 <= max_passes <= 3:
             raise ValueError("max_passes must be between 1 and 3")
         self.max_passes = max_passes
-        if not 1 <= translation_batch_size <= 8:
-            raise ValueError("translation_batch_size must be between 1 and 8")
-        self.translation_batch_size = translation_batch_size
         self.timeout = timeout
         self.llm_client = llm_client
 
@@ -223,9 +220,6 @@ class LlamaServerMedicalQueryExpander:
             context_size=int(os.environ.get("CLINICALNLP_API3_CONTEXT", "8192")),
             max_output_tokens=max_output_tokens,
             max_passes=int(os.environ.get("CLINICALNLP_QUERY_EXPANSION_PASSES", "1")),
-            translation_batch_size=int(
-                os.environ.get("CLINICALNLP_TRANSLATION_BATCH_SIZE", "3")
-            ),
             timeout=timeout,
             llm_client=llm_client,
         )
@@ -334,14 +328,126 @@ class LlamaServerMedicalQueryExpander:
         except Exception as error:
             if len(target_segment_ids) == 1:
                 return {}, [(target_segment_ids[0], error)]
+        midpoint = len(target_segment_ids) // 2
         translations: dict[str, str] = {}
         failures: list[tuple[str, Exception]] = []
-        for target_id in target_segment_ids:
-            try:
-                translations.update(request([target_id]))
-            except Exception as error:
-                failures.append((target_id, error))
+        for target_ids in (
+            target_segment_ids[:midpoint],
+            target_segment_ids[midpoint:],
+        ):
+            partial_translations, partial_failures = (
+                self._request_translation_batch_with_retry(
+                    context_segments=context_segments,
+                    target_segment_ids=target_ids,
+                    call_counter=call_counter,
+                )
+            )
+            translations.update(partial_translations)
+            failures.extend(partial_failures)
         return translations, failures
+
+    @staticmethod
+    def _estimated_tokens(value: Any) -> int:
+        text = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
+        # UTF-8 bytes / 3 intentionally overestimates ordinary English while
+        # remaining conservative for Korean and mixed clinical dialogue.
+        return max(1, math.ceil(len(text.encode("utf-8")) / 3))
+
+    def _translation_request_fits(
+        self,
+        *,
+        context_segments: list[dict[str, str]],
+        target_segment_ids: list[str],
+    ) -> bool:
+        user_payload = {
+            "context_segments": context_segments,
+            "target_segment_ids": target_segment_ids,
+        }
+        response_format = compact_translation_response_format(target_segment_ids)
+        input_tokens = (
+            self._estimated_tokens(_COMPACT_TRANSLATION_SYSTEM_PROMPT)
+            + self._estimated_tokens(user_payload)
+            + self._estimated_tokens(response_format)
+            + 64
+        )
+        target_ids = set(target_segment_ids)
+        source_tokens = sum(
+            self._estimated_tokens(segment["text"])
+            for segment in context_segments
+            if segment["segment_id"] in target_ids
+        )
+        estimated_output_tokens = max(
+            64,
+            math.ceil(source_tokens * 1.35) + 16 * len(target_segment_ids),
+        )
+        context_budget = max(256, math.floor(self.context_size * 0.9))
+        output_budget = max(128, math.floor(self.max_output_tokens * 0.9))
+        return (
+            estimated_output_tokens <= output_budget
+            and input_tokens + estimated_output_tokens <= context_budget
+        )
+
+    def _translation_context_for_range(
+        self,
+        segments: list[dict[str, str]],
+        start: int,
+        end: int,
+    ) -> list[dict[str, str]]:
+        target_ids = [segment["segment_id"] for segment in segments[start:end]]
+        if self._translation_request_fits(
+            context_segments=segments,
+            target_segment_ids=target_ids,
+        ):
+            return segments
+
+        left = max(0, start - 2)
+        right = min(len(segments), end + 2)
+        context_segments = segments[left:right]
+        while not self._translation_request_fits(
+            context_segments=context_segments,
+            target_segment_ids=target_ids,
+        ) and (left < start or right > end):
+            left_distance = start - left
+            right_distance = right - end
+            if right > end and right_distance >= left_distance:
+                right -= 1
+            elif left < start:
+                left += 1
+            context_segments = segments[left:right]
+        return context_segments
+
+    def _translation_batches(
+        self,
+        segments: list[dict[str, str]],
+    ) -> list[tuple[list[dict[str, str]], list[str]]]:
+        batches: list[tuple[list[dict[str, str]], list[str]]] = []
+
+        def add_range(start: int, end: int) -> None:
+            target_ids = [
+                segment["segment_id"] for segment in segments[start:end]
+            ]
+            context_segments = self._translation_context_for_range(
+                segments,
+                start,
+                end,
+            )
+            if end - start == 1 or self._translation_request_fits(
+                context_segments=context_segments,
+                target_segment_ids=target_ids,
+            ):
+                batches.append((context_segments, target_ids))
+                return
+            midpoint = start + (end - start) // 2
+            add_range(start, midpoint)
+            add_range(midpoint, end)
+
+        if segments:
+            add_range(0, len(segments))
+        return batches
 
     @staticmethod
     def _response_format(segment_ids: list[str]) -> dict[str, Any]:
@@ -914,15 +1020,11 @@ class LlamaServerMedicalQueryExpander:
         try:
             translated_segments: list[dict[str, Any]] = []
             failed_translations: list[tuple[str, Exception]] = []
-            for position in range(0, len(transport_segments), self.translation_batch_size):
-                target_ids = [
-                    segment["segment_id"]
-                    for segment in transport_segments[
-                        position : position + self.translation_batch_size
-                    ]
-                ]
+            for context_segments, target_ids in self._translation_batches(
+                transport_segments
+            ):
                 translations, failures = self._request_translation_batch_with_retry(
-                    context_segments=transport_segments,
+                    context_segments=context_segments,
                     target_segment_ids=target_ids,
                     call_counter=translation_calls,
                 )

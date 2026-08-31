@@ -194,7 +194,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         thread.start()
         return server, thread, captured
 
-    def test_compact_translation_batches_preserve_every_segment(self):
+    def test_compact_translation_uses_one_request_when_transcript_fits_budget(self):
         segments = [
             {
                 "id": f"seg_{index:04d}",
@@ -212,7 +212,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         try:
             result = LlamaServerMedicalQueryExpander(
                 f"http://127.0.0.1:{server.server_port}",
-                translation_batch_size=2,
+                context_size=8192,
             ).expand(segments)
         finally:
             server.shutdown()
@@ -231,12 +231,12 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["items"], [])
-        self.assertEqual(len(captured["payloads"]), 3)
-        self.assertEqual(result["_telemetry"]["translation_calls"], 3)
+        self.assertEqual(len(captured["payloads"]), 1)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 1)
         self.assertGreaterEqual(result["_telemetry"]["translation_ms"], 0)
         for payload in captured["payloads"]:
             supplied = json.loads(payload["messages"][1]["content"])
-            self.assertLessEqual(len(supplied["target_segment_ids"]), 2)
+            self.assertEqual(len(supplied["target_segment_ids"]), 5)
             self.assertEqual(len(supplied["context_segments"]), 5)
             schema = payload["response_format"]["json_schema"]["schema"]
             translation_schema = schema["properties"]["translations"]
@@ -247,7 +247,48 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             )
             self.assertNotIn("medical_terms", json.dumps(schema))
 
-    def test_invalid_batch_retries_individual_segments_without_losing_results(self):
+    def test_compact_translation_splits_only_when_token_budget_requires_it(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": (f"긴 임상 문장 {index} " * 80).strip(),
+            }
+            for index in range(1, 9)
+        ]
+        translations = {
+            f"t{index:04d}": f"English translation {index}."
+            for index in range(1, 9)
+        }
+        server, thread, captured = self._serve_compact_translations(translations)
+        try:
+            result = LlamaServerMedicalQueryExpander(
+                f"http://127.0.0.1:{server.server_port}",
+                context_size=2048,
+                max_output_tokens=1024,
+            ).expand(segments)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(len(result["translated_segments"]), 8)
+        self.assertGreater(result["_telemetry"]["translation_calls"], 1)
+        requested_ids = [
+            target_id
+            for payload in captured["payloads"]
+            for target_id in json.loads(payload["messages"][1]["content"])[
+                "target_segment_ids"
+            ]
+        ]
+        self.assertEqual(
+            requested_ids,
+            [f"t{index:04d}" for index in range(1, 9)],
+        )
+
+    def test_invalid_batch_retries_by_bisection_without_losing_results(self):
         segments = [
             {
                 "id": f"seg_{index:04d}",
@@ -267,7 +308,6 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         try:
             result = LlamaServerMedicalQueryExpander(
                 f"http://127.0.0.1:{server.server_port}",
-                translation_batch_size=3,
             ).expand(segments)
         finally:
             server.shutdown()
@@ -279,9 +319,15 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         self.assertEqual(len(result["translated_segments"]), 3)
         self.assertEqual(
             captured["target_batches"],
-            [["t0001", "t0002", "t0003"], ["t0001"], ["t0002"], ["t0003"]],
+            [
+                ["t0001", "t0002", "t0003"],
+                ["t0001"],
+                ["t0002", "t0003"],
+                ["t0002"],
+                ["t0003"],
+            ],
         )
-        self.assertEqual(result["_telemetry"]["translation_calls"], 4)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 5)
 
     def test_single_segment_failure_preserves_other_batch_translations(self):
         segments = [
@@ -304,7 +350,6 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         try:
             result = LlamaServerMedicalQueryExpander(
                 f"http://127.0.0.1:{server.server_port}",
-                translation_batch_size=3,
             ).expand(segments)
         finally:
             server.shutdown()
