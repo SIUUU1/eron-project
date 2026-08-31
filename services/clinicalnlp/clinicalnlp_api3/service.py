@@ -64,6 +64,8 @@ class ServiceSettings:
     query_passes: int
     translation_batch_size: int
     db_root: Path
+    terminology_backend: str
+    database_url: str
     vector_index: Path
     policy_index: Path
     alias_db: Path
@@ -113,6 +115,21 @@ class ServiceSettings:
                 "CLINICALNLP_TRANSLATION_BATCH_SIZE must be between 1 and 8"
             )
         umls_python_value = values.get("CLINICALNLP_UMLS_PYTHON", "").strip()
+        terminology_backend = values.get(
+            "CLINICALNLP_TERMINOLOGY_BACKEND", "sqlite"
+        ).strip().casefold()
+        if terminology_backend not in {"sqlite", "shadow", "postgres"}:
+            raise ConfigurationError(
+                "CLINICALNLP_TERMINOLOGY_BACKEND must be sqlite, shadow, or postgres"
+            )
+        database_url = values.get(
+            "CLINICALNLP_DATABASE_URL",
+            values.get("DATABASE_URL", ""),
+        ).strip()
+        if terminology_backend in {"shadow", "postgres"} and not database_url:
+            raise ConfigurationError(
+                f"CLINICALNLP_DATABASE_URL is required for {terminology_backend} terminology"
+            )
         return cls(
             llm_provider=provider,
             ollama_api_key=api_key,
@@ -150,6 +167,8 @@ class ServiceSettings:
                     str(SERVICE_ROOT / "runtime" / "medical-dictionaries"),
                 )
             ),
+            terminology_backend=terminology_backend,
+            database_url=database_url,
             vector_index=Path(
                 values.get(
                     "CLINICALNLP_API3_VECTOR_INDEX",
@@ -206,6 +225,7 @@ class ServiceRuntimeBundle:
     runtime: Any
     span_worker: Any | None
     vector_enabled: bool
+    terminology_backend: str = "sqlite"
 
     def close(self) -> None:
         if self.span_worker is not None:
@@ -229,6 +249,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         UmlsPrimaryMedicalQueryResolver,
         VerifiedLocalDictionary,
     )
+    from .terminology_repository import create_terminology_repository
 
     try:
         official_raw_exact = OfficialRawExactRetriever(settings.db_root)
@@ -279,10 +300,19 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
             worker_path=settings.umls_worker,
             cache_root=settings.umls_cache_root,
         )
+        try:
+            terminology_repository = create_terminology_repository(
+                mode=settings.terminology_backend,
+                db_root=settings.db_root,
+                database_url=settings.database_url,
+            )
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+            raise AssetError("ClinicalNLP terminology assets are unavailable") from error
         verified_dictionary = VerifiedLocalDictionary(
             settings.db_root,
             raw_retriever=official_raw_exact,
             vector_index=settings.vector_index if vector_enabled else None,
+            terminology_repository=terminology_repository,
         )
         medical_query_resolver = UmlsPrimaryMedicalQueryResolver(
             dictionary=verified_dictionary,
@@ -303,6 +333,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         runtime=runtime,
         span_worker=span_worker,
         vector_enabled=vector_enabled,
+        terminology_backend=settings.terminology_backend,
     )
 
 

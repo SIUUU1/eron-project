@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import hashlib
 import math
 from pathlib import Path
 import re
@@ -25,6 +24,11 @@ from .medical_query_resolver import (
 )
 from .official_raw_exact import OFFICIAL_REVIEW_STATUSES
 from .retrieval import DictionaryPaths
+from .terminology_repository import (
+    SqliteTerminologyRepository,
+    TerminologyEntity,
+    TerminologyRepository,
+)
 from .vector_store import (
     MedicalHashEmbedder,
     VECTOR_DIMENSIONS,
@@ -77,15 +81,6 @@ _DRUG_UMLS_TYPES = {
     "T103", "T109", "T116", "T121", "T123", "T125", "T126", "T127",
     "T129", "T130", "T131", "T195", "T200",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class _DictionaryEntity:
-    collection: str
-    entity_id: str
-    canonical_ko: str
-    canonical_en: str | None
-    review_status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,32 +310,6 @@ def _collections_for_semantic_types(values: object) -> frozenset[str] | None:
     return frozenset(collections) if collections else None
 
 
-def _dictionary_bundle_version(
-    paths: DictionaryPaths,
-    source_hashes: dict[str, str],
-) -> str:
-    named_paths = tuple(
-        sorted(
-            (
-                ("anatomy_terms", paths.anatomy),
-                ("drug_terms", paths.drug),
-                ("emergency_terms", paths.emergency),
-                ("kcd9_terms", paths.kcd9),
-                ("procedure_terms", paths.procedure),
-            )
-        )
-    )
-    bundle = hashlib.sha256()
-    for collection, path in named_paths:
-        bundle.update(collection.encode("utf-8"))
-        bundle.update(b"\0")
-        bundle.update(path.name.encode("utf-8"))
-        bundle.update(b"\0")
-        bundle.update(source_hashes[collection].encode("ascii"))
-        bundle.update(b"\0")
-    return "sha256:" + bundle.hexdigest()
-
-
 class VerifiedLocalDictionary:
     """Search local assets and re-read every selected entity from source SQLite."""
 
@@ -351,15 +320,27 @@ class VerifiedLocalDictionary:
         raw_retriever: Any,
         vector_index: Path | None = None,
         minimum_vector_similarity: float = 0.38,
+        terminology_repository: TerminologyRepository | None = None,
     ) -> None:
         if not 0.0 <= minimum_vector_similarity <= 1.0:
             raise ValueError("minimum_vector_similarity must be between zero and one")
         self.paths = DictionaryPaths.discover(Path(db_root))
-        self._source_hashes = dictionary_source_hashes(self.paths)
-        self.version = _dictionary_bundle_version(
-            self.paths,
-            self._source_hashes,
+        self._terminology_repository = (
+            terminology_repository
+            if terminology_repository is not None
+            else SqliteTerminologyRepository(db_root)
         )
+        repository_source_hashes = getattr(
+            self._terminology_repository,
+            "local_source_hashes",
+            None,
+        )
+        self._source_hashes = (
+            dict(repository_source_hashes)
+            if isinstance(repository_source_hashes, dict)
+            else dictionary_source_hashes(self.paths)
+        )
+        self.version = self._terminology_repository.version
         self._raw_retriever = getattr(
             raw_retriever,
             "base_retriever",
@@ -367,8 +348,6 @@ class VerifiedLocalDictionary:
         )
         self._alias_store = getattr(raw_retriever, "alias_store", None)
         self._connection_local = threading.local()
-        self._entity_cache: dict[tuple[str, str], _DictionaryEntity | None] = {}
-        self._entity_cache_lock = threading.Lock()
         self._vector_index = Path(vector_index) if vector_index is not None else None
         if self._vector_index is not None and not self._vector_index.is_file():
             raise ValueError(f"vector index not found: {self._vector_index}")
@@ -390,26 +369,26 @@ class VerifiedLocalDictionary:
     @contextmanager
     def request_session(self):
         """Reuse read-only SQLite handles for one resolver request/thread."""
-
-        session = getattr(self._connection_local, "session", None)
-        if session is None:
-            session = _ConnectionSession(connections={}, vector_paths=set())
-            self._connection_local.session = session
-        else:
-            session.depth += 1
-        try:
-            yield self
-        finally:
-            session.depth -= 1
-            if session.depth == 0:
-                for connection in session.connections.values():
-                    try:
-                        connection.close()
-                    except sqlite3.Error:
-                        pass
-                session.connections.clear()
-                session.vector_paths.clear()
-                del self._connection_local.session
+        with self._terminology_repository.request_session():
+            session = getattr(self._connection_local, "session", None)
+            if session is None:
+                session = _ConnectionSession(connections={}, vector_paths=set())
+                self._connection_local.session = session
+            else:
+                session.depth += 1
+            try:
+                yield self
+            finally:
+                session.depth -= 1
+                if session.depth == 0:
+                    for connection in session.connections.values():
+                        try:
+                            connection.close()
+                        except sqlite3.Error:
+                            pass
+                    session.connections.clear()
+                    session.vector_paths.clear()
+                    del self._connection_local.session
 
     def _connection(self, path: Path, *, vector: bool = False) -> sqlite3.Connection:
         session = getattr(self._connection_local, "session", None)
@@ -507,130 +486,14 @@ class VerifiedLocalDictionary:
             return frozenset()
         return self._verified_vector_collections
 
-    def _lookup_uncached(
-        self,
-        collection: str,
-        entity_id: str,
-    ) -> _DictionaryEntity | None:
-        try:
-            if collection == "drug_terms":
-                prefix, kind, local_id = entity_id.split(":", 2)
-                if prefix != "drug" or kind not in {"ingredient", "product"}:
-                    return None
-                if kind == "ingredient":
-                    rows = self._read_rows(
-                        self.paths.drug,
-                        """
-                        SELECT canonical_ko, canonical_en, 'official' review_status
-                          FROM ingredients WHERE CAST(ingredient_id AS TEXT)=?
-                          LIMIT 1
-                        """,
-                        (local_id,),
-                    )
-                else:
-                    rows = self._read_rows(
-                        self.paths.drug,
-                        """
-                        SELECT product_name_ko canonical_ko,
-                               product_name_en canonical_en,
-                               'official' review_status
-                          FROM products WHERE CAST(item_id AS TEXT)=?
-                          LIMIT 1
-                        """,
-                        (local_id,),
-                    )
-            elif collection == "procedure_terms":
-                prefix, local_id = entity_id.split(":", 1)
-                if prefix != "procedure":
-                    return None
-                rows = self._read_rows(
-                    self.paths.procedure,
-                    """
-                    SELECT canonical_name_ko canonical_ko,
-                           canonical_name_en canonical_en,
-                           review_status
-                      FROM clinical_terms WHERE CAST(term_id AS TEXT)=?
-                      LIMIT 1
-                    """,
-                    (local_id,),
-                )
-            elif collection == "anatomy_terms":
-                prefix, local_id = entity_id.split(":", 1)
-                if prefix != "anatomy":
-                    return None
-                rows = self._read_rows(
-                    self.paths.anatomy,
-                    """
-                    SELECT korean_name canonical_ko, english_name canonical_en,
-                           verification_status review_status
-                      FROM anatomical_terms WHERE CAST(term_id AS TEXT)=?
-                      LIMIT 1
-                    """,
-                    (local_id,),
-                )
-            elif collection == "emergency_terms":
-                prefix, local_id = entity_id.split(":", 1)
-                if prefix != "emergency":
-                    return None
-                rows = self._read_rows(
-                    self.paths.emergency,
-                    """
-                    SELECT standard_ko canonical_ko, standard_en canonical_en,
-                           review_status
-                      FROM terms WHERE CAST(term_id AS TEXT)=?
-                      LIMIT 1
-                    """,
-                    (local_id,),
-                )
-            elif collection == "kcd9_terms":
-                prefix, local_id = entity_id.split(":", 1)
-                if prefix != "kcd":
-                    return None
-                rows = self._read_rows(
-                    self.paths.kcd9,
-                    """
-                    SELECT canonical_ko_name canonical_ko,
-                           canonical_en_name canonical_en,
-                           'official' review_status
-                      FROM kcd_codes
-                     WHERE code=? AND is_complete=1 LIMIT 1
-                    """,
-                    (local_id,),
-                )
-            else:
-                return None
-        except (OSError, sqlite3.Error, ValueError):
-            return None
-        if not rows:
-            return None
-        row = rows[0]
-        canonical_ko = str(row["canonical_ko"] or "").strip()
-        canonical_en = str(row["canonical_en"] or "").strip() or None
-        if not canonical_ko:
-            return None
-        return _DictionaryEntity(
-            collection=collection,
-            entity_id=entity_id,
-            canonical_ko=canonical_ko,
-            canonical_en=canonical_en,
-            review_status=str(row["review_status"] or "").casefold(),
-        )
-
     def lookup(
         self,
         collection: str,
         entity_id: str,
-    ) -> _DictionaryEntity | None:
+    ) -> TerminologyEntity | None:
         with self.request_session():
             self._ensure_assets_are_current()
-            key = (collection, entity_id)
-            with self._entity_cache_lock:
-                if key in self._entity_cache:
-                    return self._entity_cache[key]
-            entity = self._lookup_uncached(collection, entity_id)
-            with self._entity_cache_lock:
-                self._entity_cache.setdefault(key, entity)
-                return self._entity_cache[key]
+            return self._terminology_repository.lookup(collection, entity_id)
 
     def _match(
         self,
@@ -913,118 +776,15 @@ class VerifiedLocalDictionary:
         self,
         requests: tuple[tuple[str, frozenset[str]], ...],
     ) -> tuple[dict[int, list[tuple[str, str]]], int]:
-        identities: dict[int, list[tuple[str, str]]] = {
-            index: [] for index in range(len(requests))
-        }
-        definitions = {
-            "drug_terms": (
-                self.paths.drug,
-                """
-                SELECT lower(trim(t.term)) query_key,
-                       'drug:' || lower(t.entity_type) || ':' || t.entity_id entity_id
-                  FROM drug_terms t
-                 WHERE lower(trim(t.term)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(i.canonical_en)),
-                       'drug:ingredient:' || i.ingredient_id
-                  FROM ingredients i
-                 WHERE lower(trim(i.canonical_en)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(p.product_name_en)), 'drug:product:' || p.item_id
-                  FROM products p
-                 WHERE lower(trim(p.product_name_en)) IN ({placeholders})
-                """,
-                3,
-            ),
-            "procedure_terms": (
-                self.paths.procedure,
-                """
-                SELECT lower(trim(t.canonical_name_en)) query_key,
-                       'procedure:' || t.term_id entity_id
-                  FROM clinical_terms t
-                 WHERE lower(trim(t.canonical_name_en)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(t.canonical_name_ko)), 'procedure:' || t.term_id
-                  FROM clinical_terms t
-                 WHERE lower(trim(t.canonical_name_ko)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(a.alias)), 'procedure:' || a.term_id
-                  FROM term_aliases a
-                 WHERE lower(trim(a.alias)) IN ({placeholders})
-                """,
-                3,
-            ),
-            "anatomy_terms": (
-                self.paths.anatomy,
-                """
-                SELECT lower(trim(t.english_name)) query_key,
-                       'anatomy:' || t.term_id entity_id
-                  FROM anatomical_terms t
-                 WHERE lower(trim(t.english_name)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(t.latin_name)), 'anatomy:' || t.term_id
-                  FROM anatomical_terms t
-                 WHERE lower(trim(t.latin_name)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(t.korean_name)), 'anatomy:' || t.term_id
-                  FROM anatomical_terms t
-                 WHERE lower(trim(t.korean_name)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(a.alias)), 'anatomy:' || a.term_id
-                  FROM anatomical_aliases a
-                 WHERE lower(trim(a.alias)) IN ({placeholders})
-                """,
-                4,
-            ),
-            "emergency_terms": (
-                self.paths.emergency,
-                """
-                SELECT lower(trim(t.standard_en)) query_key,
-                       'emergency:' || t.term_id entity_id
-                  FROM terms t
-                 WHERE lower(trim(t.standard_en)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(t.standard_ko)), 'emergency:' || t.term_id
-                  FROM terms t
-                 WHERE lower(trim(t.standard_ko)) IN ({placeholders})
-                UNION
-                SELECT lower(trim(a.alias)), 'emergency:' || a.term_id
-                  FROM aliases a
-                 WHERE lower(trim(a.alias)) IN ({placeholders})
-                """,
-                3,
-            ),
-        }
-        statement_count = 0
-        for collection in sorted(definitions, key=_COLLECTION_ORDER.__getitem__):
-            selected = [
-                (index, query_text)
-                for index, (query_text, collections) in enumerate(requests)
-                if query_text and collection in collections
+        batch = self._terminology_repository.exact_identities_many(requests)
+        identities = {
+            index: [
+                (identity.collection, identity.entity_id)
+                for identity in batch.identities[index]
             ]
-            if not selected:
-                continue
-            key_to_indexes: dict[str, list[int]] = {}
-            for index, query_text in selected:
-                key_to_indexes.setdefault(query_text.lower(), []).append(index)
-            query_keys = tuple(key_to_indexes)
-            placeholders = ", ".join("?" for _ in query_keys)
-            path, body, repetitions = definitions[collection]
-            try:
-                rows = self._read_rows(
-                    path,
-                    body.format(placeholders=placeholders),
-                    query_keys * repetitions,
-                )
-            except (OSError, sqlite3.Error):
-                continue
-            statement_count += 1
-            for row in rows:
-                for query_index in key_to_indexes.get(str(row["query_key"]), []):
-                    identities[query_index].append(
-                        (collection, str(row["entity_id"]))
-                    )
-        return identities, statement_count
+            for index in range(len(requests))
+        }
+        return identities, batch.statement_count
 
     def search(
         self,

@@ -55,6 +55,33 @@ resolver request. Exact lookups are grouped into batches of at most 64 queries
 per collection, repeated request-local searches reuse verified results, and
 sqlite-vec is loaded at most once per request.
 
+Medical terminology and KCD exact lookup has a selectable repository boundary.
+`CLINICALNLP_TERMINOLOGY_BACKEND=sqlite` is the default and preserves the
+current result path. `shadow` returns SQLite results unchanged while comparing
+PostgreSQL active releases and logging only the operation type on mismatch;
+it never logs query or patient text. `postgres` returns PostgreSQL results.
+Set `CLINICALNLP_DATABASE_URL` in `services/clinicalnlp/.env` for `shadow` and
+`postgres`. `DATABASE_URL` is also accepted when it is explicitly injected
+into the ClinicalNLP process; Compose does not automatically pass the root
+`.env` value into this service. A SQLAlchemy-style `postgresql+psycopg://` URL
+is accepted. Local
+RAW exact matching and medical/policy vectors remain on their existing runtime
+assets in this step, so do not remove the SQLite mounts yet.
+
+Recommended rollout:
+
+```dotenv
+# 1. behavior-preserving default
+CLINICALNLP_TERMINOLOGY_BACKEND=sqlite
+
+# 2. parity observation; SQLite still owns the response
+CLINICALNLP_TERMINOLOGY_BACKEND=shadow
+CLINICALNLP_DATABASE_URL=postgresql://user:password@postgres:5432/eron
+
+# 3. only after representative shadow parity is clean
+CLINICALNLP_TERMINOLOGY_BACKEND=postgres
+```
+
 ## Docker Compose profile
 
 The repository Compose manifest registers this service under the opt-in

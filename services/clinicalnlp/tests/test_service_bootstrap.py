@@ -46,6 +46,37 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.port, 8765)
+        self.assertEqual(settings.terminology_backend, "sqlite")
+        self.assertEqual(settings.database_url, "")
+
+    def test_postgres_terminology_requires_database_url(self):
+        with self.assertRaises(ConfigurationError) as raised:
+            ServiceSettings.from_mapping(
+                {
+                    "OLLAMA_API_KEY": "test-secret",
+                    "CLINICALNLP_TERMINOLOGY_BACKEND": "postgres",
+                }
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "CLINICALNLP_DATABASE_URL is required for postgres terminology",
+        )
+
+    def test_shadow_terminology_accepts_root_database_url(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_TERMINOLOGY_BACKEND": "shadow",
+                "DATABASE_URL": "postgresql+psycopg://user:secret@postgres/eron",
+            }
+        )
+
+        self.assertEqual(settings.terminology_backend, "shadow")
+        self.assertEqual(
+            settings.database_url,
+            "postgresql+psycopg://user:secret@postgres/eron",
+        )
 
     def test_missing_dictionary_assets_keep_service_safely_unavailable(self):
         with TemporaryDirectory() as temporary_directory:
@@ -146,6 +177,8 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                 "CLINICALNLP_QUERY_EXPANSION_PASSES": "1",
                 "CLINICALNLP_TRANSLATION_BATCH_SIZE": "3",
                 "CLINICALNLP_API3_DB_ROOT": "/runtime/dictionaries",
+                "CLINICALNLP_TERMINOLOGY_BACKEND": "postgres",
+                "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 "CLINICALNLP_API3_VECTOR_INDEX": "/runtime/vectors/medical.sqlite",
                 "CLINICALNLP_POLICY_INDEX": "/runtime/policy/policy.sqlite",
                 "CLINICALNLP_ALIAS_DB": "/runtime/state/aliases.sqlite",
@@ -169,6 +202,11 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.query_passes, 1)
         self.assertEqual(settings.translation_batch_size, 3)
         self.assertEqual(settings.db_root, Path("/runtime/dictionaries"))
+        self.assertEqual(settings.terminology_backend, "postgres")
+        self.assertEqual(
+            settings.database_url,
+            "postgresql://clinical@postgres/eron",
+        )
         self.assertEqual(
             settings.vector_index,
             Path("/runtime/vectors/medical.sqlite"),
