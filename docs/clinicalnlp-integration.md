@@ -165,9 +165,14 @@ RAW 보존
 않는다. UMLS가 이미 해결한 동일 사전 entity는 RAW exact 후보로 중복 추가하지 않으며,
 UMLS 장애 시에는 RAW exact가 비차단 안전망으로 동작한다.
 
-승인 별칭 저장소와 계약은 향후 의료진 검토·승인 체계를 위해 보존하지만 현재 운영
-검색 경로에서는 읽거나 후보에 반영하지 않는다. 어떠한 검색 후보도 초안에 자동
-확정하지 않는다.
+`umls-primary-policy-v2`부터 UMLS semantic type에 맞는 collection만 Vector
+검색한다. 같은 검색어의 로컬 exact 후보가 확인되면 Vector 검색을 생략하고, 의미
+유형이 없거나 지정된 collection에서 찾지 못한 span은 전체 collection의 exact
+검색만 허용한다. 따라서 링크 오류를 공식 사전 정본으로 복구할 수는 있지만 관련
+없는 약물·처치·해부·응급 collection 전체를 Vector로 재검색하지 않는다.
+
+승인 별칭 release는 PostgreSQL에서 읽지만 승인된 행이 있을 때만 후보에 반영한다.
+어떠한 검색 후보도 초안에 자동 확정하지 않는다.
 
 ## Configuration ownership
 
@@ -185,32 +190,21 @@ CLINICAL_LLM_PROVIDER=ollama_cloud
 OLLAMA_BASE_URL=https://ollama.com
 OLLAMA_MODEL=gemma4:31b
 OLLAMA_API_KEY=<secret>
-CLINICALNLP_API3_DB_ROOT=/opt/eron/clinicalnlp-data/current/dictionaries
-CLINICALNLP_API3_VECTOR_INDEX=/opt/eron/clinicalnlp-data/current/api3_vectors.sqlite
-CLINICALNLP_POLICY_INDEX=/opt/eron/clinicalnlp-data/current/policy_vectors.sqlite
-CLINICALNLP_ALIAS_DB=/var/lib/eron/clinicalnlp/alias_feedback.sqlite
+CLINICALNLP_DATABASE_URL=postgresql://<user>:<password>@postgres:5432/<db>
+CLINICALNLP_UMLS_PYTHON=/runtime/scispacy/.venv/bin/python
+CLINICALNLP_UMLS_CACHE_ROOT=/runtime/scispacy/cache
 ```
 
 `OLLAMA_API_KEY`는 frontend build 환경과 ER:ON backend 환경에 주입하지 않는다.
 OCI에서는 Vault secret으로 ClinicalNLP 컨테이너에만 전달한다.
 
-## VectorDB artifact contract
+## PostgreSQL release contract
 
-의료사전과 VectorDB는 Git 및 컨테이너 이미지에서 분리한다. 배포 release는 최소한
-다음 파일과 `manifest.json`을 가진다.
-
-```text
-releases/<version>/
-├─ dictionaries/
-├─ api3_vectors.sqlite
-├─ policy_vectors.sqlite
-└─ manifest.json
-```
-
-`manifest.json`은 release version, source hash, schema version, embedding identifier,
-vector dimension과 각 파일 SHA256을 기록한다. 배포는 staging에서 checksum과 SQLite
-무결성을 확인한 뒤에만 `current`를 새 release로 전환한다. ClinicalNLP는 `current`를
-읽기 전용으로 마운트하고, alias feedback DB는 별도 쓰기 볼륨을 사용한다.
+의료사전·KCD·의료 Vector·정책 Vector·승인 별칭은 `clinicalnlp` schema의 versioned
+release로 관리한다. source hash가 바뀌면 기존 행을 덮어쓰지 않고 새 release를
+적재한 뒤 완전성 검증이 끝난 release만 활성화한다. HTTP 컨테이너의 유일한 파일
+마운트는 Linux scispaCy/UMLS runtime이다. SQLite 원본은 서비스에 마운트하지 않고
+이관 감사용 보관소에서만 관리한다.
 
 환자 대화, 초안, 후보 선택 이력은 공용 사전·정책 VectorDB에 저장하지 않는다.
 

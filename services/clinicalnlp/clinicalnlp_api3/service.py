@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import sqlite3
 from typing import Any, Mapping
 
 from .http_service import ClinicalNlpHttpServer, create_http_server
@@ -63,10 +62,7 @@ class ServiceSettings:
     query_max_tokens: int
     query_passes: int
     translation_batch_size: int
-    db_root: Path
-    vector_index: Path
-    policy_index: Path
-    alias_db: Path
+    database_url: str
     umls_enabled: bool
     umls_timeout_seconds: float
     umls_python: Path | None
@@ -81,6 +77,19 @@ class ServiceSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> "ServiceSettings":
+        for legacy_name in (
+            "CLINICALNLP_TERMINOLOGY_BACKEND",
+            "CLINICALNLP_MEDICAL_VECTOR_BACKEND",
+            "CLINICALNLP_API3_DB_ROOT",
+            "CLINICALNLP_API3_VECTOR_INDEX",
+            "CLINICALNLP_POLICY_INDEX",
+            "CLINICALNLP_ALIAS_DB",
+        ):
+            if str(values.get(legacy_name, "") or "").strip():
+                raise ConfigurationError(
+                    f"{legacy_name} is no longer supported; "
+                    "ClinicalNLP storage is PostgreSQL-only"
+                )
         provider = values.get("CLINICAL_LLM_PROVIDER", "ollama_cloud").strip().casefold()
         if provider != "ollama_cloud":
             raise ConfigurationError("CLINICAL_LLM_PROVIDER must be ollama_cloud")
@@ -113,6 +122,12 @@ class ServiceSettings:
                 "CLINICALNLP_TRANSLATION_BATCH_SIZE must be between 1 and 8"
             )
         umls_python_value = values.get("CLINICALNLP_UMLS_PYTHON", "").strip()
+        database_url = values.get(
+            "CLINICALNLP_DATABASE_URL",
+            values.get("DATABASE_URL", ""),
+        ).strip()
+        if not database_url:
+            raise ConfigurationError("CLINICALNLP_DATABASE_URL is required")
         return cls(
             llm_provider=provider,
             ollama_api_key=api_key,
@@ -144,30 +159,7 @@ class ServiceSettings:
                 1,
             ),
             translation_batch_size=translation_batch_size,
-            db_root=Path(
-                values.get(
-                    "CLINICALNLP_API3_DB_ROOT",
-                    str(SERVICE_ROOT / "runtime" / "medical-dictionaries"),
-                )
-            ),
-            vector_index=Path(
-                values.get(
-                    "CLINICALNLP_API3_VECTOR_INDEX",
-                    str(SERVICE_ROOT / "runtime" / "vectors" / "api3_vectors.sqlite"),
-                )
-            ),
-            policy_index=Path(
-                values.get(
-                    "CLINICALNLP_POLICY_INDEX",
-                    str(SERVICE_ROOT / "runtime" / "policy" / "policy_vectors.sqlite"),
-                )
-            ),
-            alias_db=Path(
-                values.get(
-                    "CLINICALNLP_ALIAS_DB",
-                    str(SERVICE_ROOT / "runtime" / "state" / "alias_feedback.sqlite"),
-                )
-            ),
+            database_url=database_url,
             umls_enabled=_boolean(values, "CLINICALNLP_UMLS_ENABLED", True),
             umls_timeout_seconds=_positive_float(
                 values,
@@ -206,6 +198,7 @@ class ServiceRuntimeBundle:
     runtime: Any
     span_worker: Any | None
     vector_enabled: bool
+    terminology_backend: str = "postgres"
 
     def close(self) -> None:
         if self.span_worker is not None:
@@ -215,26 +208,30 @@ class ServiceRuntimeBundle:
 def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
     """Compose the production draft runtime from local assets and Ollama Cloud."""
 
-    import os
-
-    os.environ["CLINICALNLP_POLICY_INDEX"] = str(settings.policy_index)
-
     from .clinical_llm import OllamaCloudClinicalLlmClient
+    from .alias_repository import PostgresApprovedAliasStore
     from .medical_span_worker import MedicalSpanWorker
+    from .medical_vector_repository import PostgresMedicalVectorRepository
     from .official_raw_exact import OfficialRawExactRetriever
+    from .policy_repository import PostgresPolicyEvidenceRepository
     from .query_expansion import LlamaServerMedicalQueryExpander
     from .record_extractor import LlamaServerClinicalExtractor
     from .runtime import create_clinical_runtime
     from .umls_query_resolver import (
         UmlsPrimaryMedicalQueryResolver,
-        VerifiedLocalDictionary,
+        VerifiedClinicalDictionary,
     )
+    from .terminology_repository import PostgresTerminologyRepository
 
     try:
-        official_raw_exact = OfficialRawExactRetriever(settings.db_root)
-    except (OSError, sqlite3.Error, ValueError) as error:
-        raise AssetError("ClinicalNLP dictionary assets are unavailable") from error
-    vector_enabled = settings.vector_index.is_file()
+        official_raw_exact = OfficialRawExactRetriever.from_postgres(
+            settings.database_url
+        )
+    except Exception as error:
+        raise AssetError("ClinicalNLP PostgreSQL assets are unavailable") from error
+    vector_enabled = False
+    policy_repository = PostgresPolicyEvidenceRepository(settings.database_url)
+    alias_store = PostgresApprovedAliasStore(settings.database_url)
 
     clinical_client = OllamaCloudClinicalLlmClient(
         settings.ollama_base_url,
@@ -279,11 +276,22 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
             worker_path=settings.umls_worker,
             cache_root=settings.umls_cache_root,
         )
-        verified_dictionary = VerifiedLocalDictionary(
-            settings.db_root,
+        try:
+            terminology_repository = PostgresTerminologyRepository(
+                settings.database_url
+            )
+            vector_repository = PostgresMedicalVectorRepository(
+                settings.database_url
+            )
+        except Exception as error:
+            raise AssetError("ClinicalNLP PostgreSQL assets are unavailable") from error
+        verified_dictionary = VerifiedClinicalDictionary(
             raw_retriever=official_raw_exact,
-            vector_index=settings.vector_index if vector_enabled else None,
+            terminology_repository=terminology_repository,
+            vector_repository=vector_repository,
+            alias_store=alias_store,
         )
+        vector_enabled = True
         medical_query_resolver = UmlsPrimaryMedicalQueryResolver(
             dictionary=verified_dictionary,
             span_linker=span_worker,
@@ -298,11 +306,15 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         clinical_extractor=clinical_extractor,
         query_expander=query_expander,
         medical_query_resolver=medical_query_resolver,
+        policy_evidence_provider=(
+            policy_repository.retrieve if policy_repository is not None else None
+        ),
     )
     return ServiceRuntimeBundle(
         runtime=runtime,
         span_worker=span_worker,
         vector_enabled=vector_enabled,
+        terminology_backend="postgres",
     )
 
 

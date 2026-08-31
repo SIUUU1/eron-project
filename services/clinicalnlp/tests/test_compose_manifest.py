@@ -27,15 +27,17 @@ class ClinicalNlpComposeManifestTests(unittest.TestCase):
         self.assertIn("    init: true\n", service)
         self.assertIn("      - path: ./services/clinicalnlp/.env\n", service)
         self.assertIn("        required: false\n", service)
+        self.assertIn("CLINICALNLP_DATABASE_URL: ${DATABASE_URL}", service)
+        self.assertIn("      postgres:\n        condition: service_healthy\n", service)
         self.assertIn('      - "8765"\n', service)
         self.assertNotIn("    ports:\n", service)
         self.assertIn(
-            "source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}",
+            "source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}/scispacy",
             service,
         )
-        self.assertIn("target: /runtime\n", service)
-        self.assertIn("source: ${CLINICALNLP_STATE_ROOT:-./runtime/clinicalnlp-state}", service)
-        self.assertIn("target: /runtime/state\n", service)
+        self.assertIn("target: /runtime/scispacy\n", service)
+        self.assertNotIn("CLINICALNLP_STATE_ROOT", service)
+        self.assertNotIn("/runtime/state", service)
         self.assertIn("      - eron-network\n", service)
 
         for base_service in ("postgres", "frontend", "nginx"):

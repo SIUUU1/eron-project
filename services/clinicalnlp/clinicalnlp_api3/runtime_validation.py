@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .field_classification import field_misclassification_issues
-from .policy_index import DEFAULT_POLICY_INDEX
 from .policy_retrieval import retrieve_policy_evidence
 
 
@@ -33,10 +32,6 @@ DEFAULT_VALIDATION_THRESHOLDS = Path(
         _DEFAULT_VALIDATION_THRESHOLDS,
     )
 )
-DEFAULT_RUNTIME_POLICY_INDEX = Path(
-    os.environ.get("CLINICALNLP_POLICY_INDEX", DEFAULT_POLICY_INDEX)
-)
-
 VITAL_RANGES = {
     "blood_pressure_systolic": {
         "label": "수축기혈압",
@@ -680,7 +675,7 @@ def validate_clinical_workflow(
     *,
     guardrail_path: Path | str = DEFAULT_GUARDRAIL_RULES,
     thresholds_path: Path | str = DEFAULT_VALIDATION_THRESHOLDS,
-    policy_index_path: Path | str | None = DEFAULT_RUNTIME_POLICY_INDEX,
+    policy_index_path: Path | str | None = None,
     policy_evidence_provider: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate a workflow draft without changing any input or draft value."""

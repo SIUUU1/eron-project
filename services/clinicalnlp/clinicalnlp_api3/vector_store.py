@@ -16,10 +16,12 @@ from typing import Any, Iterable, Iterator
 import numpy as np
 
 from .retrieval import COLLECTIONS, DictionaryPaths
+from .medical_vector_contract import (
+    VECTOR_DIMENSIONS,
+    VECTOR_INDEX_SCHEMA_VERSION,
+)
 
 
-VECTOR_DIMENSIONS = 256
-VECTOR_INDEX_SCHEMA_VERSION = "medical-vector-index-v2"
 MAX_VECTOR_CANDIDATES = 8
 DEFAULT_VECTOR_INDEX = Path(__file__).parents[1] / "data" / "api3_vectors.sqlite"
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")

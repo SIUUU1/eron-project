@@ -90,6 +90,9 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "umls_ms",
                 "dictionary_ms",
                 "vector_ms",
+                "exact_statement_count",
+                "vector_statement_count",
+                "search_cache_hit_count",
                 "clinical_extraction_ms",
             },
         )
