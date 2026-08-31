@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
@@ -17,6 +17,10 @@ from clinicalnlp_api3.medical_query_resolver import (
     LocalDictionaryMatch,
     MedicalQueryDocument,
     MedicalQuerySegment,
+)
+from clinicalnlp_api3.medical_vector_repository import (
+    VectorIdentity,
+    VectorIdentityBatch,
 )
 from clinicalnlp_api3.medical_span_worker import MedicalSpanLinkOutcome
 from clinicalnlp_api3.official_raw_exact import OfficialRawExactRetriever
@@ -325,6 +329,54 @@ class OfficialRawExactRetrieverTests(unittest.TestCase):
 
 
 class UmlsPrimaryResolverTests(unittest.TestCase):
+    def test_dictionary_delegates_vector_search_through_repository_seam(self):
+        class RecordingVectorRepository:
+            version = "test-vector-v1"
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            def request_session(self):
+                return nullcontext(self)
+
+            def search_many(
+                self,
+                requests,
+                *,
+                limit,
+                skip_collections_by_index=None,
+            ):
+                self.calls.append(
+                    (requests, limit, skip_collections_by_index)
+                )
+                return VectorIdentityBatch(
+                    identities=((VectorIdentity(
+                        "emergency_terms", "emergency:2", 0.91
+                    ),),),
+                    elapsed_ms=4.25,
+                    statement_count=1,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            vectors = RecordingVectorRepository()
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+                vector_repository=vectors,
+            )
+            batch = dictionary.search_many(
+                (("possible glaucoma", frozenset({"emergency_terms"})),),
+                limit=5,
+            )
+
+        self.assertEqual(batch.matches[0][0].entity_id, "emergency:2")
+        self.assertEqual(batch.matches[0][0].retrieval_score, 0.91)
+        self.assertEqual(batch.vector_ms, 4.25)
+        self.assertEqual(batch.vector_statement_count, 1)
+        self.assertEqual(len(vectors.calls), 1)
+
     def test_dictionary_batch_reuses_read_only_connections_for_sixty_four_queries(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

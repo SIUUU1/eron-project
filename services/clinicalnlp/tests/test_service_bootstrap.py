@@ -49,6 +49,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
 
         self.assertEqual(settings.port, 8765)
         self.assertEqual(settings.terminology_backend, "postgres")
+        self.assertEqual(settings.medical_vector_backend, "postgres")
         self.assertEqual(
             settings.database_url,
             "postgresql+psycopg://user:secret@postgres/eron",
@@ -197,6 +198,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                 "CLINICALNLP_TRANSLATION_BATCH_SIZE": "3",
                 "CLINICALNLP_API3_DB_ROOT": "/runtime/dictionaries",
                 "CLINICALNLP_TERMINOLOGY_BACKEND": "postgres",
+                "CLINICALNLP_MEDICAL_VECTOR_BACKEND": "postgres",
                 "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 "CLINICALNLP_API3_VECTOR_INDEX": "/runtime/vectors/medical.sqlite",
                 "CLINICALNLP_POLICY_INDEX": "/runtime/policy/policy.sqlite",
@@ -222,6 +224,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.translation_batch_size, 3)
         self.assertEqual(settings.db_root, Path("/runtime/dictionaries"))
         self.assertEqual(settings.terminology_backend, "postgres")
+        self.assertEqual(settings.medical_vector_backend, "postgres")
         self.assertEqual(
             settings.database_url,
             "postgresql://clinical@postgres/eron",

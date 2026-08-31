@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -29,12 +29,12 @@ from .terminology_repository import (
     TerminologyEntity,
     TerminologyRepository,
 )
-from .vector_store import (
-    MedicalHashEmbedder,
-    VECTOR_DIMENSIONS,
-    VECTOR_INDEX_SCHEMA_VERSION,
-    dictionary_source_hashes,
+from .medical_vector_repository import (
+    MedicalVectorRepository,
+    SqliteMedicalVectorRepository,
+    UnavailableMedicalVectorRepository,
 )
+from .vector_store import dictionary_source_hashes
 
 
 UMLS_LINK_THRESHOLD = 0.8
@@ -60,7 +60,6 @@ _ROUTE_ORDER = {
     "ngram_fallback": 4,
 }
 _ENGLISH_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’/-]*")
-_ASCII_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _NGRAM_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
     "did", "do", "does", "for", "from", "had", "has", "have", "he",
@@ -109,7 +108,6 @@ class _DictionarySearchBatch:
 @dataclass(slots=True)
 class _ConnectionSession:
     connections: dict[Path, sqlite3.Connection]
-    vector_paths: set[Path]
     depth: int = 1
 
 
@@ -321,6 +319,7 @@ class VerifiedLocalDictionary:
         vector_index: Path | None = None,
         minimum_vector_similarity: float = 0.38,
         terminology_repository: TerminologyRepository | None = None,
+        vector_repository: MedicalVectorRepository | None = None,
     ) -> None:
         if not 0.0 <= minimum_vector_similarity <= 1.0:
             raise ValueError("minimum_vector_similarity must be between zero and one")
@@ -348,31 +347,30 @@ class VerifiedLocalDictionary:
         )
         self._alias_store = getattr(raw_retriever, "alias_store", None)
         self._connection_local = threading.local()
-        self._vector_index = Path(vector_index) if vector_index is not None else None
-        if self._vector_index is not None and not self._vector_index.is_file():
-            raise ValueError(f"vector index not found: {self._vector_index}")
         self._source_stats = self._current_source_stats()
-        self._vector_index_stat = (
-            self._file_stat(self._vector_index)
-            if self._vector_index is not None
-            else None
-        )
-        with self.request_session():
-            self._verified_vector_collections = self._read_verified_vector_collections()
-        self._minimum_vector_similarity = float(minimum_vector_similarity)
-        self._embedder = (
-            MedicalHashEmbedder()
-            if self._vector_index and self._verified_vector_collections
-            else None
+        self._vector_repository = (
+            vector_repository
+            if vector_repository is not None
+            else (
+                SqliteMedicalVectorRepository(
+                    Path(vector_index),
+                    source_hashes=self._source_hashes,
+                    minimum_similarity=minimum_vector_similarity,
+                )
+                if vector_index is not None
+                else UnavailableMedicalVectorRepository()
+            )
         )
 
     @contextmanager
     def request_session(self):
         """Reuse read-only SQLite handles for one resolver request/thread."""
-        with self._terminology_repository.request_session():
+        with ExitStack() as stack:
+            stack.enter_context(self._terminology_repository.request_session())
+            stack.enter_context(self._vector_repository.request_session())
             session = getattr(self._connection_local, "session", None)
             if session is None:
-                session = _ConnectionSession(connections={}, vector_paths=set())
+                session = _ConnectionSession(connections={})
                 self._connection_local.session = session
             else:
                 session.depth += 1
@@ -387,10 +385,9 @@ class VerifiedLocalDictionary:
                         except sqlite3.Error:
                             pass
                     session.connections.clear()
-                    session.vector_paths.clear()
                     del self._connection_local.session
 
-    def _connection(self, path: Path, *, vector: bool = False) -> sqlite3.Connection:
+    def _connection(self, path: Path) -> sqlite3.Connection:
         session = getattr(self._connection_local, "session", None)
         if session is None:
             raise RuntimeError("dictionary access requires a request session")
@@ -403,15 +400,6 @@ class VerifiedLocalDictionary:
             )
             connection.row_factory = sqlite3.Row
             session.connections[resolved] = connection
-        if vector and resolved not in session.vector_paths:
-            import sqlite_vec
-
-            connection.enable_load_extension(True)
-            try:
-                sqlite_vec.load(connection)
-            finally:
-                connection.enable_load_extension(False)
-            session.vector_paths.add(resolved)
         return connection
 
     def _read_rows(
@@ -453,38 +441,6 @@ class VerifiedLocalDictionary:
             raise _DictionaryAssetsChangedError(
                 "local dictionary assets changed after adapter initialization"
             )
-
-    def _read_verified_vector_collections(self) -> frozenset[str]:
-        if self._vector_index is None:
-            return frozenset()
-        try:
-            rows = self._read_rows(
-                self._vector_index,
-                """
-                SELECT collection, source_sha256, schema_version, dimensions
-                  FROM vector_index_metadata
-                """,
-                (),
-            )
-        except (OSError, sqlite3.Error):
-            return frozenset()
-        return frozenset(
-            str(row["collection"])
-            for row in rows
-            if str(row["collection"]) in self._source_hashes
-            and str(row["source_sha256"]) == self._source_hashes[str(row["collection"])]
-            and str(row["schema_version"]) == VECTOR_INDEX_SCHEMA_VERSION
-            and row["dimensions"] == VECTOR_DIMENSIONS
-        )
-
-    def _current_vector_collections(self) -> frozenset[str]:
-        if (
-            self._vector_index is None
-            or self._file_stat(self._vector_index) != self._vector_index_stat
-            or not self._assets_are_current()
-        ):
-            return frozenset()
-        return self._verified_vector_collections
 
     def lookup(
         self,
@@ -902,117 +858,22 @@ class VerifiedLocalDictionary:
         limit: int,
         skip_collections_by_index: dict[int, frozenset[str]] | None = None,
     ) -> tuple[dict[int, list[tuple[str, str, float]]], float, int]:
-        identities: dict[int, list[tuple[str, str, float]]] = {
-            index: [] for index in range(len(requests))
+        batch = self._vector_repository.search_many(
+            requests,
+            limit=limit,
+            skip_collections_by_index=skip_collections_by_index,
+        )
+        identities = {
+            index: [
+                (identity.collection, identity.entity_id, identity.similarity)
+                for identity in batch.identities[index]
+            ]
+            for index in range(len(requests))
         }
-        active = self._current_vector_collections()
-        if (
-            self._vector_index is None
-            or self._embedder is None
-            or limit <= 0
-            or not active
-        ):
-            return identities, 0.0, 0
-        started = time.perf_counter()
-        try:
-            import numpy as np
-            connection = self._connection(self._vector_index, vector=True)
-        except (ImportError, OSError, sqlite3.Error):
-            return identities, round((time.perf_counter() - started) * 1000, 3), 0
-        skipped_collections = skip_collections_by_index or {}
-        query_vectors = {
-            index: self._embedder.embed(query_text)
-            for index, (query_text, collections) in enumerate(requests)
-            if query_text
-            and (collections & active) - skipped_collections.get(index, frozenset())
-        }
-        query_tokens = {
-            index: {
-                token.casefold()
-                for token in _ASCII_QUERY_TOKEN_RE.findall(query_text)
-                if len(token) >= 3
-            }
-            for index, (query_text, _) in enumerate(requests)
-        }
-        statement_count = 0
-        for collection in sorted(active, key=_COLLECTION_ORDER.__getitem__):
-            for index, (_, selected_collections) in enumerate(requests):
-                query_vector = query_vectors.get(index)
-                if (
-                    collection not in selected_collections
-                    or collection in skipped_collections.get(index, frozenset())
-                    or query_vector is None
-                    or not np.any(query_vector)
-                ):
-                    continue
-                entity_types: tuple[str | None, ...] = (
-                    ("ingredient", "product")
-                    if collection == "drug_terms"
-                    else (None,)
-                )
-                for entity_type in entity_types:
-                    partition = (
-                        " AND entity_type=?" if entity_type is not None else ""
-                    )
-                    parameters: tuple[Any, ...] = (
-                        (query_vector, limit, entity_type)
-                        if entity_type is not None
-                        else (query_vector, limit)
-                    )
-                    try:
-                        rows = connection.execute(
-                            f'''SELECT entity_id, source_text, canonical_en, distance
-                                  FROM "{collection}"
-                                 WHERE embedding MATCH ? AND k = ?{partition}''',
-                            parameters,
-                        ).fetchall()
-                    except sqlite3.Error:
-                        continue
-                    statement_count += 1
-                    for row in rows:
-                        row_tokens = {
-                            token.casefold()
-                            for token in _ASCII_QUERY_TOKEN_RE.findall(
-                                " ".join(
-                                    (
-                                        str(row["source_text"] or ""),
-                                        str(row["canonical_en"] or ""),
-                                    )
-                                )
-                            )
-                            if len(token) >= 3
-                        }
-                        if query_tokens[index] and not query_tokens[index] & row_tokens:
-                            continue
-                        distance = row["distance"]
-                        if (
-                            isinstance(distance, bool)
-                            or not isinstance(distance, (int, float))
-                            or not math.isfinite(distance)
-                        ):
-                            continue
-                        similarity = 1.0 - float(distance)
-                        if similarity < self._minimum_vector_similarity:
-                            continue
-                        identities[index].append(
-                            (
-                                collection,
-                                str(row["entity_id"]),
-                                min(1.0, max(0.0, similarity)),
-                            )
-                        )
-        for values in identities.values():
-            values.sort(
-                key=lambda item: (
-                    -item[2],
-                    _COLLECTION_ORDER[item[0]],
-                    item[1],
-                )
-            )
         return (
             identities,
-            round((time.perf_counter() - started) * 1000, 3),
-            statement_count,
+            batch.elapsed_ms,
+            batch.statement_count,
         )
 
 

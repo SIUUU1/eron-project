@@ -53,7 +53,8 @@ confidence scores and must not affect candidate ranking or validation results.
 Dictionary queries reuse repository connections for the duration of one
 resolver request. Exact lookups are grouped into batches of at most 64 queries
 per collection, repeated request-local searches reuse verified results, and
-sqlite-vec is loaded at most once per request while vectors remain on SQLite.
+medical vector queries are batched by collection. SQLite rollback mode loads
+sqlite-vec at most once per request.
 
 Medical terminology and KCD exact lookup has a selectable repository boundary.
 `CLINICALNLP_TERMINOLOGY_BACKEND=postgres` is the default and returns active
@@ -63,23 +64,49 @@ or patient text. `sqlite` is retained as the emergency rollback mode. Compose
 injects the root `DATABASE_URL` as `CLINICALNLP_DATABASE_URL` and waits for the
 PostgreSQL healthcheck. When running ClinicalNLP outside Compose, set
 `CLINICALNLP_DATABASE_URL` in `services/clinicalnlp/.env` directly. A
-SQLAlchemy-style `postgresql+psycopg://` URL is accepted. Local
-RAW exact matching and medical/policy vectors remain on their existing runtime
-assets in this step, so do not remove the SQLite mounts yet.
+SQLAlchemy-style `postgresql+psycopg://` URL is accepted. Local RAW exact
+matching and policy vectors remain on their existing runtime assets.
+
+Medical terminology vectors use an independent repository boundary.
+`CLINICALNLP_MEDICAL_VECTOR_BACKEND=postgres` returns only complete, active,
+collection-scoped vector releases. `shadow` preserves SQLite output and compares
+PostgreSQL identities without logging query text. `sqlite` remains the emergency
+rollback mode. Do not remove `api3_vectors.sqlite` until production parity and
+rollback drills are complete.
 
 Runtime modes:
 
 ```dotenv
 # production default
 CLINICALNLP_TERMINOLOGY_BACKEND=postgres
+CLINICALNLP_MEDICAL_VECTOR_BACKEND=postgres
 
 # comparison diagnostics; SQLite still owns the response
 CLINICALNLP_TERMINOLOGY_BACKEND=shadow
+CLINICALNLP_MEDICAL_VECTOR_BACKEND=shadow
 CLINICALNLP_DATABASE_URL=postgresql://user:password@postgres:5432/eron
 
 # emergency rollback while SQLite assets remain mounted
 CLINICALNLP_TERMINOLOGY_BACKEND=sqlite
+CLINICALNLP_MEDICAL_VECTOR_BACKEND=sqlite
 ```
+
+Apply the versioned schema and import the existing immutable sqlite-vec index
+before selecting the PostgreSQL medical vector backend:
+
+```sh
+python3 database/scripts/apply_clinicalnlp_schema.py
+docker compose --profile clinical run --rm --no-deps clinicalnlp \
+  python scripts/import_medical_vectors.py
+docker compose --profile clinical run --rm --no-deps clinicalnlp \
+  python scripts/verify_medical_vector_backends.py
+```
+
+The importer validates the vector schema, dimension, dictionary source hash,
+and stored row count for each of `drug_terms`, `procedure_terms`,
+`anatomy_terms`, and `emergency_terms`. It activates a release only after its
+entire collection commits. KCD vectors and policy vectors are not part of this
+import.
 
 ## Docker Compose profile
 

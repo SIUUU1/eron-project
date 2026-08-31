@@ -32,6 +32,11 @@ class ClinicalNlpComposeManifestTests(unittest.TestCase):
             "${CLINICALNLP_TERMINOLOGY_BACKEND:-postgres}",
             service,
         )
+        self.assertIn(
+            "CLINICALNLP_MEDICAL_VECTOR_BACKEND: "
+            "${CLINICALNLP_MEDICAL_VECTOR_BACKEND:-postgres}",
+            service,
+        )
         self.assertIn("CLINICALNLP_DATABASE_URL: ${DATABASE_URL}", service)
         self.assertIn("      postgres:\n        condition: service_healthy\n", service)
         self.assertIn('      - "8765"\n', service)

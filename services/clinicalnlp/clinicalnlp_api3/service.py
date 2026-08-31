@@ -65,6 +65,7 @@ class ServiceSettings:
     translation_batch_size: int
     db_root: Path
     terminology_backend: str
+    medical_vector_backend: str
     database_url: str
     vector_index: Path
     policy_index: Path
@@ -122,6 +123,14 @@ class ServiceSettings:
             raise ConfigurationError(
                 "CLINICALNLP_TERMINOLOGY_BACKEND must be sqlite, shadow, or postgres"
             )
+        medical_vector_backend = values.get(
+            "CLINICALNLP_MEDICAL_VECTOR_BACKEND",
+            terminology_backend,
+        ).strip().casefold()
+        if medical_vector_backend not in {"sqlite", "shadow", "postgres"}:
+            raise ConfigurationError(
+                "CLINICALNLP_MEDICAL_VECTOR_BACKEND must be sqlite, shadow, or postgres"
+            )
         database_url = values.get(
             "CLINICALNLP_DATABASE_URL",
             values.get("DATABASE_URL", ""),
@@ -129,6 +138,10 @@ class ServiceSettings:
         if terminology_backend in {"shadow", "postgres"} and not database_url:
             raise ConfigurationError(
                 f"CLINICALNLP_DATABASE_URL is required for {terminology_backend} terminology"
+            )
+        if medical_vector_backend in {"shadow", "postgres"} and not database_url:
+            raise ConfigurationError(
+                f"CLINICALNLP_DATABASE_URL is required for {medical_vector_backend} medical vectors"
             )
         return cls(
             llm_provider=provider,
@@ -168,6 +181,7 @@ class ServiceSettings:
                 )
             ),
             terminology_backend=terminology_backend,
+            medical_vector_backend=medical_vector_backend,
             database_url=database_url,
             vector_index=Path(
                 values.get(
@@ -241,6 +255,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
 
     from .clinical_llm import OllamaCloudClinicalLlmClient
     from .medical_span_worker import MedicalSpanWorker
+    from .medical_vector_repository import create_medical_vector_repository
     from .official_raw_exact import OfficialRawExactRetriever
     from .query_expansion import LlamaServerMedicalQueryExpander
     from .record_extractor import LlamaServerClinicalExtractor
@@ -250,12 +265,14 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         VerifiedLocalDictionary,
     )
     from .terminology_repository import create_terminology_repository
+    from .vector_store import dictionary_source_hashes
+    from .retrieval import DictionaryPaths
 
     try:
         official_raw_exact = OfficialRawExactRetriever(settings.db_root)
     except (OSError, sqlite3.Error, ValueError) as error:
         raise AssetError("ClinicalNLP dictionary assets are unavailable") from error
-    vector_enabled = settings.vector_index.is_file()
+    vector_enabled = False
 
     clinical_client = OllamaCloudClinicalLlmClient(
         settings.ollama_base_url,
@@ -306,14 +323,36 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
                 db_root=settings.db_root,
                 database_url=settings.database_url,
             )
+            source_hashes = {}
+            if settings.medical_vector_backend in {"sqlite", "shadow"}:
+                source_hashes = getattr(
+                    terminology_repository,
+                    "local_source_hashes",
+                    None,
+                ) or dictionary_source_hashes(
+                    DictionaryPaths.discover(settings.db_root),
+                    collections=(
+                        "drug_terms",
+                        "procedure_terms",
+                        "anatomy_terms",
+                        "emergency_terms",
+                    ),
+                )
+            vector_repository = create_medical_vector_repository(
+                mode=settings.medical_vector_backend,
+                index_path=settings.vector_index,
+                source_hashes=source_hashes,
+                database_url=settings.database_url,
+            )
         except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
             raise AssetError("ClinicalNLP terminology assets are unavailable") from error
         verified_dictionary = VerifiedLocalDictionary(
             settings.db_root,
             raw_retriever=official_raw_exact,
-            vector_index=settings.vector_index if vector_enabled else None,
             terminology_repository=terminology_repository,
+            vector_repository=vector_repository,
         )
+        vector_enabled = True
         medical_query_resolver = UmlsPrimaryMedicalQueryResolver(
             dictionary=verified_dictionary,
             span_linker=span_worker,

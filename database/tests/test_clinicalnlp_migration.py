@@ -132,7 +132,27 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             self._query(
                 "SELECT count(*) FROM clinicalnlp.schema_migrations "
-                "WHERE version IN ('001', '002')"
+                "WHERE version IN ('001', '002', '003')"
+            ),
+            "3",
+        )
+        self.assertEqual(
+            self._query(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = 'clinicalnlp' "
+                "AND table_name = 'medical_vectors' "
+                "AND column_name = 'vector_release_id'"
+            ),
+            "NO",
+        )
+        self.assertEqual(
+            self._query(
+                "SELECT count(*) FROM pg_constraint "
+                "WHERE conrelid = 'clinicalnlp.medical_vectors'::regclass "
+                "AND conname IN ("
+                "'medical_vectors_vector_release_id_fkey', "
+                "'uq_clinicalnlp_medical_vector_release_source'"
+                ")"
             ),
             "2",
         )
@@ -153,7 +173,7 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(process.stdout),
             {
-                "migration": "002",
+                "migration": "003",
                 "schema": "clinicalnlp",
                 "status": "ready",
                 "table_count": 15,
