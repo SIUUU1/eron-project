@@ -47,11 +47,13 @@ existing n-gram fallback.
 
 Every draft response includes non-clinical `telemetry` with
 `translation_ms`, `translation_calls`, `umls_ms`, `dictionary_ms`, `vector_ms`,
-and `clinical_extraction_ms`. These values diagnose latency only; they are not
+`exact_statement_count`, `vector_statement_count`, `search_cache_hit_count`, and
+`clinical_extraction_ms`. These values diagnose latency only; they are not
 confidence scores and must not affect candidate ranking or validation results.
 Dictionary queries reuse read-only SQLite handles for the duration of one
 resolver request. Exact lookups are grouped into batches of at most 64 queries
-per collection, and sqlite-vec is loaded at most once per request.
+per collection, repeated request-local searches reuse verified results, and
+sqlite-vec is loaded at most once per request.
 
 ## Docker Compose profile
 

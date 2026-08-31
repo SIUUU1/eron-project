@@ -171,6 +171,7 @@ class _RecordingDictionary:
         self.search_calls: list[tuple[str, int]] = []
         self.exact_search_calls: list[tuple[str, int]] = []
         self.collection_calls: list[frozenset[str] | None] = []
+        self.exact_collection_calls: list[frozenset[str] | None] = []
 
     def raw_matches(self, *, raw_text, context):
         return self.delegate.raw_matches(raw_text=raw_text, context=context)
@@ -188,6 +189,9 @@ class _RecordingDictionary:
 
     def search_exact(self, query_text, *, limit, collections=None):
         self.exact_search_calls.append((query_text, limit))
+        self.exact_collection_calls.append(
+            frozenset(collections) if collections is not None else None
+        )
         return self.delegate.search_exact(
             query_text,
             limit=limit,
@@ -373,6 +377,38 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
 
         self.assertEqual(load.call_count, 1)
 
+    def test_exact_hit_skips_vector_statements_for_the_selected_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            vector_index = root / "medical-vectors.sqlite"
+            build_vector_indexes(root, vector_index)
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+                vector_index=vector_index,
+            )
+
+            batch = dictionary.search_many(
+                (("cough", frozenset({"emergency_terms"})),),
+                limit=5,
+            )
+            mixed_batch = dictionary.search_many(
+                (
+                    (
+                        "cough",
+                        frozenset({"emergency_terms", "anatomy_terms"}),
+                    ),
+                ),
+                limit=5,
+            )
+
+        self.assertEqual(batch.matches[0][0].entity_id, "emergency:1")
+        self.assertGreater(batch.exact_statement_count, 0)
+        self.assertEqual(batch.vector_statement_count, 0)
+        self.assertEqual(mixed_batch.matches[0][0].entity_id, "emergency:1")
+        self.assertEqual(mixed_batch.vector_statement_count, 1)
+
     def test_umls_resolves_before_official_raw_exact_fallback(self):
         events: list[str] = []
 
@@ -424,6 +460,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                     )
 
                 def search_exact(self, query_text, *, limit, collections=None):
+                    events.append("dictionary_exact")
                     return delegate.search_exact(
                         query_text,
                         limit=limit,
@@ -445,7 +482,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(events, ["umls", "dictionary_search", "raw_exact"])
+        self.assertEqual(events, ["umls", "dictionary_exact", "raw_exact"])
         self.assertEqual([candidate.route for candidate in resolution.candidates], ["umls"])
 
     def test_approved_stt_loanword_alias_stays_review_only(self):
@@ -484,7 +521,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertEqual(candidate.review_status, "approved")
         self.assertEqual(candidate.evidence.raw_span.text, "디스프니아")
 
-    def test_scoped_umls_miss_retries_the_surface_as_unrestricted_ngram(self):
+    def test_scoped_umls_miss_retries_unrestricted_exact_without_vector(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _create_dictionary_fixture(root)
@@ -497,11 +534,14 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                 )
                 db.commit()
             surface = "orbit"
-            resolver = UmlsPrimaryMedicalQueryResolver(
-                dictionary=VerifiedLocalDictionary(
+            dictionary = _RecordingDictionary(
+                VerifiedLocalDictionary(
                     root,
                     raw_retriever=SqliteDictionaryRetriever(root),
-                ),
+                )
+            )
+            resolver = UmlsPrimaryMedicalQueryResolver(
+                dictionary=dictionary,
                 span_linker=_RecordingSpanLinker(
                     [
                         {
@@ -538,11 +578,20 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertEqual(resolution.umls_query_count, 1)
         self.assertEqual(resolution.ngram_query_count, 1)
         self.assertEqual(resolution.unresolved_count, 0)
+        self.assertEqual(resolution.policy_version, "umls-primary-policy-v2")
         self.assertEqual(len(resolution.candidates), 1)
         self.assertEqual(resolution.candidates[0].route, "ngram_fallback")
         self.assertEqual(
             resolution.candidates[0].dictionary_match.entity_id,
             "anatomy:10",
+        )
+        self.assertEqual(
+            dictionary.collection_calls,
+            [frozenset({"emergency_terms"})],
+        )
+        self.assertEqual(
+            dictionary.exact_collection_calls,
+            [frozenset({"emergency_terms"}), None],
         )
 
     def test_surface_and_canonical_keep_the_strongest_verified_match(self):
@@ -592,6 +641,182 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
             resolution.candidates[0].dictionary_match.retrieval_score,
             1.0,
         )
+
+    def test_exact_canonical_suppresses_surface_vector_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            dictionary = _RecordingDictionary(
+                VerifiedLocalDictionary(
+                    root,
+                    raw_retriever=SqliteDictionaryRetriever(root),
+                )
+            )
+            surface = "ocular emergency"
+            resolver = UmlsPrimaryMedicalQueryResolver(
+                dictionary=dictionary,
+                span_linker=_RecordingSpanLinker(
+                    [
+                        {
+                            "segment_id": "seg_1",
+                            "text": surface,
+                            "start_char": 0,
+                            "end_char": len(surface),
+                            "linked": True,
+                            "umls_candidates": [
+                                {
+                                    "cui": "C0154778",
+                                    "canonical_name": "acute angle-closure glaucoma",
+                                    "semantic_types": ["T047"],
+                                    "linking_score": 0.99,
+                                }
+                            ],
+                        }
+                    ]
+                ),
+            )
+
+            resolution = resolver.resolve(
+                MedicalQueryDocument(
+                    segments=(
+                        MedicalQuerySegment(
+                            segment_id="seg_1",
+                            raw_text="눈이 아프고 흐립니다.",
+                            translated_text_en=surface,
+                        ),
+                    )
+                )
+            )
+
+        self.assertEqual(dictionary.search_calls, [])
+        self.assertEqual(
+            [query for query, _ in dictionary.exact_search_calls],
+            [surface, "acute angle-closure glaucoma"],
+        )
+        self.assertEqual(len(resolution.candidates), 1)
+        self.assertEqual(
+            resolution.candidates[0].dictionary_match.entity_id,
+            "emergency:2",
+        )
+
+    def test_unknown_umls_semantic_type_uses_unrestricted_exact_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            with closing(sqlite3.connect(root / "ERON_anatomy_terms.sqlite")) as db:
+                db.execute(
+                    "INSERT INTO anatomical_terms VALUES"
+                    "(10, '안와', 'orbit', 'orbita', 'official')"
+                )
+                db.execute(
+                    "INSERT INTO anatomical_aliases VALUES(10, 10, 'orbit')"
+                )
+                db.commit()
+            dictionary = _RecordingDictionary(
+                VerifiedLocalDictionary(
+                    root,
+                    raw_retriever=SqliteDictionaryRetriever(root),
+                )
+            )
+            resolver = UmlsPrimaryMedicalQueryResolver(
+                dictionary=dictionary,
+                span_linker=_RecordingSpanLinker(
+                    [
+                        {
+                            "segment_id": "seg_1",
+                            "text": "orbit",
+                            "start_char": 0,
+                            "end_char": 5,
+                            "linked": True,
+                            "umls_candidates": [
+                                {
+                                    "cui": "C-UNKNOWN-TYPE",
+                                    "canonical_name": "orbit",
+                                    "semantic_types": ["T999"],
+                                    "linking_score": 0.99,
+                                }
+                            ],
+                        }
+                    ]
+                ),
+            )
+
+            resolution = resolver.resolve(
+                MedicalQueryDocument(
+                    segments=(
+                        MedicalQuerySegment(
+                            segment_id="seg_1",
+                            raw_text="눈 주위가 아픕니다.",
+                            translated_text_en="orbit",
+                        ),
+                    )
+                )
+            )
+
+        self.assertEqual(dictionary.search_calls, [])
+        self.assertEqual(dictionary.exact_collection_calls, [None])
+        self.assertEqual(resolution.ngram_query_count, 0)
+        self.assertEqual(resolution.candidates[0].route, "umls")
+        self.assertEqual(
+            resolution.candidates[0].dictionary_match.entity_id,
+            "anatomy:10",
+        )
+
+    def test_repeated_typed_umls_query_reuses_request_local_search_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary_root = Path(directory)
+            _create_dictionary_fixture(dictionary_root)
+            dictionary = _RecordingDictionary(
+                VerifiedLocalDictionary(
+                    dictionary_root,
+                    raw_retriever=SqliteDictionaryRetriever(dictionary_root),
+                )
+            )
+            resolver = UmlsPrimaryMedicalQueryResolver(
+                dictionary=dictionary,
+                span_linker=_RecordingSpanLinker(
+                    [
+                        {
+                            "segment_id": segment_id,
+                            "text": "cough",
+                            "start_char": 0,
+                            "end_char": 5,
+                            "linked": True,
+                            "umls_candidates": [
+                                {
+                                    "cui": "C0010200",
+                                    "canonical_name": "cough",
+                                    "semantic_types": ["T184"],
+                                    "linking_score": 0.99,
+                                }
+                            ],
+                        }
+                        for segment_id in ("seg_1", "seg_2")
+                    ]
+                ),
+            )
+
+            resolution = resolver.resolve(
+                MedicalQueryDocument(
+                    segments=tuple(
+                        MedicalQuerySegment(
+                            segment_id=segment_id,
+                            raw_text="기침",
+                            translated_text_en="cough",
+                        )
+                        for segment_id in ("seg_1", "seg_2")
+                    )
+                )
+            )
+
+        self.assertEqual(dictionary.search_calls, [])
+        self.assertEqual(dictionary.exact_search_calls, [("cough", 5)])
+        self.assertEqual(
+            dictionary.exact_collection_calls,
+            [frozenset({"emergency_terms"})],
+        )
+        self.assertEqual(resolution.telemetry.search_cache_hit_count, 1)
+        self.assertEqual(len(resolution.candidates), 2)
 
     def test_unapproved_source_alias_cannot_inherit_official_term_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1113,12 +1338,13 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(dictionary.search_calls, [])
         self.assertEqual(
-            [query for query, _ in dictionary.search_calls],
+            [query for query, _ in dictionary.exact_search_calls],
             [surface, "acute angle-closure glaucoma"],
         )
         self.assertEqual(
-            dictionary.collection_calls,
+            dictionary.exact_collection_calls,
             [frozenset({"emergency_terms"})] * 2,
         )
         self.assertEqual(resolution.umls_query_count, 2)
@@ -1208,8 +1434,9 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         queries = vector_queries + exact_queries
         self.assertNotIn("Persistent symptom", queries)
         self.assertNotIn("Dyspnea persists", queries)
-        self.assertIn("persists", vector_queries)
+        self.assertIn("persists", exact_queries)
         self.assertIn("chest pain", exact_queries)
+        self.assertNotIn(None, dictionary.collection_calls)
         self.assertLessEqual(len(queries), 8)
         self.assertEqual(
             resolution.umls_query_count + resolution.ngram_query_count,

@@ -1839,6 +1839,9 @@ def run_clinical_workflow(
         "umls_ms": 0.0,
         "dictionary_ms": 0.0,
         "vector_ms": 0.0,
+        "exact_statement_count": 0,
+        "vector_statement_count": 0,
+        "search_cache_hit_count": 0,
         "clinical_extraction_ms": 0.0,
     }
     errors: list[dict[str, str]] = []
@@ -1903,6 +1906,15 @@ def run_clinical_workflow(
                 )
                 telemetry["vector_ms"] = telemetry_number(
                     getattr(resolution_telemetry, "vector_ms", 0.0)
+                )
+                telemetry["exact_statement_count"] = telemetry_count(
+                    getattr(resolution_telemetry, "exact_statement_count", 0)
+                )
+                telemetry["vector_statement_count"] = telemetry_count(
+                    getattr(resolution_telemetry, "vector_statement_count", 0)
+                )
+                telemetry["search_cache_hit_count"] = telemetry_count(
+                    getattr(resolution_telemetry, "search_cache_hit_count", 0)
                 )
             if query_resolution.mode != "shadow":
                 resolved_candidates_by_segment = projected_candidates_by_segment

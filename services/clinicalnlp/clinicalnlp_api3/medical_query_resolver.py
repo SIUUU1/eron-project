@@ -386,6 +386,9 @@ class QueryResolutionTelemetry:
     umls_ms: float = 0.0
     dictionary_ms: float = 0.0
     vector_ms: float = 0.0
+    exact_statement_count: int = 0
+    vector_statement_count: int = 0
+    search_cache_hit_count: int = 0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -401,6 +404,15 @@ class QueryResolutionTelemetry:
             ):
                 raise InvalidQueryResolutionError(
                     f"{name} must be a finite non-negative number"
+                )
+        for name, value in (
+            ("exact_statement_count", self.exact_statement_count),
+            ("vector_statement_count", self.vector_statement_count),
+            ("search_cache_hit_count", self.search_cache_hit_count),
+        ):
+            if type(value) is not int or value < 0:
+                raise InvalidQueryResolutionError(
+                    f"{name} must be a non-negative integer"
                 )
 
 

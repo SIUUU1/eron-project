@@ -39,7 +39,7 @@ MAX_QUERIES_PER_DOCUMENT = 128
 MAX_CANDIDATES_PER_QUERY = 5
 MAX_WORKER_SEGMENTS = 50
 MAX_WORKER_TRANSLATED_CHARS = 20_000
-UMLS_PRIMARY_POLICY_VERSION = "umls-primary-policy-v1"
+UMLS_PRIMARY_POLICY_VERSION = "umls-primary-policy-v2"
 
 _COLLECTION_ORDER = {
     "drug_terms": 0,
@@ -1084,6 +1084,13 @@ class VerifiedLocalDictionary:
                 ) = self._vector_query_identities_many(
                     normalized,
                     limit=max(MAX_CANDIDATES_PER_QUERY * 4, bounded_limit * 4),
+                    skip_collections_by_index={
+                        index: frozenset(
+                            collection for collection, _ in identities
+                        )
+                        for index, identities in exact_identities.items()
+                        if identities
+                    },
                 )
             output: list[tuple[LocalDictionaryMatch, ...]] = []
             for index in range(len(normalized)):
@@ -1133,6 +1140,7 @@ class VerifiedLocalDictionary:
         requests: tuple[tuple[str, frozenset[str]], ...],
         *,
         limit: int,
+        skip_collections_by_index: dict[int, frozenset[str]] | None = None,
     ) -> tuple[dict[int, list[tuple[str, str, float]]], float, int]:
         identities: dict[int, list[tuple[str, str, float]]] = {
             index: [] for index in range(len(requests))
@@ -1151,10 +1159,12 @@ class VerifiedLocalDictionary:
             connection = self._connection(self._vector_index, vector=True)
         except (ImportError, OSError, sqlite3.Error):
             return identities, round((time.perf_counter() - started) * 1000, 3), 0
+        skipped_collections = skip_collections_by_index or {}
         query_vectors = {
             index: self._embedder.embed(query_text)
             for index, (query_text, collections) in enumerate(requests)
-            if query_text and collections & active
+            if query_text
+            and (collections & active) - skipped_collections.get(index, frozenset())
         }
         query_tokens = {
             index: {
@@ -1170,6 +1180,7 @@ class VerifiedLocalDictionary:
                 query_vector = query_vectors.get(index)
                 if (
                     collection not in selected_collections
+                    or collection in skipped_collections.get(index, frozenset())
                     or query_vector is None
                     or not np.any(query_vector)
                 ):
@@ -1302,6 +1313,13 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
         umls_ms = 0.0
         dictionary_ms = 0.0
         vector_ms = 0.0
+        exact_statement_count = 0
+        vector_statement_count = 0
+        search_cache_hit_count = 0
+        search_cache: dict[
+            tuple[str, frozenset[str] | None, bool],
+            tuple[LocalDictionaryMatch, ...],
+        ] = {}
 
         def add_issue(
             code: str,
@@ -1376,50 +1394,86 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             exact_only: bool = False,
         ) -> tuple[tuple[LocalDictionaryMatch, ...], ...]:
             nonlocal dictionary_ms, vector_ms
+            nonlocal exact_statement_count, vector_statement_count
+            nonlocal search_cache_hit_count
             if not requests:
                 return ()
+            request_keys = tuple(
+                (query_text.strip().casefold(), allowed_collections, exact_only)
+                for query_text, allowed_collections in requests
+            )
+            missing_requests: list[tuple[str, frozenset[str] | None]] = []
+            missing_keys: list[
+                tuple[str, frozenset[str] | None, bool]
+            ] = []
+            pending_keys: set[
+                tuple[str, frozenset[str] | None, bool]
+            ] = set()
+            for request, key in zip(requests, request_keys):
+                if key in search_cache or key in pending_keys:
+                    search_cache_hit_count += 1
+                    continue
+                pending_keys.add(key)
+                missing_requests.append(request)
+                missing_keys.append(key)
+            if not missing_requests:
+                return tuple(search_cache[key] for key in request_keys)
             search_many = getattr(self._dictionary, "search_many", None)
             if not callable(search_many):
-                return tuple(
+                missing_values = tuple(
                     legacy_search(
                         query_text,
                         allowed_collections,
                         exact_only=exact_only,
                     )
-                    for query_text, allowed_collections in requests
+                    for query_text, allowed_collections in missing_requests
                 )
-            try:
-                batch = search_many(
-                    requests,
-                    limit=MAX_CANDIDATES_PER_QUERY,
-                    exact_only=exact_only,
-                )
-            except Exception:
-                add_issue(
-                    "DICTIONARY_UNAVAILABLE",
-                    "dictionary_search",
-                    "baseline",
-                )
-                return tuple(() for _ in requests)
-            dictionary_ms += float(getattr(batch, "dictionary_ms", 0.0))
-            vector_ms += float(getattr(batch, "vector_ms", 0.0))
-            values_by_request = getattr(batch, "matches", ())
-            if len(values_by_request) != len(requests):
-                return tuple(() for _ in requests)
-            return tuple(
-                _bounded_dictionary_matches(
-                    value
-                    for value in values
-                    if allowed_collections is None
-                    or (
-                        isinstance(value, LocalDictionaryMatch)
-                        and value.collection in allowed_collections
+            else:
+                try:
+                    batch = search_many(
+                        missing_requests,
+                        limit=MAX_CANDIDATES_PER_QUERY,
+                        exact_only=exact_only,
                     )
-                )
-                for values, (_, allowed_collections) in zip(
-                    values_by_request,
-                    requests,
-                )
+                except Exception:
+                    add_issue(
+                        "DICTIONARY_UNAVAILABLE",
+                        "dictionary_search",
+                        "baseline",
+                    )
+                    missing_values = tuple(() for _ in missing_requests)
+                else:
+                    dictionary_ms += float(getattr(batch, "dictionary_ms", 0.0))
+                    vector_ms += float(getattr(batch, "vector_ms", 0.0))
+                    exact_statement_count += int(
+                        getattr(batch, "exact_statement_count", 0)
+                    )
+                    vector_statement_count += int(
+                        getattr(batch, "vector_statement_count", 0)
+                    )
+                    values_by_request = getattr(batch, "matches", ())
+                    if len(values_by_request) != len(missing_requests):
+                        missing_values = tuple(() for _ in missing_requests)
+                    else:
+                        missing_values = tuple(
+                            _bounded_dictionary_matches(
+                                value
+                                for value in values
+                                if allowed_collections is None
+                                or (
+                                    isinstance(value, LocalDictionaryMatch)
+                                    and value.collection in allowed_collections
+                                )
+                            )
+                            for values, (_, allowed_collections) in zip(
+                                values_by_request,
+                                missing_requests,
+                            )
+                        )
+            search_cache.update(zip(missing_keys, missing_values))
+            return tuple(
+                search_cache.get(key, ())
+                for key in request_keys
             )
 
         def safe_search(
@@ -1625,7 +1679,20 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         document_budget -= 1
                         umls_query_count += 1
                         search_requests.append((query, allowed_collections))
-                    for matches in safe_search_many(search_requests):
+                    # Unknown semantic types must not fan out into every vector
+                    # collection. Exact lookup remains a bounded safety net,
+                    # while typed concepts search only their compatible lanes.
+                    exact_matches = safe_search_many(
+                        search_requests,
+                        exact_only=True,
+                    )
+                    matches_by_query = (
+                        exact_matches
+                        if allowed_collections is None
+                        or any(exact_matches)
+                        else safe_search_many(search_requests)
+                    )
+                    for matches in matches_by_query:
                         for match in matches:
                             identity = (match.collection, match.entity_id)
                             current = verified_matches.get(identity)
@@ -1662,8 +1729,13 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                             )
                         )
 
+                # A typed UMLS miss has already exhausted vector search in its
+                # compatible collection. Retrying the same span against every
+                # vector collection is both expensive and semantically unsafe;
+                # unrestricted fallback is exact-only so a linker type mistake
+                # can still recover a verified local dictionary term.
                 planned_regions = [
-                    (start, end, False) for start, end in fallback_regions
+                    (start, end, True) for start, end in fallback_regions
                 ]
                 planned_regions.extend(
                     (start, end, True)
@@ -1787,6 +1859,9 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 umls_ms=round(umls_ms, 3),
                 dictionary_ms=round(dictionary_ms, 3),
                 vector_ms=round(vector_ms, 3),
+                exact_statement_count=exact_statement_count,
+                vector_statement_count=vector_statement_count,
+                search_cache_hit_count=search_cache_hit_count,
             ),
         )
 

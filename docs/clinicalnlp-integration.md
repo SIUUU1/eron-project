@@ -165,6 +165,12 @@ RAW 보존
 않는다. UMLS가 이미 해결한 동일 사전 entity는 RAW exact 후보로 중복 추가하지 않으며,
 UMLS 장애 시에는 RAW exact가 비차단 안전망으로 동작한다.
 
+`umls-primary-policy-v2`부터 UMLS semantic type에 맞는 collection만 Vector
+검색한다. 같은 검색어의 로컬 exact 후보가 확인되면 Vector 검색을 생략하고, 의미
+유형이 없거나 지정된 collection에서 찾지 못한 span은 전체 collection의 exact
+검색만 허용한다. 따라서 링크 오류를 공식 사전 정본으로 복구할 수는 있지만 관련
+없는 약물·처치·해부·응급 collection 전체를 Vector로 재검색하지 않는다.
+
 승인 별칭 저장소와 계약은 향후 의료진 검토·승인 체계를 위해 보존하지만 현재 운영
 검색 경로에서는 읽거나 후보에 반영하지 않는다. 어떠한 검색 후보도 초안에 자동
 확정하지 않는다.
