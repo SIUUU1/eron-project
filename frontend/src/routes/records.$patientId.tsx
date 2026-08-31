@@ -1,4 +1,5 @@
-import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertCircle,
   ArrowLeft,
@@ -35,6 +36,8 @@ import {
   workflowDraftToFieldStatuses,
   type DraftDialogueTurn,
 } from "@/api/clinical-records";
+import { formatDateTime, sexLabel } from "@/api/display";
+import { edStayKeys, getEdStay } from "@/api/ed-stays";
 import type { WhisperDraftRequest } from "@/api/types";
 import {
   BrowserAudioRecorder,
@@ -64,13 +67,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import {
   checkStatusMeta,
   currentUser,
   emptyRecord,
   followUpQuestions,
-  getPatient,
   kcdCandidates,
   outcomeOptions,
   recordFieldLabels,
@@ -81,26 +84,16 @@ import {
 import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
-  loader: ({ params }) => {
-    const patient = getPatient(params.patientId);
-    if (!patient) throw notFound();
-    return { patient };
-  },
-  head: ({ loaderData }) => {
-    if (!loaderData) {
-      return {
-        meta: [{ title: "환자 정보 없음 · ER-GUARD AI" }, { name: "robots", content: "noindex" }],
-      };
-    }
-    const p = loaderData.patient;
-    const title = `${p.name} AI 응급진료기록 · ER-GUARD AI`;
-    const desc = `${p.name} 환자의 대화 기반 응급진료기록 작성, 누락 검사, KCD 코드 추천 및 의사 인증 워크플로우.`;
+  head: ({ params }) => {
+    const title = `환자 ${params.patientId} AI 응급진료기록 · ER-GUARD AI`;
     return {
       meta: [
         { title },
-        { name: "description", content: desc },
+        {
+          name: "description",
+          content: "대화 기반 응급진료기록 작성, 누락 검사, KCD 코드 추천 및 의사 인증 워크플로우.",
+        },
         { property: "og:title", content: title },
-        { property: "og:description", content: desc },
       ],
     };
   },
@@ -154,12 +147,68 @@ const StatusIcon = ({ status }: { status: CheckStatus }) =>
   );
 
 function RecordWorkflowPage() {
-  const { patient } = Route.useLoaderData();
+  const { patientId } = Route.useParams();
+  const detailQuery = useQuery({
+    queryKey: edStayKeys.detail(patientId),
+    queryFn: ({ signal }) => getEdStay(patientId, signal),
+  });
 
+  if (detailQuery.isPending) {
+    return (
+      <div className="space-y-5">
+        <Skeleton className="h-10 w-48" />
+        <Skeleton className="h-28 w-full" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (detailQuery.isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-20 text-center">
+        <AlertCircle className="size-9 text-risk-critical" />
+        <p className="font-semibold">환자 정보를 불러오지 못했습니다</p>
+        <p className="text-sm text-muted-foreground">{detailQuery.error.message}</p>
+        <div className="flex gap-2">
+          <Button asChild variant="outline">
+            <Link to="/records">목록으로</Link>
+          </Button>
+          <Button onClick={() => void detailQuery.refetch()}>다시 시도</Button>
+        </div>
+      </div>
+    );
+  }
+
+  const detail = detailQuery.data;
+  const vital = detail.triage;
+  const patient = {
+    id: detail.stay_id,
+    name: detail.display_name ?? `ED-${detail.stay_id}`,
+    sex: sexLabel(detail.sex),
+    age: detail.age ?? "-",
+    arrivedAt: formatDateTime(detail.arrived_at),
+    ktas: detail.acuity ?? "-",
+    recordStatus: "미작성",
+    vitals: {
+      hr: vital.heart_rate ?? "-",
+      rr: vital.resp_rate ?? "-",
+      sbp: vital.sbp ?? "-",
+      dbp: vital.dbp ?? "-",
+      bt: vital.temperature_c ?? "-",
+      spo2: vital.spo2 ?? "-",
+      mental: "-",
+    },
+  };
+
+  return <RecordWorkflow patient={patient} />;
+}
+
+function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflowPatient> }) {
   const [step, setStep] = useState(1);
   const [dialogue, setDialogue] = useState<DraftDialogueTurn[]>([]);
-  const [uploadedWhisperPayload, setUploadedWhisperPayload] =
-    useState<WhisperDraftRequest | null>(null);
+  const [uploadedWhisperPayload, setUploadedWhisperPayload] = useState<WhisperDraftRequest | null>(
+    null,
+  );
   const [uploadedWhisperFileName, setUploadedWhisperFileName] = useState<string | null>(null);
   const [uploadedAudioFile, setUploadedAudioFile] = useState<File | null>(null);
   const [transcribing, setTranscribing] = useState(false);
@@ -213,7 +262,9 @@ function RecordWorkflowPage() {
   const completeness = generated
     ? Math.max(
         0,
-        Math.round(100 - fieldOrder.filter((k) => statuses[k] === "missing").length * 5 - reviewCount * 3.5),
+        Math.round(
+          100 - fieldOrder.filter((k) => statuses[k] === "missing").length * 5 - reviewCount * 3.5,
+        ),
       )
     : 0;
 
@@ -245,8 +296,7 @@ function RecordWorkflowPage() {
       });
     } catch (error) {
       toast.error("Whisper JSON을 불러오지 못했습니다.", {
-        description:
-          error instanceof Error ? error.message : "JSON 파일 형식을 확인해 주세요.",
+        description: error instanceof Error ? error.message : "JSON 파일 형식을 확인해 주세요.",
       });
     }
   };
@@ -412,9 +462,7 @@ function RecordWorkflowPage() {
 
   const setField = (key: RecordFieldKey, value: string) => {
     setRecord((prev) => ({ ...prev, [key]: value }));
-    setClinicalFieldStatuses((prev) =>
-      prev ? { ...prev, [key]: statusOf(value) } : prev,
-    );
+    setClinicalFieldStatuses((prev) => (prev ? { ...prev, [key]: statusOf(value) } : prev));
   };
 
   return (
@@ -612,8 +660,8 @@ function RecordWorkflowPage() {
                       recording === "recording" ? "animate-pulse" : ""
                     }`}
                   />
-                  {recording === "recording" ? "녹음 중" : "녹음 일시정지"} · 녹음 종료 시
-                  API1 음성 인식을 자동으로 시작합니다.
+                  {recording === "recording" ? "녹음 중" : "녹음 일시정지"} · 녹음 종료 시 API1 음성
+                  인식을 자동으로 시작합니다.
                 </p>
               )}
               <ScrollArea className="h-[420px] rounded-md border bg-secondary/30 p-3">
@@ -1059,9 +1107,7 @@ function RecordWorkflowPage() {
                 </div>
               ))}
               <div className="grid grid-cols-[160px_1fr] gap-4 py-2.5">
-                <dt className="text-sm font-semibold text-muted-foreground">
-                  선택된 KCD 진단코드
-                </dt>
+                <dt className="text-sm font-semibold text-muted-foreground">선택된 KCD 진단코드</dt>
                 <dd className="text-sm font-semibold">
                   {selectedCandidate?.name}{" "}
                   <span className="font-mono text-primary">({selectedCandidate?.code})</span>
@@ -1220,4 +1266,25 @@ function RecordWorkflowPage() {
       </Dialog>
     </div>
   );
+}
+
+function createWorkflowPatient() {
+  return {
+    id: "",
+    name: "",
+    sex: "",
+    age: "" as number | string,
+    arrivedAt: "",
+    ktas: "" as number | string,
+    recordStatus: "",
+    vitals: {
+      hr: "" as number | string,
+      rr: "" as number | string,
+      sbp: "" as number | string,
+      dbp: "" as number | string,
+      bt: "" as number | string,
+      spo2: "" as number | string,
+      mental: "",
+    },
+  };
 }

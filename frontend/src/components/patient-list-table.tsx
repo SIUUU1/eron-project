@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { riskMeta, sortedPatients, type RiskLevel } from "@/lib/mock-data";
+import { riskMeta, type RiskLevel } from "@/lib/mock-data";
 
 const ktasStyle: Record<number, string> = {
   1: "bg-risk-critical text-primary-foreground",
@@ -21,7 +21,7 @@ const ktasStyle: Record<number, string> = {
   5: "bg-secondary text-secondary-foreground",
 };
 
-/** 표가 그리는 데 필요한 최소 형태. mock 과 API 양쪽에서 이 모양으로 맞춘다. */
+/** 환자 목록 표가 그리는 데 필요한 API 표시 형태. */
 export interface PatientRow {
   id: string;
   name: string;
@@ -40,29 +40,13 @@ export interface PatientRow {
   recordStatus: string | null;
 }
 
-const mockRows: PatientRow[] = sortedPatients.map((p) => ({
-  id: p.id,
-  name: p.name,
-  sex: p.sex,
-  age: p.age,
-  arrivedLabel: p.arrivedAt.slice(11),
-  discharge: "", // mock 환자는 재실 중으로 둔다
-  ktas: p.ktas,
-  chiefComplaint: p.chiefComplaint,
-  risk: p.risk,
-  probability: p.deteriorationProbability,
-  recordStatus: p.recordStatus,
-}));
-
 export function PatientListTable({
   base,
   rows,
 }: {
   base: "/monitoring" | "/records";
-  rows?: PatientRow[];
+  rows: PatientRow[];
 }) {
-  const data = rows ?? mockRows;
-
   return (
     <Table>
       <TableHeader>
@@ -87,7 +71,7 @@ export function PatientListTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {data.map((p) => (
+        {rows.map((p) => (
           // 퇴실한 환자는 밝은 회색으로 구분한다
           <TableRow key={p.id} className={`cursor-pointer ${p.discharge ? "bg-muted/60" : ""}`}>
             <TableCell className="tabular font-mono text-xs">{p.id}</TableCell>
