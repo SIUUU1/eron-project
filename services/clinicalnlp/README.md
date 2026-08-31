@@ -50,36 +50,35 @@ Every draft response includes non-clinical `telemetry` with
 `exact_statement_count`, `vector_statement_count`, `search_cache_hit_count`, and
 `clinical_extraction_ms`. These values diagnose latency only; they are not
 confidence scores and must not affect candidate ranking or validation results.
-Dictionary queries reuse read-only SQLite handles for the duration of one
+Dictionary queries reuse repository connections for the duration of one
 resolver request. Exact lookups are grouped into batches of at most 64 queries
 per collection, repeated request-local searches reuse verified results, and
-sqlite-vec is loaded at most once per request.
+sqlite-vec is loaded at most once per request while vectors remain on SQLite.
 
 Medical terminology and KCD exact lookup has a selectable repository boundary.
-`CLINICALNLP_TERMINOLOGY_BACKEND=sqlite` is the default and preserves the
-current result path. `shadow` returns SQLite results unchanged while comparing
-PostgreSQL active releases and logging only the operation type on mismatch;
-it never logs query or patient text. `postgres` returns PostgreSQL results.
-Set `CLINICALNLP_DATABASE_URL` in `services/clinicalnlp/.env` for `shadow` and
-`postgres`. `DATABASE_URL` is also accepted when it is explicitly injected
-into the ClinicalNLP process; Compose does not automatically pass the root
-`.env` value into this service. A SQLAlchemy-style `postgresql+psycopg://` URL
-is accepted. Local
+`CLINICALNLP_TERMINOLOGY_BACKEND=postgres` is the default and returns active
+PostgreSQL releases. `shadow` returns SQLite results unchanged while comparing
+PostgreSQL and logging only the operation type on mismatch; it never logs query
+or patient text. `sqlite` is retained as the emergency rollback mode. Compose
+injects the root `DATABASE_URL` as `CLINICALNLP_DATABASE_URL` and waits for the
+PostgreSQL healthcheck. When running ClinicalNLP outside Compose, set
+`CLINICALNLP_DATABASE_URL` in `services/clinicalnlp/.env` directly. A
+SQLAlchemy-style `postgresql+psycopg://` URL is accepted. Local
 RAW exact matching and medical/policy vectors remain on their existing runtime
 assets in this step, so do not remove the SQLite mounts yet.
 
-Recommended rollout:
+Runtime modes:
 
 ```dotenv
-# 1. behavior-preserving default
-CLINICALNLP_TERMINOLOGY_BACKEND=sqlite
+# production default
+CLINICALNLP_TERMINOLOGY_BACKEND=postgres
 
-# 2. parity observation; SQLite still owns the response
+# comparison diagnostics; SQLite still owns the response
 CLINICALNLP_TERMINOLOGY_BACKEND=shadow
 CLINICALNLP_DATABASE_URL=postgresql://user:password@postgres:5432/eron
 
-# 3. only after representative shadow parity is clean
-CLINICALNLP_TERMINOLOGY_BACKEND=postgres
+# emergency rollback while SQLite assets remain mounted
+CLINICALNLP_TERMINOLOGY_BACKEND=sqlite
 ```
 
 ## Docker Compose profile

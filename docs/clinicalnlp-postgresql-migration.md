@@ -96,18 +96,19 @@ python3 -m unittest database.tests.test_clinicalnlp_dictionary_import
 ClinicalNLP의 의료용어·KCD exact/identity 조회는 다음 세 모드를 지원한다.
 
 ```dotenv
-CLINICALNLP_TERMINOLOGY_BACKEND=sqlite  # 기본값/즉시 rollback
+CLINICALNLP_TERMINOLOGY_BACKEND=postgres # 기본값
 CLINICALNLP_TERMINOLOGY_BACKEND=shadow  # SQLite 반환 + PG 비교
-CLINICALNLP_TERMINOLOGY_BACKEND=postgres
+CLINICALNLP_TERMINOLOGY_BACKEND=sqlite  # 긴급 rollback
 CLINICALNLP_DATABASE_URL=postgresql://user:password@postgres:5432/eron
 ```
 
 `shadow`는 응답에 SQLite 결과만 사용한다. PG 불일치나 일시 장애는 환자 문구나
 검색어를 로그에 남기지 않고 연산 종류만 경고하며 초안 생성을 중단하지 않는다.
-대표 데이터 parity가 확인된 뒤에만 `postgres`로 전환한다. rollback은 모드를
-`sqlite`로 되돌리고 ClinicalNLP 컨테이너만 재시작하면 된다.
+Compose는 루트 `DATABASE_URL`을 ClinicalNLP에 전달하고 PostgreSQL healthcheck가
+통과된 뒤 서비스를 시작한다. rollback은 루트 `.env`의 모드를 `sqlite`로
+되돌리고 ClinicalNLP 컨테이너만 재생성하면 된다.
 
 이 단계에서도 공식 한국어 RAW exact, 의료·정책 Vector 검색은 기존 SQLite
 runtime 자산을 사용한다. 따라서 PostgreSQL 모드에서도 해당 mount를 제거하지
-않는다. 이후 작업은 embedding 이관, dual-read 성능 관찰, PG 기본 전환,
+않는다. 이후 작업은 의료 embedding 이관, 정책 embedding 이관, PG 검색 튜닝,
 마지막으로 SQLite fallback 제거 순서로 진행한다.

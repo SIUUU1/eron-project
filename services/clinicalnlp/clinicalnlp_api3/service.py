@@ -116,7 +116,7 @@ class ServiceSettings:
             )
         umls_python_value = values.get("CLINICALNLP_UMLS_PYTHON", "").strip()
         terminology_backend = values.get(
-            "CLINICALNLP_TERMINOLOGY_BACKEND", "sqlite"
+            "CLINICALNLP_TERMINOLOGY_BACKEND", "postgres"
         ).strip().casefold()
         if terminology_backend not in {"sqlite", "shadow", "postgres"}:
             raise ConfigurationError(

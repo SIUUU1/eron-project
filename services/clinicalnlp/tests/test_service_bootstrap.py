@@ -20,6 +20,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         settings = ServiceSettings.from_mapping(
             {
                 "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_TERMINOLOGY_BACKEND": "sqlite",
                 "CLINICALNLP_UMLS_ENABLED": "false",
                 "CLINICALNLP_API3_DB_ROOT": "unused-dictionaries",
                 "CLINICALNLP_API3_VECTOR_INDEX": "unused-vector.sqlite",
@@ -42,12 +43,29 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         settings = ServiceSettings.from_mapping(
             {
                 "OLLAMA_API_KEY": "test-secret",
+                "DATABASE_URL": "postgresql+psycopg://user:secret@postgres/eron",
             }
         )
 
         self.assertEqual(settings.port, 8765)
-        self.assertEqual(settings.terminology_backend, "sqlite")
-        self.assertEqual(settings.database_url, "")
+        self.assertEqual(settings.terminology_backend, "postgres")
+        self.assertEqual(
+            settings.database_url,
+            "postgresql+psycopg://user:secret@postgres/eron",
+        )
+
+    def test_default_postgres_terminology_requires_database_url(self):
+        with self.assertRaises(ConfigurationError) as raised:
+            ServiceSettings.from_mapping(
+                {
+                    "OLLAMA_API_KEY": "test-secret",
+                }
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "CLINICALNLP_DATABASE_URL is required for postgres terminology",
+        )
 
     def test_postgres_terminology_requires_database_url(self):
         with self.assertRaises(ConfigurationError) as raised:
@@ -85,6 +103,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                     "CLINICALNLP_HTTP_HOST": "127.0.0.1",
                     "CLINICALNLP_HTTP_PORT": "0",
                     "OLLAMA_API_KEY": "test-secret",
+                    "CLINICALNLP_TERMINOLOGY_BACKEND": "sqlite",
                     "CLINICALNLP_API3_DB_ROOT": temporary_directory,
                     "CLINICALNLP_ALIAS_DB": str(
                         Path(temporary_directory) / "state" / "aliases.sqlite"

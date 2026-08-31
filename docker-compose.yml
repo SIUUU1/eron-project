@@ -93,7 +93,15 @@ services:
         required: false
 
     environment:
+      # 의료용어·KCD 조회는 PostgreSQL이 기본이다. 긴급 rollback 시
+      # 루트 .env에서 CLINICALNLP_TERMINOLOGY_BACKEND=sqlite로 되돌린다.
+      CLINICALNLP_TERMINOLOGY_BACKEND: ${CLINICALNLP_TERMINOLOGY_BACKEND:-postgres}
+      CLINICALNLP_DATABASE_URL: ${DATABASE_URL}
       TZ: ${TZ:-Asia/Seoul}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     # backend가 Docker 내부 DNS 이름 clinicalnlp:8765로만 호출한다.
     # 호스트나 OCI public ingress에는 공개하지 않는다.
