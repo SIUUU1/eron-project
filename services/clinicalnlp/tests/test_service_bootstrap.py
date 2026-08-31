@@ -4,7 +4,6 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 import json
 import threading
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from clinicalnlp_api3.service import (
@@ -20,16 +19,14 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         settings = ServiceSettings.from_mapping(
             {
                 "OLLAMA_API_KEY": "test-secret",
-                "CLINICALNLP_TERMINOLOGY_BACKEND": "sqlite",
+                "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 "CLINICALNLP_UMLS_ENABLED": "false",
-                "CLINICALNLP_API3_DB_ROOT": "unused-dictionaries",
-                "CLINICALNLP_API3_VECTOR_INDEX": "unused-vector.sqlite",
             }
         )
         official_fallback = object()
 
         with patch(
-            "clinicalnlp_api3.official_raw_exact.OfficialRawExactRetriever",
+            "clinicalnlp_api3.official_raw_exact.OfficialRawExactRetriever.from_postgres",
             return_value=official_fallback,
         ), patch(
             "clinicalnlp_api3.retrieval.SqliteDictionaryRetriever"
@@ -48,8 +45,6 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.port, 8765)
-        self.assertEqual(settings.terminology_backend, "postgres")
-        self.assertEqual(settings.medical_vector_backend, "postgres")
         self.assertEqual(
             settings.database_url,
             "postgresql+psycopg://user:secret@postgres/eron",
@@ -65,50 +60,37 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
 
         self.assertEqual(
             str(raised.exception),
-            "CLINICALNLP_DATABASE_URL is required for postgres terminology",
+            "CLINICALNLP_DATABASE_URL is required",
         )
 
-    def test_postgres_terminology_requires_database_url(self):
+    def test_legacy_sqlite_backend_flags_are_rejected(self):
         with self.assertRaises(ConfigurationError) as raised:
             ServiceSettings.from_mapping(
                 {
                     "OLLAMA_API_KEY": "test-secret",
-                    "CLINICALNLP_TERMINOLOGY_BACKEND": "postgres",
+                    "CLINICALNLP_TERMINOLOGY_BACKEND": "shadow",
+                    "CLINICALNLP_MEDICAL_VECTOR_BACKEND": "sqlite",
+                    "DATABASE_URL": "postgresql+psycopg://user:secret@postgres/eron",
                 }
             )
 
         self.assertEqual(
             str(raised.exception),
-            "CLINICALNLP_DATABASE_URL is required for postgres terminology",
-        )
-
-    def test_shadow_terminology_accepts_root_database_url(self):
-        settings = ServiceSettings.from_mapping(
-            {
-                "OLLAMA_API_KEY": "test-secret",
-                "CLINICALNLP_TERMINOLOGY_BACKEND": "shadow",
-                "DATABASE_URL": "postgresql+psycopg://user:secret@postgres/eron",
-            }
-        )
-
-        self.assertEqual(settings.terminology_backend, "shadow")
-        self.assertEqual(
-            settings.database_url,
-            "postgresql+psycopg://user:secret@postgres/eron",
+            "CLINICALNLP_TERMINOLOGY_BACKEND is no longer supported; "
+            "ClinicalNLP storage is PostgreSQL-only",
         )
 
     def test_missing_dictionary_assets_keep_service_safely_unavailable(self):
-        with TemporaryDirectory() as temporary_directory:
+        with patch(
+            "clinicalnlp_api3.official_raw_exact.OfficialRawExactRetriever.from_postgres",
+            side_effect=RuntimeError("missing PG release"),
+        ):
             prepared = prepare_service(
                 {
                     "CLINICALNLP_HTTP_HOST": "127.0.0.1",
                     "CLINICALNLP_HTTP_PORT": "0",
                     "OLLAMA_API_KEY": "test-secret",
-                    "CLINICALNLP_TERMINOLOGY_BACKEND": "sqlite",
-                    "CLINICALNLP_API3_DB_ROOT": temporary_directory,
-                    "CLINICALNLP_ALIAS_DB": str(
-                        Path(temporary_directory) / "state" / "aliases.sqlite"
-                    ),
+                    "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 }
             )
             thread = threading.Thread(
@@ -196,13 +178,7 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                 "CLINICALNLP_QUERY_EXPANSION_MAX_TOKENS": "1536",
                 "CLINICALNLP_QUERY_EXPANSION_PASSES": "1",
                 "CLINICALNLP_TRANSLATION_BATCH_SIZE": "3",
-                "CLINICALNLP_API3_DB_ROOT": "/runtime/dictionaries",
-                "CLINICALNLP_TERMINOLOGY_BACKEND": "postgres",
-                "CLINICALNLP_MEDICAL_VECTOR_BACKEND": "postgres",
                 "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
-                "CLINICALNLP_API3_VECTOR_INDEX": "/runtime/vectors/medical.sqlite",
-                "CLINICALNLP_POLICY_INDEX": "/runtime/policy/policy.sqlite",
-                "CLINICALNLP_ALIAS_DB": "/runtime/state/aliases.sqlite",
                 "CLINICALNLP_UMLS_ENABLED": "true",
                 "CLINICALNLP_UMLS_TIMEOUT": "90",
                 "CLINICALNLP_UMLS_PYTHON": "/runtime/scispacy/.venv/bin/python",
@@ -222,19 +198,10 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.query_max_tokens, 1536)
         self.assertEqual(settings.query_passes, 1)
         self.assertEqual(settings.translation_batch_size, 3)
-        self.assertEqual(settings.db_root, Path("/runtime/dictionaries"))
-        self.assertEqual(settings.terminology_backend, "postgres")
-        self.assertEqual(settings.medical_vector_backend, "postgres")
         self.assertEqual(
             settings.database_url,
             "postgresql://clinical@postgres/eron",
         )
-        self.assertEqual(
-            settings.vector_index,
-            Path("/runtime/vectors/medical.sqlite"),
-        )
-        self.assertEqual(settings.policy_index, Path("/runtime/policy/policy.sqlite"))
-        self.assertEqual(settings.alias_db, Path("/runtime/state/aliases.sqlite"))
         self.assertTrue(settings.umls_enabled)
         self.assertEqual(settings.umls_timeout_seconds, 90.0)
         self.assertEqual(

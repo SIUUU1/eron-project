@@ -4,237 +4,129 @@ This directory contains the isolated ER:ON clinical draft service. It accepts
 Whisper JSON at `POST /v2/clinical-workflows` and returns a reviewable
 `clinical-workflow-v2` draft. It does not persist, complete, or sign records.
 
+## Runtime storage contract
+
+The production process is PostgreSQL-only for searchable and mutable data:
+
+- medical terminology and KCD exact lookup
+- official Korean RAW exact entries
+- medical pgvector search
+- policy documents, chunks, FTS, and pgvector search
+- versioned clinician-approved aliases
+
+scispaCy models and the UMLS linker cache are large executable/model assets,
+not database rows, so they remain a read-only Linux runtime mount. Guardrail and
+threshold JSON remain versioned application configuration in the image.
+
+SQLite dictionary and vector files are accepted only by one-time import and
+parity tools. The HTTP service has no SQLite backend flag, path setting, or
+SQLite bind mount. Legacy SQLite/shadow environment variables are rejected at
+startup so an operator cannot mistake a PostgreSQL process for a rollback.
+
 ## Local configuration
 
 Copy `.env.example` to `.env` and set `OLLAMA_API_KEY`. The real `.env` is
-ignored by Git. Do not copy the key into the repository root, Docker image, or
-logs.
+ignored by Git. Compose injects the repository-root `DATABASE_URL` as
+`CLINICALNLP_DATABASE_URL`; set it directly only when running outside Compose.
 
-Build and run the service independently:
-
-```sh
-docker build -t eron-clinicalnlp services/clinicalnlp
-docker run --rm --env-file services/clinicalnlp/.env -p 8765:8765 \
-  -v /path/to/runtime:/runtime:ro \
-  -v /path/to/alias-state:/runtime/state \
-  eron-clinicalnlp
-```
-
-The dictionary, medical-vector, policy-vector, and scispaCy/UMLS assets are
-runtime mounts and must not be committed or copied into the image. The alias
-database mount is reserved for a future clinician-approved feedback workflow;
-the current draft runtime does not read, promote, or apply approved aliases.
-
-Runtime medical-term retrieval translates the dialogue before retrieval, runs
-UMLS and bounded translated-term lookup, then applies an official Korean RAW
-exact fallback. The RAW fallback is built once in memory from canonical
-emergency, procedure, anatomy, and drug-ingredient terms. It excludes product
-names, KCD codes, aliases, fuzzy matching, and vector search.
+The runtime translates dialogue before retrieval, runs UMLS and bounded
+translated-term lookup, then applies official Korean RAW exact matching. The
+RAW matcher is built once at startup from active PostgreSQL canonical emergency,
+procedure, anatomy, and drug-ingredient concepts. Product names, KCD codes,
+unapproved aliases, fuzzy matching, and vector results are not treated as RAW
+exact evidence.
 
 Clinical field routing and terminology retrieval are separate decisions. The
-extractor first assigns atomic, conversation-grounded facts to emergency-record
-fields. Candidate review items then reuse those evidence assignments and expose
-only semantic types allowed by the target field (for example, drug candidates
-for medications and disease candidates for impression). A segment may support
-multiple fields, but an individual source span is routed to its matching atomic
-fact. Filtering never confirms a candidate, rewrites RAW evidence, or invents a
-missing clinical fact.
+extractor assigns conversation-grounded facts to record fields. Candidate
+review items reuse those evidence assignments and expose only semantic types
+allowed by the target field. Candidates are never automatically confirmed and
+RAW evidence is never rewritten.
 
-`GET /health` returns HTTP 200 only when required configuration and dictionary
-assets are ready. Missing configuration or assets keeps the process available
-for diagnostics but returns HTTP 503. Missing optional UMLS assets use the
-existing n-gram fallback.
+`GET /health` returns HTTP 200 only when required configuration and active
+PostgreSQL releases are ready. Missing optional UMLS assets use the bounded
+n-gram fallback. Telemetry values diagnose latency only; they are not confidence
+scores and cannot change validation decisions.
 
-Every draft response includes non-clinical `telemetry` with
-`translation_ms`, `translation_calls`, `umls_ms`, `dictionary_ms`, `vector_ms`,
-`exact_statement_count`, `vector_statement_count`, `search_cache_hit_count`, and
-`clinical_extraction_ms`. These values diagnose latency only; they are not
-confidence scores and must not affect candidate ranking or validation results.
-Dictionary queries reuse repository connections for the duration of one
-resolver request. Exact lookups are grouped into batches of at most 64 queries
-per collection, repeated request-local searches reuse verified results, and
-medical vector queries are batched by collection. SQLite rollback mode loads
-sqlite-vec at most once per request.
+## One-time PostgreSQL import
 
-Medical terminology and KCD exact lookup has a selectable repository boundary.
-`CLINICALNLP_TERMINOLOGY_BACKEND=postgres` is the default and returns active
-PostgreSQL releases. `shadow` returns SQLite results unchanged while comparing
-PostgreSQL and logging only the operation type on mismatch; it never logs query
-or patient text. `sqlite` is retained as the emergency rollback mode. Compose
-injects the root `DATABASE_URL` as `CLINICALNLP_DATABASE_URL` and waits for the
-PostgreSQL healthcheck. When running ClinicalNLP outside Compose, set
-`CLINICALNLP_DATABASE_URL` in `services/clinicalnlp/.env` directly. A
-SQLAlchemy-style `postgresql+psycopg://` URL is accepted. Local RAW exact
-matching and policy vectors remain on their existing runtime assets.
-
-Medical terminology vectors use an independent repository boundary.
-`CLINICALNLP_MEDICAL_VECTOR_BACKEND=postgres` returns only complete, active,
-collection-scoped vector releases. `shadow` preserves SQLite output and compares
-PostgreSQL identities without logging query text. `sqlite` remains the emergency
-rollback mode. Do not remove `api3_vectors.sqlite` until production parity and
-rollback drills are complete.
-
-Runtime modes:
-
-```dotenv
-# production default
-CLINICALNLP_TERMINOLOGY_BACKEND=postgres
-CLINICALNLP_MEDICAL_VECTOR_BACKEND=postgres
-
-# comparison diagnostics; SQLite still owns the response
-CLINICALNLP_TERMINOLOGY_BACKEND=shadow
-CLINICALNLP_MEDICAL_VECTOR_BACKEND=shadow
-CLINICALNLP_DATABASE_URL=postgresql://user:password@postgres:5432/eron
-
-# emergency rollback while SQLite assets remain mounted
-CLINICALNLP_TERMINOLOGY_BACKEND=sqlite
-CLINICALNLP_MEDICAL_VECTOR_BACKEND=sqlite
-```
-
-Apply the versioned schema and import the existing immutable sqlite-vec index
-before selecting the PostgreSQL medical vector backend:
+Apply the versioned schema first:
 
 ```sh
 python3 database/scripts/apply_clinicalnlp_schema.py
-docker compose --profile clinical run --rm --no-deps clinicalnlp \
-  python scripts/import_medical_vectors.py
-docker compose --profile clinical run --rm --no-deps clinicalnlp \
-  python scripts/verify_medical_vector_backends.py
 ```
 
-The importer validates the vector schema, dimension, dictionary source hash,
-and stored row count for each of `drug_terms`, `procedure_terms`,
-`anatomy_terms`, and `emergency_terms`. It activates a release only after its
-entire collection commits. KCD vectors and policy vectors are not part of this
-import.
+Import medical dictionary/KCD releases using the database import tool, then
+import medical vectors and policy vectors while the legacy read-only assets are
+temporarily available:
+
+```sh
+python3 database/scripts/import_clinicalnlp_dictionaries.py \
+  --dictionary-root "$PWD/runtime/clinicalnlp/medical-dictionaries"
+
+docker compose --profile clinical run --rm --no-deps \
+  -v "$PWD/runtime/clinicalnlp/vectors:/runtime/vectors:ro" clinicalnlp \
+  python scripts/import_medical_vectors.py \
+  --index /runtime/vectors/api3_vectors.sqlite
+
+docker compose --profile clinical run --rm --no-deps \
+  -v "$PWD/runtime/clinicalnlp/policy:/runtime/policy:ro" clinicalnlp \
+  python scripts/import_policy_index.py \
+  --index /runtime/policy/policy_vectors.sqlite
+```
+
+Each import is idempotent. A changed source hash creates a new immutable release
+instead of overwriting the old one. The policy importer preserves partial dates
+such as `2024-06`, document/chunk hashes, page/article traceability, and the
+existing 256-dimensional embeddings.
+
+After the import and parity checks pass, the HTTP container needs only
+PostgreSQL and the UMLS runtime. Keep legacy SQLite files outside the runtime
+mount as recoverable migration archives until the team backup policy permits
+removal.
 
 ## Docker Compose profile
 
-The repository Compose manifest registers this service under the opt-in
-`clinical` profile. Its port `8765` is exposed only to `eron-network`; it is not
-published on the host.
-
-Prepare these two host directories before starting the profile:
+The service is opt-in under the `clinical` profile. Port `8765` is exposed only
+to `eron-network`; it is not published on the host. The only host directory
+required by the running container is:
 
 ```text
 runtime/clinicalnlp/
-├─ medical-dictionaries/
-├─ vectors/api3_vectors.sqlite
-├─ policy/policy_vectors.sqlite
-├─ scispacy/                  # optional Linux-compatible UMLS runtime
-└─ state/                     # required empty nested-mount point
-
-runtime/clinicalnlp-state/
-└─ alias_feedback.sqlite      # created by the service when needed
+└─ scispacy/                  # optional Linux-compatible UMLS runtime
+   ├─ .venv/
+   └─ cache/
 ```
 
-The runtime directory is mounted read-only. `runtime/clinicalnlp/state/` must
-exist so Docker can attach the separate writable state mount below that
-read-only mount; it does not hold the writable data itself. The separate
-`runtime/clinicalnlp-state/` directory is mounted at `/runtime/state` and must
-be writable by container UID/GID `10001`. On Linux, pre-create it with suitable
-ownership instead of allowing Docker to create a root-owned directory.
+Override the parent directory in the repository-root `.env` when needed:
 
-Only developers who start the `clinical` profile need these assets. Normal
-Compose usage without that profile does not require them.
-
-### Prepare repository-local assets from WSL
-
-From the repository root, create the default host directories:
-
-```sh
-mkdir -p runtime/clinicalnlp/medical-dictionaries
-mkdir -p runtime/clinicalnlp/vectors
-mkdir -p runtime/clinicalnlp/policy
-mkdir -p runtime/clinicalnlp/state
-mkdir -p runtime/clinicalnlp-state
+```dotenv
+CLINICALNLP_RUNTIME_ROOT=/absolute/path/to/clinicalnlp-runtime
 ```
 
-When migrating assets from the standalone `ClinicalNLP_API3` project, point
-`LEGACY_CLINICALNLP_ROOT` at that checkout and copy only the portable
-dictionary and SQLite assets:
+Compose mounts `${CLINICALNLP_RUNTIME_ROOT}/scispacy` at
+`/runtime/scispacy:ro`. There is no writable ClinicalNLP state mount; alias
+feedback lives in PostgreSQL.
 
-```sh
-LEGACY_CLINICALNLP_ROOT=/mnt/c/Users/<windows-user>/ERON/ClinicalNLP_API3
+### Prepare scispaCy/UMLS
 
-cp -a "$LEGACY_CLINICALNLP_ROOT/local_assets/medical_dictionaries/." \
-  runtime/clinicalnlp/medical-dictionaries/
-cp "$LEGACY_CLINICALNLP_ROOT/data/api3_vectors.sqlite" \
-  runtime/clinicalnlp/vectors/
-cp "$LEGACY_CLINICALNLP_ROOT/data/policy_vectors.sqlite" \
-  runtime/clinicalnlp/policy/
-```
-
-### Prepare the optional scispaCy/UMLS runtime
-
-Run this step from WSL or another Linux `amd64` environment with Docker. Reuse
-only the standalone project's platform-independent UMLS cache; never copy its
-Windows `.venv` into the container runtime.
+Run this from WSL or another Linux `amd64` environment with Docker. Reuse only a
+platform-independent UMLS cache; never copy a Windows virtual environment.
 
 ```sh
 python3 services/clinicalnlp/scripts/setup_scispacy_runtime.py \
   --runtime-root "$PWD/runtime/clinicalnlp/scispacy" \
-  --cache-source "$LEGACY_CLINICALNLP_ROOT/runtime/scispacy/cache"
-```
+  --cache-source "/path/to/legacy/runtime/scispacy/cache"
 
-The setup command copies the cache, creates a Linux Python 3.12 environment
-through the same `python:3.12-slim` base used by ClinicalNLP, installs the pinned
-packages from `services/clinicalnlp/scispacy-requirements.txt`, and starts the
-real worker once. It succeeds only after the worker loads the local UMLS 2022AB
-snapshot and reports `ready`.
-
-Re-run the non-mutating verification independently when troubleshooting:
-
-```sh
 python3 services/clinicalnlp/scripts/verify_scispacy_runtime.py \
   --runtime-root "$PWD/runtime/clinicalnlp/scispacy" \
   --timeout 180
 ```
 
-Restart only ClinicalNLP after preparing or replacing the runtime:
+The first UMLS load can take several minutes. A healthy HTTP endpoint alone does
+not prove that UMLS is active; a synthetic request should emit candidates whose
+provenance source is `UMLS`.
 
-```sh
-docker compose --profile clinical restart clinicalnlp
-```
-
-The first UMLS load can take several minutes and consumes substantially more
-memory than n-gram fallback. Confirm container memory and end-to-end latency on
-the deployment host. A healthy HTTP service alone does not prove that optional
-UMLS linking is active; verify that a synthetic request emits candidates whose
-source is `UMLS`.
-
-Verify the required assets before starting Docker:
-
-```sh
-test -d runtime/clinicalnlp/medical-dictionaries
-test -s runtime/clinicalnlp/vectors/api3_vectors.sqlite
-test -s runtime/clinicalnlp/policy/policy_vectors.sqlite
-test -d runtime/clinicalnlp/state
-test -d runtime/clinicalnlp-state
-```
-
-Do not stage `runtime/`, the SQLite files, dictionaries, or real `.env` files
-in Git. Provision the equivalent directories once on each OCI deployment
-host or persistent volume.
-
-Override the default host paths from the shell or the repository-root `.env`:
-
-```dotenv
-CLINICALNLP_RUNTIME_ROOT=/absolute/path/to/clinicalnlp-runtime
-CLINICALNLP_STATE_ROOT=/absolute/path/to/clinicalnlp-state
-```
-
-When Docker Compose is invoked from WSL, use WSL paths such as
-`/mnt/c/Users/<windows-user>/...`. When it is invoked from Windows PowerShell,
-use Windows paths such as `C:/Users/<windows-user>/...`. The directories must
-already exist; Compose intentionally does not create missing bind sources.
-
-These host-path variables are separate from `services/clinicalnlp/.env`.
-The service-specific file owns `OLLAMA_API_KEY` and container-side settings;
-Compose interpolation for bind-mount sources happens before that file is
-loaded.
-
-Start only ClinicalNLP:
+Start or rebuild only ClinicalNLP:
 
 ```sh
 docker compose --profile clinical config
@@ -244,10 +136,6 @@ docker compose logs -f clinicalnlp
 ```
 
 Starting Compose without `--profile clinical` leaves the existing stack
-unchanged. The optional `env_file.required` declaration needs Docker Compose
-2.24 or newer. OCI must provide a Linux-compatible scispaCy environment;
-the existing Windows virtual environment cannot execute in the Linux image.
-For an initial container smoke test without a Linux UMLS runtime, set
-`CLINICALNLP_UMLS_ENABLED=false` in `services/clinicalnlp/.env`; dictionary and
-vector retrieval remain available. Re-enable it only after mounting a
-Linux-compatible `runtime/clinicalnlp/scispacy/` environment.
+unchanged. For a temporary smoke test without UMLS, set
+`CLINICALNLP_UMLS_ENABLED=false`; PostgreSQL terminology and policy retrieval
+remain available.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import hashlib
 from pathlib import Path
 import re
 import sqlite3
@@ -40,15 +41,108 @@ def _official(status: object) -> bool:
 class OfficialRawExactRetriever:
     """Match official Korean canonical terms with one in-memory text scan."""
 
-    def __init__(self, db_root: Path) -> None:
-        paths = DictionaryPaths.discover(Path(db_root))
-        entries = list(self._canonical_entries(paths))
+    def __init__(self, entries: Iterable[dict[str, Any]] | Path | str) -> None:
+        if isinstance(entries, (Path, str)):
+            paths = DictionaryPaths.discover(Path(entries))
+            entries = self._canonical_entries(paths)
+        entries = tuple(entries)
         self._transitions: list[dict[str, int]] = [{}]
         self._failures: list[int] = [0]
         self._outputs: list[list[dict[str, Any]]] = [[]]
         for entry in entries:
             self._insert(entry)
         self._build_failures()
+        fingerprint = hashlib.sha256()
+        for entry in sorted(
+            entries,
+            key=lambda item: (
+                str(item.get("collection") or ""),
+                str(item.get("entity_id") or ""),
+                str(item.get("term") or ""),
+            ),
+        ):
+            fingerprint.update(
+                "\0".join(
+                    (
+                        str(entry.get("collection") or ""),
+                        str(entry.get("entity_id") or ""),
+                        str(entry.get("term") or ""),
+                    )
+                ).encode("utf-8")
+            )
+            fingerprint.update(b"\n")
+        self.version = "official-raw-exact:sha256:" + fingerprint.hexdigest()
+
+    @classmethod
+    def from_entries(
+        cls,
+        entries: Iterable[dict[str, Any]],
+    ) -> "OfficialRawExactRetriever":
+        return cls(entries)
+
+    @classmethod
+    def from_sqlite(cls, db_root: Path | str) -> "OfficialRawExactRetriever":
+        return cls(db_root)
+
+    @classmethod
+    def from_postgres(cls, database_url: str) -> "OfficialRawExactRetriever":
+        cleaned_url = str(database_url or "").strip().replace(
+            "postgresql+psycopg://",
+            "postgresql://",
+            1,
+        )
+        if not cleaned_url:
+            raise ValueError("PostgreSQL official RAW exact requires a URL")
+        import psycopg
+
+        with psycopg.connect(cleaned_url, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT c.collection_name, c.entity_id, c.canonical_ko,
+                           c.canonical_en, c.entity_type, c.review_status
+                      FROM clinicalnlp.medical_concepts c
+                      JOIN clinicalnlp.source_releases r
+                        ON r.release_id=c.source_release_id
+                     WHERE r.is_active
+                       AND r.source_kind='MEDICAL_DICTIONARY'
+                       AND c.collection_name IN (
+                           'drug_terms', 'procedure_terms',
+                           'anatomy_terms', 'emergency_terms'
+                       )
+                       AND (c.collection_name <> 'drug_terms'
+                            OR lower(c.entity_type)='ingredient')
+                       AND c.canonical_ko IS NOT NULL
+                       AND length(trim(c.canonical_ko)) >= 2
+                       AND lower(trim(c.review_status)) = ANY(%s)
+                     ORDER BY c.collection_name, c.entity_id
+                    """,
+                    (sorted(OFFICIAL_REVIEW_STATUSES),),
+                )
+                entries = []
+                for (
+                    collection,
+                    entity_id,
+                    canonical_ko,
+                    canonical_en,
+                    entity_type,
+                    review_status,
+                ) in cursor.fetchall():
+                    term = str(canonical_ko or "").strip()
+                    if not term or _HANGUL_RE.search(term) is None:
+                        continue
+                    entry = {
+                        "term": term,
+                        "collection": str(collection),
+                        "entity_id": str(entity_id),
+                        "canonical_ko": term,
+                        "canonical_en": str(canonical_en or ""),
+                        "review_status": str(review_status or ""),
+                    }
+                    if entity_type:
+                        entry["entity_type"] = str(entity_type)
+                    entries.append(entry)
+        return cls(entries)
 
     @staticmethod
     def _canonical_entries(paths: DictionaryPaths) -> Iterable[dict[str, Any]]:

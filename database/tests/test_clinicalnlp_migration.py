@@ -132,9 +132,18 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             self._query(
                 "SELECT count(*) FROM clinicalnlp.schema_migrations "
-                "WHERE version IN ('001', '002', '003')"
+                "WHERE version IN ('001', '002', '003', '004')"
             ),
-            "3",
+            "4",
+        )
+        self.assertEqual(
+            self._query(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = 'clinicalnlp' "
+                "AND table_name = 'policy_documents' "
+                "AND column_name = 'published_at'"
+            ),
+            "text",
         )
         self.assertEqual(
             self._query(
@@ -173,7 +182,7 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(process.stdout),
             {
-                "migration": "003",
+                "migration": "004",
                 "schema": "clinicalnlp",
                 "status": "ready",
                 "table_count": 15,

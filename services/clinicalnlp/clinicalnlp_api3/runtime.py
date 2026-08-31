@@ -15,6 +15,7 @@ class ClinicalDraftRuntime:
     clinical_extractor: Any
     query_expander: Any | None = None
     medical_query_resolver: Any | None = None
+    policy_evidence_provider: Any | None = None
 
     def generate_draft(self, whisper_payload: dict[str, Any]) -> dict[str, Any]:
         result = run_clinical_workflow(
@@ -26,7 +27,10 @@ class ClinicalDraftRuntime:
             preserve_unsupported=True,
             include_query_resolution_summary=True,
         )
-        return to_clinical_workflow_v2(result)
+        return to_clinical_workflow_v2(
+            result,
+            policy_evidence_provider=self.policy_evidence_provider,
+        )
 
 
 def create_clinical_runtime(
@@ -35,6 +39,7 @@ def create_clinical_runtime(
     clinical_extractor: Any,
     query_expander: Any | None = None,
     medical_query_resolver: Any | None = None,
+    policy_evidence_provider: Any | None = None,
 ) -> ClinicalDraftRuntime:
     """Compose the ClinicalNLP implementation behind its draft interface."""
 
@@ -43,4 +48,5 @@ def create_clinical_runtime(
         clinical_extractor=clinical_extractor,
         query_expander=query_expander,
         medical_query_resolver=medical_query_resolver,
+        policy_evidence_provider=policy_evidence_provider,
     )

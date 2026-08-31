@@ -288,7 +288,11 @@ def _unresolved_uncertainty_review_items(
     return items
 
 
-def to_clinical_workflow_v2(v1_document: dict[str, Any]) -> dict[str, Any]:
+def to_clinical_workflow_v2(
+    v1_document: dict[str, Any],
+    *,
+    policy_evidence_provider: Any | None = None,
+) -> dict[str, Any]:
     """Add v2 lifecycle, information states, and non-destructive field issues."""
 
     result = copy.deepcopy(v1_document)
@@ -362,6 +366,9 @@ def to_clinical_workflow_v2(v1_document: dict[str, Any]) -> dict[str, Any]:
         },
         "review_items": review_items,
     }
-    result["validation"] = validate_clinical_workflow(result)
+    result["validation"] = validate_clinical_workflow(
+        result,
+        policy_evidence_provider=policy_evidence_provider,
+    )
     return result
 

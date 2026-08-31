@@ -93,12 +93,7 @@ services:
         required: false
 
     environment:
-      # 의료용어·KCD 조회는 PostgreSQL이 기본이다. 긴급 rollback 시
-      # 루트 .env에서 CLINICALNLP_TERMINOLOGY_BACKEND=sqlite로 되돌린다.
-      CLINICALNLP_TERMINOLOGY_BACKEND: ${CLINICALNLP_TERMINOLOGY_BACKEND:-postgres}
-      # 의료용어 Vector도 버전 릴리스가 적재된 PostgreSQL이 기본이다.
-      # 안정화 기간에는 shadow, 긴급 rollback에는 sqlite를 사용할 수 있다.
-      CLINICALNLP_MEDICAL_VECTOR_BACKEND: ${CLINICALNLP_MEDICAL_VECTOR_BACKEND:-postgres}
+      # 의료용어·KCD·정책·별칭·Vector 검색은 PostgreSQL만 사용한다.
       CLINICALNLP_DATABASE_URL: ${DATABASE_URL}
       TZ: ${TZ:-Asia/Seoul}
 
@@ -112,18 +107,11 @@ services:
       - "8765"
 
     volumes:
-      # 사전·VectorDB·정책·UMLS runtime은 불변 자산으로 읽기 전용 마운트한다.
+      # scispaCy 모델과 UMLS linker cache만 파일 자산으로 유지한다.
       - type: bind
-        source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}
-        target: /runtime
+        source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}/scispacy
+        target: /runtime/scispacy
         read_only: true
-        bind:
-          create_host_path: false
-      # 승인 별칭 DB만 별도 경로에서 쓰기를 허용한다.
-      - type: bind
-        source: ${CLINICALNLP_STATE_ROOT:-./runtime/clinicalnlp-state}
-        target: /runtime/state
-        read_only: false
         bind:
           create_host_path: false
 

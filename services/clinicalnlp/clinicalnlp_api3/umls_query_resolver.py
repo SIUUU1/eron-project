@@ -308,22 +308,31 @@ def _collections_for_semantic_types(values: object) -> frozenset[str] | None:
     return frozenset(collections) if collections else None
 
 
-class VerifiedLocalDictionary:
-    """Search local assets and re-read every selected entity from source SQLite."""
+class VerifiedClinicalDictionary:
+    """Verify raw, exact, and vector identities through repository adapters."""
 
     def __init__(
         self,
-        db_root: Path,
+        db_root: Path | None = None,
         *,
         raw_retriever: Any,
         vector_index: Path | None = None,
         minimum_vector_similarity: float = 0.38,
         terminology_repository: TerminologyRepository | None = None,
         vector_repository: MedicalVectorRepository | None = None,
+        alias_store: Any | None = None,
     ) -> None:
         if not 0.0 <= minimum_vector_similarity <= 1.0:
             raise ValueError("minimum_vector_similarity must be between zero and one")
-        self.paths = DictionaryPaths.discover(Path(db_root))
+        self.paths = (
+            DictionaryPaths.discover(Path(db_root))
+            if db_root is not None
+            else None
+        )
+        if terminology_repository is None and db_root is None:
+            raise ValueError(
+                "db_root is required when no terminology repository is provided"
+            )
         self._terminology_repository = (
             terminology_repository
             if terminology_repository is not None
@@ -337,7 +346,11 @@ class VerifiedLocalDictionary:
         self._source_hashes = (
             dict(repository_source_hashes)
             if isinstance(repository_source_hashes, dict)
-            else dictionary_source_hashes(self.paths)
+            else (
+                dictionary_source_hashes(self.paths)
+                if self.paths is not None
+                else {}
+            )
         )
         self.version = self._terminology_repository.version
         self._raw_retriever = getattr(
@@ -345,7 +358,11 @@ class VerifiedLocalDictionary:
             "base_retriever",
             raw_retriever,
         )
-        self._alias_store = getattr(raw_retriever, "alias_store", None)
+        self._alias_store = (
+            alias_store
+            if alias_store is not None
+            else getattr(raw_retriever, "alias_store", None)
+        )
         self._connection_local = threading.local()
         self._source_stats = self._current_source_stats()
         self._vector_repository = (
@@ -419,6 +436,8 @@ class VerifiedLocalDictionary:
         return stat.st_size, stat.st_mtime_ns
 
     def _source_paths(self) -> dict[str, Path]:
+        if self.paths is None:
+            return {}
         return {
             "drug_terms": self.paths.drug,
             "procedure_terms": self.paths.procedure,
@@ -559,7 +578,7 @@ class VerifiedLocalDictionary:
         if self._alias_store is not None:
             try:
                 approved_aliases = self._alias_store.find_approved(raw_text)
-            except (OSError, sqlite3.Error):
+            except Exception:
                 approved_aliases = []
             for alias in approved_aliases:
                 if not isinstance(alias, dict):
@@ -628,6 +647,8 @@ class VerifiedLocalDictionary:
         )
 
     def _exact_query_identities(self, query_text: str) -> list[tuple[str, str]]:
+        if self.paths is None:
+            return []
         queries = (
             (
                 "drug_terms",
@@ -877,11 +898,15 @@ class VerifiedLocalDictionary:
         )
 
 
+# Backward-compatible name for offline SQLite parity tests and import tools.
+VerifiedLocalDictionary = VerifiedClinicalDictionary
+
+
 class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
     def __init__(
         self,
         *,
-        dictionary: VerifiedLocalDictionary,
+        dictionary: VerifiedClinicalDictionary,
         span_linker: Any,
         threshold: float = UMLS_LINK_THRESHOLD,
         policy_version: str = UMLS_PRIMARY_POLICY_VERSION,

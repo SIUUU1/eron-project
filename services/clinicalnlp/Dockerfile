@@ -17,8 +17,7 @@ COPY contract-manifest.json ./contract-manifest.json
 
 RUN groupadd --system --gid 10001 clinicalnlp \
     && useradd --system --uid 10001 --gid clinicalnlp --home-dir /app clinicalnlp \
-    && mkdir -p /runtime/state \
-    && chown -R clinicalnlp:clinicalnlp /app /runtime/state
+    && chown -R clinicalnlp:clinicalnlp /app
 
 USER clinicalnlp
 
