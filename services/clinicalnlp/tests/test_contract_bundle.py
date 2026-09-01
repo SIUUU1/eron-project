@@ -48,7 +48,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "4b8558a21ffb4122f40c0c767ca840e311416edcbe079aafe65fbfd2cc2614f3"
+                "f923466f32062c0b42f4bf6adb265a2a18ea829698718cd3784cf1f4de2739ef"
             ),
             "candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
@@ -76,7 +76,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "4b8558a21ffb4122f40c0c767ca840e311416edcbe079aafe65fbfd2cc2614f3"
+                "f923466f32062c0b42f4bf6adb265a2a18ea829698718cd3784cf1f4de2739ef"
             ),
             "prompts/candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"

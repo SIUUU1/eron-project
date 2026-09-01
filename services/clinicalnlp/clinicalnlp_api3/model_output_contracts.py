@@ -103,7 +103,7 @@ def translation_search_response_format(
 def compact_translation_response_format(
     translation_ids: Iterable[str],
 ) -> dict[str, Any]:
-    """Bounded translation-only contract keyed by backend transport IDs."""
+    """Bounded translation and medical-span contract keyed by transport IDs."""
 
     values = _unique_segment_ids(translation_ids)
     return _response_format(
@@ -118,7 +118,39 @@ def compact_translation_response_format(
                     "additionalProperties": False,
                     "required": values,
                     "properties": {
-                        value: {"type": "string"}
+                        value: {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["translated_text_en", "medical_terms"],
+                            "properties": {
+                                "translated_text_en": {"type": "string"},
+                                "medical_terms": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "required": [
+                                            "source_text",
+                                            "search_terms_en",
+                                            "term_type",
+                                        ],
+                                        "properties": {
+                                            "source_text": {"type": "string"},
+                                            "search_terms_en": {
+                                                "type": "array",
+                                                "minItems": 1,
+                                                "maxItems": 1,
+                                                "items": {"type": "string"},
+                                            },
+                                            "term_type": {
+                                                "type": "string",
+                                                "enum": list(MEDICAL_TERM_TYPES),
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        }
                         for value in values
                     },
                 }

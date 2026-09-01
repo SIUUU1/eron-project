@@ -106,7 +106,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
         self.assertIsNone(result["completed_at"])
         self.assertEqual(
             result["draft"]["fields"]["chief_complaint"]["value"],
-            "배가 아파요",
+            "Abdominal pain.",
         )
         self.assertEqual(
             set(result["telemetry"]),

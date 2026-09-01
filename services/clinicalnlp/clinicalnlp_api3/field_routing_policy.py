@@ -73,7 +73,8 @@ class FieldPolicy:
 
 FIELD_POLICIES = {
     "chief_complaint": FieldPolicy(
-        "The explicit primary reason for the emergency visit, in patient wording.",
+        "Every explicitly stated core reason for the emergency visit, regardless "
+        "of speaker; symptoms and explicitly stated diagnoses are allowed.",
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "pain_assessment": FieldPolicy(

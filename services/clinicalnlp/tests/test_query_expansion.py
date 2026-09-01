@@ -11,6 +11,65 @@ from clinicalnlp_api3.workflow import run_clinical_workflow
 
 
 class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
+    def test_compact_translation_returns_each_coordinated_medical_term_for_search(self):
+        raw_text = "4일 전부터 코프, 스프텀, 디스프니아가 증가했습니다."
+
+        class TranslationClient:
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, user_payload, response_format, output_label
+                return {
+                    "translations": {
+                        "t0001": {
+                            "translated_text_en": (
+                                "Cough, sputum production, and dyspnea have "
+                                "increased over the past 4 days."
+                            ),
+                            "medical_terms": [
+                                {
+                                    "source_text": "코프",
+                                    "search_terms_en": ["cough"],
+                                    "term_type": "symptom_or_sign",
+                                },
+                                {
+                                    "source_text": "스프텀",
+                                    "search_terms_en": ["sputum production"],
+                                    "term_type": "symptom_or_sign",
+                                },
+                                {
+                                    "source_text": "디스프니아",
+                                    "search_terms_en": ["dyspnea"],
+                                    "term_type": "symptom_or_sign",
+                                },
+                            ],
+                        }
+                    }
+                }
+
+        result = LlamaServerMedicalQueryExpander(
+            "http://unused.local",
+            llm_client=TranslationClient(),
+        ).expand([
+            {"id": "seg_0001", "start": 0.0, "end": 4.0, "text": raw_text}
+        ])
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(result["_telemetry"]["translation_calls"], 1)
+        self.assertEqual(
+            [item["search_terms_en"][0] for item in result["items"]],
+            ["cough", "sputum production", "dyspnea"],
+        )
+        self.assertEqual(
+            [item["source_span"]["text"] for item in result["items"]],
+            ["코프", "스프텀", "디스프니아"],
+        )
+
     def test_environment_factory_uses_ollama_cloud_for_translation(self):
         captured = {}
 
@@ -28,7 +87,16 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
                         "message": {
                             "role": "assistant",
                             "content": json.dumps(
-                                {"translations": {"t0": "Shortness of breath"}}
+                                {
+                                    "translations": {
+                                        "t0": {
+                                            "translated_text_en": (
+                                                "Shortness of breath"
+                                            ),
+                                            "medical_terms": [],
+                                        }
+                                    }
+                                }
                             ),
                         },
                         "done": True,
@@ -65,7 +133,15 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
-        self.assertEqual(result, {"t0": "Shortness of breath"})
+        self.assertEqual(
+            result,
+            {
+                "t0": {
+                    "translated_text_en": "Shortness of breath",
+                    "medical_terms": [],
+                }
+            },
+        )
         self.assertEqual(captured["path"], "/api/chat")
         self.assertEqual(captured["authorization"], "Bearer test-secret")
         self.assertFalse(captured["payload"]["think"])
@@ -245,7 +321,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
                 set(translation_schema["required"]),
                 set(supplied["target_segment_ids"]),
             )
-            self.assertNotIn("medical_terms", json.dumps(schema))
+            self.assertIn("medical_terms", json.dumps(schema))
 
     def test_compact_translation_splits_only_when_token_budget_requires_it(self):
         segments = [
@@ -401,7 +477,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         )
         prompt = payload["messages"][0]["content"]
         self.assertIn("Translate only the requested target segments", prompt)
-        self.assertIn("Do not return medical terms", prompt)
+        self.assertIn("each distinct medical expression", prompt)
 
     def test_keeps_complete_source_unchanged_while_translation_is_search_only(self):
         text = "환자는 코프가 증가했습니다. 오늘 날씨는 맑습니다."

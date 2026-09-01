@@ -98,11 +98,7 @@ def extract_clinical_record(
     if not isinstance(record, dict):
         raise ValueError("model response must contain a clinical_record object")
     default_record = {
-        "chief_complaint": {
-            "raw_value": None,
-            "status": "not_mentioned",
-            "evidence": None,
-        },
+        "chief_complaint": [],
         "pain_assessment": {
             key: {
                 "raw_value": None,

@@ -7,7 +7,7 @@ Extraction rules
 - Keep the source clinical wording verbatim in raw_value. Do not paraphrase, broaden, or silently standardize it.
 - Use corrected_text only when present, but raw_value must remain a meaningful phrase supported by one segment.
 - Split a mixed segment into the smallest complete supported facts before assigning fields. One segment may support several fields, but do not copy the same clause into multiple fields merely to fill them.
-- chief_complaint is limited to the one or two explicit primary reasons for this emergency visit. The explicit symptom answer after an opening discomfort question belongs here; other current-illness details do not.
+- chief_complaint contains every explicitly stated core reason for this emergency visit, regardless of who said it. Include an explicitly stated symptom or diagnosis, but never infer a diagnosis. Keep each distinct core reason as a separate value. The explicit symptom answer after an opening discomfort question belongs here; onset, course, mechanism, location context, arrival route, transport mode, and other current-illness details belong in history_of_present_illness.
 - history_of_present_illness contains onset, course, change, aggravating or relieving context, and associated symptoms of the current problem. Do not place past diagnoses, observed examination findings, assessments, or plans here.
 - Keep onset to its time phrase. Preserve explicit negative and uncertain answers.
 - Pain assessment uses explicit NRS only. Do not infer an NRS score from pain adjectives, location, or quality; omit non-NRS pain fields.
@@ -27,7 +27,7 @@ Value V is {"raw_value":"exact supported phrase","status":"confirmed|needs_confi
 Return JSON only:
 {
   "clinical_record":{
-    "chief_complaint":V,
+    "chief_complaint":[V],
     "pain_assessment":{"nrs":V,"location":V,"quality":V,"radiation":V},
     "history_of_present_illness":{"onset":V,"course":V,"associated_symptoms":[V]},
     "past_history":{"underlying_conditions":[V],"surgery_history":[V]},

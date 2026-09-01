@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .field_routing_policy import (
     CANONICAL_TO_DRAFT_FIELD,
+    FIELD_POLICIES,
     SYMPTOM,
     candidate_term_types,
     choose_evidence_field,
@@ -133,7 +134,11 @@ def _is_question_text(text: Any) -> bool:
     if "?" in normalized:
         return not bool(normalized.rsplit("?", 1)[1].strip())
     return bool(
-        re.search(r"(?:나요|가요|까요|습니까|있으세요|없으세요|되나요)[.!]?\s*$", normalized)
+        re.search(
+            r"(?:있나요|없나요|하나요|인가요|셨나요|했나요|가요|까요|습니까|"
+            r"있으세요|없으세요|되나요)[.!]?\s*$",
+            normalized,
+        )
     )
 
 
@@ -1008,6 +1013,114 @@ def _draft_field(
     return {"value": value, "status": status, "evidence": evidence}
 
 
+def _chief_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    atoms = list(_atomic_values(source))
+    segments = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    values: list[str] = []
+    seen_values: set[str] = set()
+    evidence_values: list[dict[str, Any]] = []
+    allowed_term_types = FIELD_POLICIES["chief_complaint"].allowed_term_types
+
+    def append_value(value: Any) -> None:
+        normalized = " ".join(str(value or "").split()).strip(" ;")
+        identity = normalized.casefold()
+        if normalized and identity not in seen_values:
+            seen_values.add(identity)
+            values.append(normalized)
+
+    for atom in atoms:
+        raw_value = str(atom.get("raw_value") or "").strip()
+        if not raw_value:
+            continue
+        evidence = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if evidence is not None and evidence not in evidence_values:
+            evidence_values.append(evidence)
+        segment = segments.get(str(evidence.get("segment_id"))) if evidence else None
+        atom_values: list[str] = []
+        if segment is not None:
+            for annotation in segment.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
+                term_type = annotation.get("term_type")
+                source_text = str(
+                    (annotation.get("source_span") or {}).get("text") or ""
+                ).strip()
+                if source_text and not (
+                    source_text.casefold() in raw_value.casefold()
+                    or raw_value.casefold() in source_text.casefold()
+                ):
+                    continue
+                candidates = filter_candidates_for_field(
+                    "chief_complaint",
+                    annotation.get("candidates", []),
+                    annotation_term_type=term_type,
+                )
+                if term_type not in allowed_term_types and not candidates:
+                    continue
+                translated_term = next(
+                    (
+                        str(term).strip()
+                        for term in annotation.get("search_terms_en", [])
+                        if str(term).strip()
+                    ),
+                    "",
+                )
+                if translated_term:
+                    atom_values.append(
+                        translated_term[:1].upper() + translated_term[1:]
+                    )
+                    continue
+                canonical_en = next(
+                    (
+                        str(candidate.get("canonical_en") or "").strip()
+                        for candidate in candidates
+                        if str(candidate.get("canonical_en") or "").strip()
+                    ),
+                    "",
+                )
+                if canonical_en:
+                    atom_values.append(canonical_en)
+            if not atom_values:
+                translated_text = str(segment.get("translated_text_en") or "").strip()
+                if translated_text:
+                    atom_values.append(translated_text)
+        if not atom_values:
+            atom_values.append(
+                _english_draft_value(
+                    atom,
+                    api3_segments,
+                    candidate_decisions or [],
+                )
+            )
+        for value in atom_values:
+            append_value(value)
+
+    statuses = {str(item.get("status")) for item in atoms}
+    if values:
+        status = (
+            "needs_review"
+            if statuses & {"needs_confirmation", "asked_but_unanswered"}
+            else "filled"
+        )
+        value = ", ".join(values)
+    elif statuses & {"needs_confirmation", "asked_but_unanswered"}:
+        status = "needs_review"
+        value = "확인 필요"
+    else:
+        status = "unknown"
+        value = "미확인"
+    return {"value": value, "status": status, "evidence": evidence_values}
+
+
 def _ros_symptom_atoms(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
     yield from _atomic_values(record.get("chief_complaint"))
     history = record.get("history_of_present_illness")
@@ -1706,9 +1819,28 @@ def build_draft(
     api2_document: dict[str, Any] | None,
     api3_document: dict[str, Any],
     candidate_decisions: list[dict[str, Any]] | None = None,
+    translated_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     fields = _empty_draft_fields()
-    api3_segments = list(api3_document.get("segments", []))
+    translations = {
+        str(item.get("segment_id")): str(item.get("translated_text_en") or "").strip()
+        for item in translated_segments or []
+        if isinstance(item, dict)
+        and item.get("segment_id") is not None
+        and str(item.get("translated_text_en") or "").strip()
+    }
+    api3_segments = [
+        {
+            **segment,
+            **(
+                {"translated_text_en": translations[str(segment.get("id"))]}
+                if str(segment.get("id")) in translations
+                else {}
+            ),
+        }
+        for segment in api3_document.get("segments", [])
+        if isinstance(segment, dict)
+    ]
     record: dict[str, Any] = {}
     if api2_document is not None:
         record = api2_document.get("clinical_record") or {}
@@ -1716,6 +1848,12 @@ def build_draft(
             if field_id == "pain":
                 fields[field_id] = _nrs_draft_field(
                     record.get(source_key), api3_segments
+                )
+            elif field_id == "chief":
+                fields[field_id] = _chief_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
                 )
             else:
                 fields[field_id] = _draft_field(
@@ -1886,6 +2024,7 @@ def _resolved_candidates_for_pipeline(
     medical_query_resolver: Any,
     *,
     collection_hints_by_source_id: dict[Any, frozenset[str]] | None = None,
+    medical_term_query_source_ids: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, list[dict[str, Any]]], Any]:
     from .medical_query_resolver import (
         MedicalQueryDocument,
@@ -1958,6 +2097,33 @@ def _resolved_candidates_for_pipeline(
         raw_text = source["text"]
         if not raw_text:
             continue
+        collection_hints = (
+            collection_hints_by_source_id.get(str(source["id"]))
+            if collection_hints_by_source_id is not None
+            else None
+        )
+        explicit_queries: list[str] = []
+        seen_queries: set[str] = set()
+        if str(source["id"]) in medical_term_query_source_ids:
+            for expansion_span in expansion_spans.get(source["id"], []):
+                for search_term in expansion_span["search_terms"]:
+                    if search_term in seen_queries:
+                        continue
+                    seen_queries.add(search_term)
+                    explicit_queries.append(search_term)
+        if explicit_queries:
+            for query_position, search_term in enumerate(explicit_queries, start=1):
+                internal_id = f"q{position:04d}m{query_position:03d}"
+                source_by_internal_id[internal_id] = source
+                query_segments.append(
+                    MedicalQuerySegment(
+                        segment_id=internal_id,
+                        raw_text=raw_text,
+                        translated_text_en=search_term,
+                        collection_hints=collection_hints,
+                    )
+                )
+            continue
         internal_id = f"q{position:04d}"
         source_by_internal_id[internal_id] = source
         query_segments.append(
@@ -1965,11 +2131,7 @@ def _resolved_candidates_for_pipeline(
                 segment_id=internal_id,
                 raw_text=raw_text,
                 translated_text_en=translations.get(source["id"]),
-                collection_hints=(
-                    collection_hints_by_source_id.get(source["id"])
-                    if collection_hints_by_source_id is not None
-                    else None
-                ),
+                collection_hints=collection_hints,
             )
         )
 
@@ -2224,6 +2386,17 @@ def run_clinical_workflow(
                 clinical_record,
                 segments=validated_segments,
             )
+            chief_query_source_ids = frozenset(
+                segment_id
+                for segment_id, field_evidence in evidence_fields_by_segment(
+                    clinical_record,
+                    segments=validated_segments,
+                ).items()
+                if any(
+                    evidence.field_id == "chief_complaint"
+                    for evidence in field_evidence
+                )
+            )
             (
                 projected_candidates_by_segment,
                 query_resolution,
@@ -2232,6 +2405,7 @@ def run_clinical_workflow(
                 query_expansion,
                 medical_query_resolver,
                 collection_hints_by_source_id=collection_hints,
+                medical_term_query_source_ids=chief_query_source_ids,
             )
             query_resolution_summary = {
                 "schema_version": query_resolution.schema_version,
@@ -2392,6 +2566,9 @@ def run_clinical_workflow(
             api2_document,
             api3_document,
             candidate_decisions,
+            query_expansion.get("translated_segments")
+            if isinstance(query_expansion.get("translated_segments"), list)
+            else None,
         ),
         "errors": errors,
         "telemetry": {
