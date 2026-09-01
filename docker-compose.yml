@@ -256,8 +256,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      # 도메인 전환 기간의 롤백 경로. HTTPS 가 안정되면 제거한다.
-      - "8080:80"
 
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
