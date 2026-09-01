@@ -52,7 +52,12 @@ function toRow(item: EdStayListItem): PatientRow {
     chiefComplaint: item.chief_complaint ?? "-",
     risk: toRiskLevel(item.risk_level),
     probability: toPercent(item.risk_probability),
-    recordStatus: null, // 기록 영역은 이번 연동 범위 밖
+    recordStatus:
+      item.record_status === "SIGNED"
+        ? "인증 완료"
+        : item.record_status === "DRAFT"
+          ? "임시저장"
+          : "미작성",
   };
 }
 

@@ -55,6 +55,7 @@ services:
       # 초안 endpoint만 연결 실패를 503으로 반환한다.
       RECORD_AI_URL: ${RECORD_AI_URL:-http://clinicalnlp:8765}
       CLINICAL_RECORD_AI_TIMEOUT_SECONDS: ${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}
+      KCD_ALIAS_DB_PATH: /runtime/medical-dictionaries/ERON_응급의학용어_DB_v1.sqlite
       # stt profile이 꺼져 있으면 음성 초안 endpoint만 503을 반환한다.
       # 오래된 로컬 STT_URL이 내부 서비스 주소를 덮어쓰지 못하게 고정한다.
       STT_URL: http://whisper:8780
@@ -64,6 +65,14 @@ services:
       # 컨테이너 밖에서 vite dev 를 띄울 때만 채운다.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       TZ: ${TZ:-Asia/Seoul}
+
+    volumes:
+      - type: bind
+        source: ${CLINICALNLP_RUNTIME_ROOT:-./runtime/clinicalnlp}/medical-dictionaries
+        target: /runtime/medical-dictionaries
+        read_only: true
+        bind:
+          create_host_path: false
 
     depends_on:
       postgres:

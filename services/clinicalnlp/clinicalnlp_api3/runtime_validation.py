@@ -198,6 +198,8 @@ def _draft_field(document: dict[str, Any], field_id: str) -> dict[str, Any]:
     draft = document.get("draft") if isinstance(document.get("draft"), dict) else {}
     fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
     field = fields.get(field_id)
+    if field_id == "allergy" and field is None:
+        field = fields.get("drug_allergy")
     return field if isinstance(field, dict) else {}
 
 
@@ -730,7 +732,7 @@ def validate_clinical_workflow(
         )
     specialized_grounding_fields = {
         "medications",
-        "drug_allergy",
+        "allergy",
         "physical_examination",
         "treatment_plan",
     }
@@ -758,7 +760,7 @@ def validate_clinical_workflow(
     segment_map = _segments(document)
     for field_id, field in fields.items():
         if (
-            field_id in {"chief_complaint", "drug_allergy"}
+            field_id in {"chief_complaint", "allergy"}
             or not isinstance(field, dict)
             or field.get("information_status") != "NONE"
         ):
@@ -839,14 +841,14 @@ def validate_clinical_workflow(
             )
         )
 
-    allergy = _draft_field(document, "drug_allergy")
+    allergy = _draft_field(document, "allergy")
     if allergy.get("information_status") == "NONE":
         allergy_evidence = _field_evidence_texts(allergy, segment_map)
         if not any(_is_explicit_negation(text) for text in allergy_evidence):
             issues.append(
                 _issue(
                     rules["G07"],
-                    field_id="drug_allergy",
+                    field_id="allergy",
                     message="알레르기를 확인하지 않았는데 없음으로 기록되었습니다.",
                     evidence=list(allergy.get("evidence") or []),
                     suggested_action=(
@@ -932,4 +934,3 @@ def validate_clinical_workflow(
             "G18": structured_applicability,
         },
     }
-

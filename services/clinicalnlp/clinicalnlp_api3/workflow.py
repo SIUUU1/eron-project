@@ -47,7 +47,7 @@ _SUPPORTED_FIELD_SOURCES = {
     "history": "history_of_present_illness",
     "past-history": "past_history",
     "medication": "medications",
-    "allergy": "drug_allergy",
+    "allergy": "allergy",
     "social": "social_history",
     "review-of-systems": "review_of_systems",
     "physical": "physical_examination",
@@ -399,7 +399,7 @@ def _normalize_api2_document(
     )
     if allergy_segment is not None:
         allergy_text = str(allergy_segment.get("raw_text") or "").strip()
-        record["drug_allergy"] = grounded_value(
+        record["allergy"] = grounded_value(
             allergy_segment,
             allergy_text,
             "Penicillin allergy — urticaria",
@@ -557,7 +557,7 @@ def _normalize_api2_document(
                 }
             ]
 
-    allergy = record.get("drug_allergy")
+    allergy = record.get("allergy")
     has_allergy_value = (
         isinstance(allergy, dict)
         and allergy.get("status") in {"confirmed", "needs_confirmation"}
@@ -582,7 +582,7 @@ def _normalize_api2_document(
             uncertain = any(
                 term in answer_text for term in ("모르", "기억", "것 같", "확실")
             )
-            record["drug_allergy"] = {
+            record["allergy"] = {
                 "raw_value": answer_text,
                 "status": "needs_confirmation" if uncertain else "confirmed",
                 "evidence": {

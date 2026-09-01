@@ -1,6 +1,7 @@
 fastapi
 httpx2
 jsonschema
+openpyxl
 uvicorn[standard]
 SQLAlchemy
 psycopg[binary]

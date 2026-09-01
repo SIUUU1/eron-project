@@ -32,7 +32,7 @@ Return JSON only:
     "history_of_present_illness":{"onset":V,"course":V,"associated_symptoms":[V]},
     "past_history":{"underlying_conditions":[V],"surgery_history":[V]},
     "medications":{"items":[V],"last_dose":V},
-    "drug_allergy":V,
+    "allergy":V,
     "social_history":{"smoking":V,"alcohol":V},
     "review_of_systems":[V],
     "physical_examination":[V],

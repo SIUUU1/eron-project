@@ -16,7 +16,7 @@ CANONICAL_FIELD_IDS = (
     "history_of_present_illness",
     "past_history",
     "medications",
-    "drug_allergy",
+    "allergy",
     "social_history",
     "review_of_systems",
     "physical_examination",

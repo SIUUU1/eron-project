@@ -10,7 +10,7 @@ CANONICAL_FIELD_ORDER = (
     "history_of_present_illness",
     "past_history",
     "medications",
-    "drug_allergy",
+    "allergy",
     "social_history",
     "review_of_systems",
     "physical_examination",
@@ -24,7 +24,7 @@ CANONICAL_TO_DRAFT_FIELD = {
     "history_of_present_illness": "history",
     "past_history": "past-history",
     "medications": "medication",
-    "drug_allergy": "allergy",
+    "allergy": "allergy",
     "social_history": "social",
     "review_of_systems": "review-of-systems",
     "physical_examination": "physical",
@@ -83,7 +83,7 @@ FIELD_POLICIES = {
         "Medication currently taken or explicitly reported as administered.",
         frozenset({DRUG}),
     ),
-    "drug_allergy": FieldPolicy(
+    "allergy": FieldPolicy(
         "Explicit allergen or drug allergy and its reported reaction.",
         frozenset({ALLERGY, DRUG, SYMPTOM}),
     ),
@@ -119,7 +119,7 @@ _TERM_TYPE_FIELD_PRIORITY = {
         "review_of_systems",
         "physical_examination",
         "impression",
-        "drug_allergy",
+        "allergy",
     ),
     DISEASE: (
         "impression",
@@ -127,8 +127,8 @@ _TERM_TYPE_FIELD_PRIORITY = {
         "history_of_present_illness",
         "chief_complaint",
     ),
-    DRUG: ("medications", "drug_allergy", "treatment_plan"),
-    ALLERGY: ("drug_allergy",),
+    DRUG: ("medications", "allergy", "treatment_plan"),
+    ALLERGY: ("allergy",),
     ANATOMY: (
         "physical_examination",
         "history_of_present_illness",

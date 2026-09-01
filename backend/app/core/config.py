@@ -41,6 +41,9 @@ class Settings:
     record_ai_url: str | None = None
     clinical_record_ai_timeout_seconds: float = 180.0
 
+    # KCD 검색어를 표준 진단명으로 확장하는 읽기 전용 임상용어 약어 사전.
+    kcd_alias_db_path: str | None = None
+
     # 음성 파일을 Whisper JSON으로 변환하는 내부 비동기 STT 서비스.
     stt_url: str | None = None
     stt_timeout_seconds: float = 300.0
@@ -73,6 +76,7 @@ def load_settings() -> Settings:
             "CLINICAL_RECORD_AI_TIMEOUT_SECONDS",
             180.0,
         ),
+        kcd_alias_db_path=os.getenv("KCD_ALIAS_DB_PATH") or None,
         stt_url=os.getenv("STT_URL") or None,
         stt_timeout_seconds=_float_env("STT_TIMEOUT_SECONDS", 300.0),
         stt_poll_interval_seconds=_float_env(

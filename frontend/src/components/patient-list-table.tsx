@@ -36,7 +36,7 @@ export interface PatientRow {
   risk: RiskLevel | null;
   /** 0~100. 예측이 없으면 null. */
   probability: number | null;
-  /** 기록 영역은 이번 연동 범위 밖이라 API 행에서는 null 이다. */
+  /** 미작성, 임시저장 또는 인증 완료 상태. */
   recordStatus: string | null;
 }
 

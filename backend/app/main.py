@@ -12,6 +12,8 @@ from app.models import (
     Vital,
     Prediction,
     Record,
+    ClinicalRecord,
+    KcdCode,
 )
 from app.api.patients import router as patient_router
 from app.api.visits import router as visit_router
@@ -22,6 +24,7 @@ from app.api.ed_stays import router as ed_stay_router
 from app.api.ed_dashboard import router as ed_dashboard_router
 from app.api.ed_demo import router as ed_demo_router
 from app.api.clinical_records import router as clinical_record_router
+from app.api.kcd import router as kcd_router
 
 
 # public 스키마의 기존 CRUD 도메인만 생성한다.
@@ -43,7 +46,7 @@ if settings.cors_origins:
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -55,6 +58,7 @@ app.include_router(vital_router)
 app.include_router(prediction_router)
 app.include_router(record_router)
 app.include_router(clinical_record_router)
+app.include_router(kcd_router)
 
 # MIMIC 기반 조회 (신규 네임스페이스, 읽기 전용)
 app.include_router(ed_stay_router)
