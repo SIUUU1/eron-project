@@ -11,13 +11,13 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  applyTerminologyCandidateDecision,
   candidateSourceLabel,
   type CandidateSource,
   type FieldProvenance,
+  type TerminologyCandidate,
 } from "@/lib/clinical-provenance";
 import { cn } from "@/lib/utils";
-
-type CandidateDecision = "selected" | "excluded";
 
 const sourceBadgeClasses: Record<CandidateSource, string> = {
   RAW_EXACT: "border-risk-stable/30 bg-risk-stable-soft text-risk-stable",
@@ -30,11 +30,65 @@ function similarityLabel(similarity: number | null): string {
   return similarity === null ? "제공되지 않음" : `${Math.round(similarity * 100)}%`;
 }
 
-export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenance }) {
-  const [decisions, setDecisions] = useState<Record<string, CandidateDecision>>({});
+interface FieldProvenancePanelProps {
+  provenance: FieldProvenance;
+  draftValue: string;
+  onDraftValueChange: (value: string) => void;
+}
 
-  const setDecision = (candidateId: string, decision: CandidateDecision) => {
-    setDecisions((current) => ({ ...current, [candidateId]: decision }));
+export function FieldProvenancePanel({
+  provenance,
+  draftValue,
+  onDraftValueChange,
+}: FieldProvenancePanelProps) {
+  const [selectedByGroup, setSelectedByGroup] = useState<Record<string, string>>({});
+  const [excludedCandidates, setExcludedCandidates] = useState<Record<string, boolean>>({});
+
+  const selectCandidate = (candidate: TerminologyCandidate) => {
+    const groupIds = candidate.selectionGroupIds ?? [candidate.id];
+    const previousCandidates = Array.from(
+      new Set(groupIds.map((groupId) => selectedByGroup[groupId]).filter(Boolean)),
+    )
+      .map((candidateId) => provenance.candidates.find((item) => item.id === candidateId))
+      .filter((item): item is TerminologyCandidate => item !== undefined);
+    const result = applyTerminologyCandidateDecision(
+      draftValue,
+      candidate,
+      previousCandidates,
+      "selected",
+    );
+    if (!result.changed) return;
+    onDraftValueChange(result.value);
+    setSelectedByGroup((current) => {
+      const next = { ...current };
+      groupIds.forEach((groupId) => {
+        next[groupId] = candidate.id;
+      });
+      return next;
+    });
+    setExcludedCandidates((current) => ({ ...current, [candidate.id]: false }));
+  };
+
+  const excludeCandidate = (candidate: TerminologyCandidate) => {
+    const groupIds = candidate.selectionGroupIds ?? [candidate.id];
+    const isSelected = groupIds.some((groupId) => selectedByGroup[groupId] === candidate.id);
+    if (isSelected) {
+      const result = applyTerminologyCandidateDecision(
+        draftValue,
+        candidate,
+        candidate,
+        "excluded",
+      );
+      if (result.changed) onDraftValueChange(result.value);
+      setSelectedByGroup((current) => {
+        const next = { ...current };
+        groupIds.forEach((groupId) => {
+          if (next[groupId] === candidate.id) delete next[groupId];
+        });
+        return next;
+      });
+    }
+    setExcludedCandidates((current) => ({ ...current, [candidate.id]: true }));
   };
 
   return (
@@ -53,7 +107,7 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
           </div>
           <div className="space-y-2">
             {provenance.evidence.map((evidence) => (
-              <article key={evidence.segmentId} className="rounded-md bg-secondary/50 px-2.5 py-2">
+              <article key={evidence.segmentId} className="min-w-0 rounded-md bg-secondary/50 px-2.5 py-2">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
                   <span className="font-mono font-semibold text-foreground">
                     {evidence.segmentId}
@@ -64,17 +118,34 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
                 <dl className="mt-2 grid gap-1.5 text-xs">
                   <div className="grid grid-cols-[62px_1fr] gap-2">
                     <dt className="font-semibold text-muted-foreground">RAW</dt>
-                    <dd>{evidence.raw}</dd>
+                    <dd className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {evidence.raw}
+                    </dd>
                   </div>
                   {evidence.corrected ? (
                     <div className="grid grid-cols-[62px_1fr] gap-2">
                       <dt className="font-semibold text-muted-foreground">CORRECTED</dt>
-                      <dd>{evidence.corrected}</dd>
+                      <dd className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                        {evidence.corrected}
+                      </dd>
+                    </div>
+                  ) : null}
+                  {evidence.translated ? (
+                    <div className="grid grid-cols-[62px_1fr] gap-2">
+                      <dt className="font-semibold text-muted-foreground">영문 번역</dt>
+                      <dd
+                        lang="en"
+                        className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+                      >
+                        {evidence.translated}
+                      </dd>
                     </div>
                   ) : null}
                   <div className="grid grid-cols-[62px_1fr] gap-2">
                     <dt className="font-semibold text-primary">초안 반영</dt>
-                    <dd className="font-medium">{evidence.appliedValue || "미반영"}</dd>
+                    <dd className="min-w-0 whitespace-pre-wrap break-words font-medium [overflow-wrap:anywhere]">
+                      {draftValue || "미반영"}
+                    </dd>
                   </div>
                 </dl>
               </article>
@@ -94,29 +165,41 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
           </div>
           <div className="space-y-2">
             {provenance.candidates.map((candidate) => {
-              const decision = decisions[candidate.id];
+              const groupIds = candidate.selectionGroupIds ?? [candidate.id];
+              const selected =
+                groupIds.length > 0 &&
+                groupIds.every((groupId) => selectedByGroup[groupId] === candidate.id);
+              const excluded = excludedCandidates[candidate.id] === true;
               const unresolved = candidate.source === "UNRESOLVED";
+              const selectable = !unresolved && !candidate.alreadyApplied;
               return (
                 <article
                   key={candidate.id}
                   className={cn(
                     "rounded-md border px-2.5 py-2 transition-colors",
-                    decision === "selected" && "border-risk-stable/50 bg-risk-stable-soft/40",
-                    decision === "excluded" && "bg-secondary/40 opacity-65",
+                    selected && "border-risk-stable/50 bg-risk-stable-soft/40",
+                    excluded && "bg-secondary/40 opacity-65",
                   )}
                 >
                   <div className="flex flex-wrap items-start gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge
-                          variant="outline"
-                          className={sourceBadgeClasses[candidate.source]}
-                        >
-                          {candidateSourceLabel(candidate.source)}
-                        </Badge>
-                        {decision === "selected" ? (
+                        {(candidate.sources ?? [candidate.source]).map((source) => (
+                          <Badge
+                            key={source}
+                            variant="outline"
+                            className={sourceBadgeClasses[source]}
+                          >
+                            {candidateSourceLabel(source)}
+                          </Badge>
+                        ))}
+                        {candidate.alreadyApplied ? (
+                          <Badge className="bg-risk-stable text-primary-foreground">
+                            초안 반영됨
+                          </Badge>
+                        ) : selected ? (
                           <Badge className="bg-risk-stable text-primary-foreground">선택됨</Badge>
-                        ) : decision === "excluded" ? (
+                        ) : excluded ? (
                           <Badge variant="secondary">제외됨</Badge>
                         ) : (
                           <Badge variant="outline" className="text-muted-foreground">
@@ -124,10 +207,10 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
                           </Badge>
                         )}
                       </div>
-                      <p className="mt-1.5 truncate text-sm font-semibold">
+                      <p className="mt-1.5 whitespace-pre-wrap break-words text-sm font-semibold [overflow-wrap:anywhere]">
                         {candidate.canonicalValue ?? "정규화 후보 없음"}
                       </p>
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      <p className="mt-0.5 whitespace-pre-wrap break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
                         검색어 · {candidate.query}
                       </p>
                     </div>
@@ -135,15 +218,15 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
                       <span className="flex items-center gap-1 text-xs text-risk-critical">
                         <CircleHelp className="size-3.5" /> 원문 유지
                       </span>
-                    ) : (
+                    ) : selectable ? (
                       <div className="flex shrink-0 gap-1.5">
                         <Button
                           type="button"
                           size="sm"
-                          variant={decision === "selected" ? "default" : "outline"}
+                          variant={selected ? "default" : "outline"}
                           className="h-7 px-2 text-xs"
-                          aria-pressed={decision === "selected"}
-                          onClick={() => setDecision(candidate.id, "selected")}
+                          aria-pressed={selected}
+                          onClick={() => selectCandidate(candidate)}
                         >
                           <Check className="size-3" /> 후보 선택
                         </Button>
@@ -152,13 +235,13 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
                           size="sm"
                           variant="ghost"
                           className="h-7 px-2 text-xs"
-                          aria-pressed={decision === "excluded"}
-                          onClick={() => setDecision(candidate.id, "excluded")}
+                          aria-pressed={excluded}
+                          onClick={() => excludeCandidate(candidate)}
                         >
                           <X className="size-3" /> 제외
                         </Button>
                       </div>
-                    )}
+                    ) : null}
                   </div>
 
                   <details className="group mt-2 border-t pt-1.5">
@@ -166,7 +249,7 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
                       <ChevronDown className="size-3 transition-transform group-open:rotate-180" />
                       검색 상세 보기
                     </summary>
-                    <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 rounded bg-secondary/50 p-2 text-[11px]">
+                    <dl className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 rounded bg-secondary/50 p-2 text-[11px] sm:grid-cols-2">
                       <div>
                         <dt className="text-muted-foreground">CUI</dt>
                         <dd className="font-mono">{candidate.cui ?? "—"}</dd>
@@ -193,7 +276,7 @@ export function FieldProvenancePanel({ provenance }: { provenance: FieldProvenan
             })}
           </div>
           <p className="mt-2 text-[10px] text-muted-foreground">
-            후보 선택 상태는 현재 화면에서만 표시되며 응급기록 초안에 자동 반영되지 않습니다.
+            선택한 후보는 초안 원문을 바꾸지 않고 별도 줄에 추가됩니다.
           </p>
         </div>
       ) : null}

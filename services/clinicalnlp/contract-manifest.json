@@ -12,7 +12,7 @@
       "path": "prompts/clinical_record_extraction_v2.txt",
       "kind": "prompt",
       "version": "clinical-record-extraction-v2",
-      "sha256": "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
+      "sha256": "4b8558a21ffb4122f40c0c767ca840e311416edcbe079aafe65fbfd2cc2614f3"
     },
     {
       "path": "prompts/candidate_adjudication_v1.txt",
@@ -24,7 +24,7 @@
       "path": "prompts/draft_normalization_v1.txt",
       "kind": "prompt",
       "version": "draft-normalization-v1",
-      "sha256": "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
+      "sha256": "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
     }
   ]
 }

@@ -16,6 +16,95 @@ import {
   workflowDraftToFieldProvenance,
   workflowDraftToFieldStatuses,
 } from "../src/api/clinical-records.ts";
+import { applyTerminologyCandidateDecision } from "../src/lib/clinical-provenance.ts";
+
+test("의료진이 선택한 후보는 초안 원문을 유지하고 새 줄에 추가한다", () => {
+  const candidate = {
+    id: "seg_1:0:candidate:0",
+    selectionGroupId: "seg_1:0",
+    query: "tiotropium",
+    canonicalValue: "Tiotropium",
+    selectionGroupIds: ["seg_1:0"],
+    source: "UMLS",
+    cui: "C0040165",
+    semanticType: "T121",
+    similarity: 0.96,
+  };
+
+  const result = applyTerminologyCandidateDecision(
+    "디오트로피움과 살부타몰 복용 중",
+    candidate,
+    null,
+    "selected",
+  );
+
+  assert.deepEqual(result, {
+    value: "디오트로피움과 살부타몰 복용 중\nTiotropium",
+    changed: true,
+  });
+});
+
+test("다른 후보를 선택하거나 제외하면 추가된 후보 줄만 교체하거나 제거한다", () => {
+  const tiotropium = {
+    id: "seg_1:0:candidate:0",
+    query: "tiotropium",
+    canonicalValue: "Tiotropium",
+    selectionGroupIds: ["seg_1:0"],
+    source: "UMLS",
+    cui: "C0040165",
+    semanticType: "T121",
+    similarity: 0.96,
+  };
+  const tiotropiumBromide = {
+    ...tiotropium,
+    id: "seg_1:0:candidate:1",
+    canonicalValue: "Tiotropium bromide",
+  };
+
+  const changed = applyTerminologyCandidateDecision(
+    "디오트로피움과 살부타몰 복용 중\nTiotropium",
+    tiotropiumBromide,
+    tiotropium,
+    "selected",
+  );
+  const restored = applyTerminologyCandidateDecision(
+    changed.value,
+    tiotropiumBromide,
+    tiotropiumBromide,
+    "excluded",
+  );
+
+  assert.equal(
+    changed.value,
+    "디오트로피움과 살부타몰 복용 중\nTiotropium bromide",
+  );
+  assert.equal(restored.value, "디오트로피움과 살부타몰 복용 중");
+});
+
+test("의료진이 초안을 수정한 뒤에도 기존 내용을 보존하고 후보만 추가한다", () => {
+  const candidate = {
+    id: "seg_1:0:candidate:0",
+    query: "tiotropium",
+    canonicalValue: "Tiotropium",
+    selectionGroupIds: ["seg_1:0"],
+    source: "UMLS",
+    cui: "C0040165",
+    semanticType: "T121",
+    similarity: 0.96,
+  };
+
+  const result = applyTerminologyCandidateDecision(
+    "의료진 메모: 디오트로피움 직접 확인",
+    candidate,
+    null,
+    "selected",
+  );
+
+  assert.deepEqual(result, {
+    value: "의료진 메모: 디오트로피움 직접 확인\nTiotropium",
+    changed: true,
+  });
+});
 
 test("Whisper JSON의 원문 segment와 추가 필드를 변경하지 않고 읽는다", () => {
   const source = {
@@ -183,6 +272,14 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
   fields.medications.value = "암로디핀 확인 필요";
 
   const result = workflowDraftToFieldProvenance({
+    query_expansion: {
+      translated_segments: [
+        {
+          segment_id: "seg_1",
+          translated_text_en: "I am short of breath.",
+        },
+      ],
+    },
     api3: {
       segments: [
         {
@@ -230,6 +327,13 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
               semantic_types: [],
               similarity: 0.83,
             },
+            {
+              display_value: "Acute angle closure glaucoma",
+              source: "NGRAM_FALLBACK",
+              cui: null,
+              semantic_types: [],
+              similarity: 0.86,
+            },
           ],
           needs_review: true,
         },
@@ -259,6 +363,7 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
         speaker: "환자",
         raw: "숨이 차요.",
         corrected: null,
+        translated: "I am short of breath.",
         appliedValue: "호흡곤란",
       },
     ],
@@ -271,6 +376,7 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
         cui: null,
         semanticType: null,
         similarity: null,
+        alreadyApplied: true,
       },
     ],
   });
@@ -281,6 +387,7 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
       cui: candidate.cui,
       semanticType: candidate.semanticType,
       similarity: candidate.similarity,
+      sources: candidate.sources,
     })),
     [
       {
@@ -289,6 +396,7 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
         cui: "C0154946",
         semanticType: "T047",
         similarity: 0.91,
+        sources: ["UMLS", "NGRAM_FALLBACK"],
       },
       {
         canonicalValue: "Angle-closure glaucoma",
@@ -296,9 +404,11 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
         cui: null,
         semanticType: null,
         similarity: 0.83,
+        sources: undefined,
       },
     ],
   );
+  assert.deepEqual(result.impression.candidates[0].selectionGroupIds, ["seg_2:0"]);
   assert.deepEqual(result.medication.candidates, [
     {
       id: "seg_3:0:unresolved",

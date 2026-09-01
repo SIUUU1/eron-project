@@ -3,6 +3,7 @@ Create optional terminology-normalized AI draft values using only the supplied f
 Rules
 - Return at most one suggestion for each supplied atom_id.
 - Copy field_id, atom_id, and applied_candidate_ids exactly from the input.
+- Use translated_text_en to identify which spoken medical wording corresponds to an allowed candidate. It is interpretation context only and is never independent clinical evidence.
 - Use only display_value strings from allowed_candidates. Never invent, translate, broaden, or assign another term or code.
 - Replace only the spoken medical wording. Preserve every other word, number, unit, punctuation mark, negation, uncertainty, R/O wording, and question status.
 - A candidate changes terminology spelling only. It never adds a diagnosis, medication, allergy, examination finding, treatment plan, or outcome.

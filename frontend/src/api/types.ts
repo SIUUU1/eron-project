@@ -74,6 +74,16 @@ export interface ClinicalApi3Segment {
   [key: string]: unknown;
 }
 
+export interface ClinicalTranslatedSegment {
+  segment_id: string | number;
+  translated_text_en: string;
+}
+
+export interface ClinicalQueryExpansion {
+  translated_segments?: ClinicalTranslatedSegment[];
+  [key: string]: unknown;
+}
+
 export interface ClinicalDraftFields {
   chief_complaint: ClinicalDraftField;
   pain_assessment: ClinicalDraftField;
@@ -99,6 +109,7 @@ export interface ClinicalRecordWorkflowResponse {
     segments: ClinicalApi3Segment[];
     [key: string]: unknown;
   };
+  query_expansion?: ClinicalQueryExpansion;
   draft: {
     fields: ClinicalDraftFields;
     review_items: ClinicalDraftReviewItem[];

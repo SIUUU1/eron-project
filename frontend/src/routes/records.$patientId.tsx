@@ -794,6 +794,8 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                           <FieldProvenancePanel
                             key={`${provenanceRevision}:${key}`}
                             provenance={provenance}
+                            draftValue={record[key]}
+                            onDraftValueChange={(value) => setField(key, value)}
                           />
                         ) : null}
                       </div>

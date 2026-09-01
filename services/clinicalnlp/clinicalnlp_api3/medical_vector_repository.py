@@ -44,6 +44,8 @@ class VectorIdentityBatch:
     identities: tuple[tuple[VectorIdentity, ...], ...]
     elapsed_ms: float
     statement_count: int
+    collection_elapsed_ms: tuple[tuple[str, float], ...] = ()
+    collection_statement_counts: tuple[tuple[str, int], ...] = ()
 
 
 class MedicalVectorRepository(Protocol):
@@ -426,8 +428,12 @@ class PostgresMedicalVectorRepository:
         ]
         output: list[list[VectorIdentity]] = [[] for _ in normalized]
         statement_count = 0
+        collection_elapsed_ms: dict[str, float] = {}
+        collection_statement_counts: dict[str, int] = {}
         with self.request_session():
             for collection in MEDICAL_VECTOR_COLLECTIONS:
+                collection_started = time.perf_counter()
+                collection_statement_count = 0
                 partitions = (
                     ("ingredient", "product")
                     if collection == "drug_terms"
@@ -495,6 +501,7 @@ class PostgresMedicalVectorRepository:
                         ),
                     )
                     statement_count += 1
+                    collection_statement_count += 1
                     for index, entity_id, source_text, canonical_en, similarity in rows:
                         row_tokens = _tokens(f"{source_text or ''} {canonical_en or ''}")
                         if query_tokens[int(index)] and not (
@@ -511,10 +518,27 @@ class PostgresMedicalVectorRepository:
                             str(entity_id),
                             min(1.0, max(0.0, score)),
                         ))
+                if collection_statement_count:
+                    collection_elapsed_ms[collection] = (
+                        time.perf_counter() - collection_started
+                    ) * 1000
+                    collection_statement_counts[collection] = (
+                        collection_statement_count
+                    )
         return VectorIdentityBatch(
             identities=_sorted_identities(output),
             elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
             statement_count=statement_count,
+            collection_elapsed_ms=tuple(
+                (collection, round(collection_elapsed_ms[collection], 3))
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_elapsed_ms
+            ),
+            collection_statement_counts=tuple(
+                (collection, collection_statement_counts[collection])
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_statement_counts
+            ),
         )
 
 

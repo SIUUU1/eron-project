@@ -48,13 +48,13 @@ class ClinicalContractBundleTests(unittest.TestCase):
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
+                "4b8558a21ffb4122f40c0c767ca840e311416edcbe079aafe65fbfd2cc2614f3"
             ),
             "candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "draft_normalization_v1.txt": (
-                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
+                "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
             ),
         }
 
@@ -76,13 +76,13 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
+                "4b8558a21ffb4122f40c0c767ca840e311416edcbe079aafe65fbfd2cc2614f3"
             ),
             "prompts/candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "prompts/draft_normalization_v1.txt": (
-                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
+                "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
             ),
         }
 

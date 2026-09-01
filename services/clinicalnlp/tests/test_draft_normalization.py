@@ -46,10 +46,14 @@ def _record(value="어큐트 앵글 클로저 글루코마 가능성 있습니�
     }
 
 
-def _segments(candidates, *, source_text=None):
+def _segments(
+    candidates,
+    *,
+    source_text=None,
+    translated_text="There is a possibility of acute angle-closure glaucoma.",
+):
     raw = "어큐트 앵글 클로저 글루코마 가능성 있습니다."
-    return [
-        {
+    segment = {
             "id": "seg_0001",
             "raw_text": raw,
             "annotations": [
@@ -63,10 +67,24 @@ def _segments(candidates, *, source_text=None):
                 }
             ],
         }
-    ]
+    if translated_text is not None:
+        segment["translated_text_en"] = translated_text
+    return [segment]
 
 
 class DraftNormalizationTests(unittest.TestCase):
+    def test_umls_candidate_without_translation_is_display_only(self):
+        direct, payload = build_draft_normalization_plan(
+            _record(),
+            _segments(
+                [_candidate("emergency:1", "Acute angle-closure glaucoma")],
+                translated_text=None,
+            ),
+        )
+
+        self.assertEqual(direct, [])
+        self.assertEqual(payload, {"fields": []})
+
     def test_clear_verified_umls_top_one_builds_a_bounded_model_payload(self):
         direct, payload = build_draft_normalization_plan(
             _record(),
