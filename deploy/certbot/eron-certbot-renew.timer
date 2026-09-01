@@ -1,0 +1,11 @@
+[Unit]
+Description=ER:ON 인증서 갱신 타이머 (1일 2회)
+
+[Timer]
+# Let's Encrypt 권장: 하루 두 번 + 임의 지연으로 갱신 요청을 분산한다.
+OnCalendar=*-*-* 03,15:00:00
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

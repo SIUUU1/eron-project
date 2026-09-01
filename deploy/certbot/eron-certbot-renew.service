@@ -1,0 +1,9 @@
+[Unit]
+Description=ER:ON Let's Encrypt 인증서 갱신
+Documentation=https://certbot.eff.org/
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eron-certbot-renew.sh
