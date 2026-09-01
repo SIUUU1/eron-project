@@ -107,6 +107,7 @@ def to_list_item(row: Any) -> EdStayListItem:
         risk_probability=row["risk_probability"],
         latest_vital=_latest_vital(row),
         bed_id=row["bed_id"],
+        record_status=row["record_status"],
         departed_at=departed_at,
         discharge_type=discharge_type,
     )

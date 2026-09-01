@@ -21,6 +21,7 @@ LEFT JOIN app.patient_alias      al ON al.ed_stay_id = e.stay_id
 LEFT JOIN app.v_latest_prediction lp ON lp.stay_id   = e.stay_id
 LEFT JOIN app.v_latest_vitalsign  lv ON lv.stay_id   = e.stay_id
 LEFT JOIN app.bed_assignment      ba ON ba.ed_stay_id = e.stay_id AND ba.released_at IS NULL
+LEFT JOIN public.clinical_records cr ON cr.ed_stay_id = CAST(e.stay_id AS text)
 """
 
 _FILTER = """
@@ -75,7 +76,8 @@ SELECT
     lv.dbp,
     lv.o2sat,
     lv.temperature_c,
-    ba.bed_id
+    ba.bed_id,
+    cr.status AS record_status
 """
 
 

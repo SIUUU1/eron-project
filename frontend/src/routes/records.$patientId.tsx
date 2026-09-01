@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertCircle,
@@ -13,10 +13,12 @@ import {
   Loader2,
   Mic,
   Pause,
+  Plus,
   Save,
   Square,
   Stethoscope,
   Upload,
+  X,
   XCircle,
 } from "lucide-react";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -28,7 +30,11 @@ import {
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
   dialogueToWhisperDraftRequest,
+  getPersistedClinicalRecord,
   parseWhisperDraftJson,
+  saveClinicalRecordDraft,
+  searchKcdCodes,
+  signClinicalRecord,
   transcribeClinicalRecordAudio,
   whisperDraftToDialogue,
   workflowDraftToEmergencyRecord,
@@ -38,7 +44,7 @@ import {
 } from "@/api/clinical-records";
 import { formatDateTime, sexLabel } from "@/api/display";
 import { edStayKeys, getEdStay } from "@/api/ed-stays";
-import type { WhisperDraftRequest } from "@/api/types";
+import type { PersistedClinicalRecord, WhisperDraftRequest } from "@/api/types";
 import {
   BrowserAudioRecorder,
   audioRecordingErrorMessage,
@@ -49,6 +55,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -73,8 +80,6 @@ import {
   checkStatusMeta,
   currentUser,
   emptyRecord,
-  followUpQuestions,
-  kcdCandidates,
   outcomeOptions,
   recordFieldLabels,
   type CheckStatus,
@@ -100,7 +105,7 @@ export const Route = createFileRoute("/records/$patientId")({
   component: RecordWorkflowPage,
 });
 
-const steps = ["기록 작성", "누락 검사", "진단코드", "최종 기록", "인증 저장"];
+const steps = ["기록 작성", "기록 작성 및 누락 검사", "최종 기록", "인증 저장"];
 
 const fieldOrder: RecordFieldKey[] = [
   "chiefComplaint",
@@ -152,8 +157,12 @@ function RecordWorkflowPage() {
     queryKey: edStayKeys.detail(patientId),
     queryFn: ({ signal }) => getEdStay(patientId, signal),
   });
+  const recordQuery = useQuery({
+    queryKey: ["clinical-record", patientId],
+    queryFn: ({ signal }) => getPersistedClinicalRecord(patientId, signal),
+  });
 
-  if (detailQuery.isPending) {
+  if (detailQuery.isPending || recordQuery.isPending) {
     return (
       <div className="space-y-5">
         <Skeleton className="h-10 w-48" />
@@ -163,17 +172,25 @@ function RecordWorkflowPage() {
     );
   }
 
-  if (detailQuery.isError) {
+  if (detailQuery.isError || recordQuery.isError) {
+    const queryError = detailQuery.error ?? recordQuery.error;
     return (
       <div className="flex flex-col items-center gap-3 py-20 text-center">
         <AlertCircle className="size-9 text-risk-critical" />
         <p className="font-semibold">환자 정보를 불러오지 못했습니다</p>
-        <p className="text-sm text-muted-foreground">{detailQuery.error.message}</p>
+        <p className="text-sm text-muted-foreground">{queryError?.message}</p>
         <div className="flex gap-2">
           <Button asChild variant="outline">
             <Link to="/records">목록으로</Link>
           </Button>
-          <Button onClick={() => void detailQuery.refetch()}>다시 시도</Button>
+          <Button
+            onClick={() => {
+              void detailQuery.refetch();
+              void recordQuery.refetch();
+            }}
+          >
+            다시 시도
+          </Button>
         </div>
       </div>
     );
@@ -200,11 +217,29 @@ function RecordWorkflowPage() {
     },
   };
 
-  return <RecordWorkflow patient={patient} />;
+  return <RecordWorkflow patient={patient} persisted={recordQuery.data} />;
 }
 
-function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflowPatient> }) {
-  const [step, setStep] = useState(1);
+function RecordWorkflow({
+  patient,
+  persisted,
+}: {
+  patient: ReturnType<typeof createWorkflowPatient>;
+  persisted: PersistedClinicalRecord | null;
+}) {
+  const queryClient = useQueryClient();
+  const savedPayload = persisted?.record_payload;
+  const savedRecordPayload = savedPayload?.record as EmergencyRecord | undefined;
+  const savedRecord = savedRecordPayload
+    ? {
+        ...savedRecordPayload,
+        outcome: savedRecordPayload.outcome === "진료 진행 중" ? "" : savedRecordPayload.outcome,
+      }
+    : undefined;
+  const savedStatuses = savedPayload?.field_statuses as Record<RecordFieldKey, CheckStatus> | null;
+  const savedProvenance = (savedPayload?.field_provenance ?? {}) as FieldProvenanceMap;
+  const initiallySigned = persisted?.status === "SIGNED";
+  const [step, setStep] = useState(initiallySigned ? 4 : 1);
   const [dialogue, setDialogue] = useState<DraftDialogueTurn[]>([]);
   const [uploadedWhisperPayload, setUploadedWhisperPayload] = useState<WhisperDraftRequest | null>(
     null,
@@ -215,14 +250,14 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
   const [transcribingFileName, setTranscribingFileName] = useState<string | null>(null);
   const [recording, setRecording] = useState<AudioRecorderState>("idle");
   const [generating, setGenerating] = useState(false);
-  const [record, setRecord] = useState<EmergencyRecord>(emptyRecord);
-  const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>({});
+  const [record, setRecord] = useState<EmergencyRecord>(savedRecord ?? emptyRecord);
+  const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>(savedProvenance);
   const [provenanceRevision, setProvenanceRevision] = useState(0);
   const [clinicalFieldStatuses, setClinicalFieldStatuses] = useState<Record<
     RecordFieldKey,
     CheckStatus
-  > | null>(null);
-  const [generated, setGenerated] = useState(false);
+  > | null>(savedStatuses ?? null);
+  const [generated, setGenerated] = useState(savedPayload?.generated ?? Boolean(persisted));
   const [generationNotice, setGenerationNotice] = useState<{
     kind: "partial" | "error";
     message: string;
@@ -233,10 +268,37 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
   const [highlight, setHighlight] = useState<RecordFieldKey | null>(null);
   const [blockOpen, setBlockOpen] = useState(false);
 
-  const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [selectedKcds, setSelectedKcds] = useState<
+    Array<{ code: string; name: string; is_rule_out?: boolean }>
+  >(
+    Array.isArray(persisted?.selected_kcd)
+      ? persisted.selected_kcd
+      : persisted?.selected_kcd
+        ? [persisted.selected_kcd]
+        : [],
+  );
+  const savedRuleOuts = savedPayload?.diagnosis_rule_outs as boolean[] | undefined;
+  const [diagnosisRuleOuts, setDiagnosisRuleOuts] = useState<boolean[]>(
+    savedRuleOuts ??
+      (Array.isArray(persisted?.selected_kcd)
+        ? persisted.selected_kcd.map((item) => item.is_rule_out ?? false)
+        : persisted?.selected_kcd
+          ? [persisted.selected_kcd.is_rule_out ?? false]
+          : []),
+  );
+  const [kcdSearch, setKcdSearch] = useState("");
   const [certifyOpen, setCertifyOpen] = useState(false);
   const [agreed, setAgreed] = useState(false);
-  const [certifiedAt, setCertifiedAt] = useState<string | null>(null);
+  const [persistedRecord, setPersistedRecord] = useState(persisted);
+  const [saving, setSaving] = useState(false);
+  const [signing, setSigning] = useState(false);
+  const certifiedAt = persistedRecord?.signed_at
+    ? new Date(persistedRecord.signed_at).toLocaleString("ko-KR", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : null;
+  const isSigned = persistedRecord?.status === "SIGNED";
 
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({});
   const whisperFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -258,18 +320,85 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
   }, [clinicalFieldStatuses, record]);
 
   const missingRequired = requiredFields.filter((k) => statuses[k] === "missing");
+  const completeCount = fieldOrder.filter((k) => statuses[k] === "complete").length;
   const reviewCount = fieldOrder.filter((k) => statuses[k] === "review").length;
-  const completeness = generated
-    ? Math.max(
-        0,
-        Math.round(
-          100 - fieldOrder.filter((k) => statuses[k] === "missing").length * 5 - reviewCount * 3.5,
-        ),
-      )
+  const hasSavedDraft = persistedRecord?.status === "DRAFT";
+  const canProceedToCheck = generated || Boolean(persistedRecord);
+  const completeness = canProceedToCheck
+    ? Math.round(((completeCount + reviewCount * 0.5) / fieldOrder.length) * 100)
     : 0;
 
-  const selectedCandidate = kcdCandidates.find((c) => c.code === selectedCode);
+  const diagnosisEntries = (record.impression === "미확인" ? "" : record.impression).split("\n");
+  const diagnosisCount = diagnosisEntries.filter((diagnosis) => diagnosis.trim()).length;
+  const nextDiagnosisIndex = selectedKcds.length;
+  const nextDiagnosis = diagnosisEntries[nextDiagnosisIndex]?.trim() ?? "";
+  const kcdQueryText = kcdSearch.trim() || nextDiagnosis;
+  const kcdSearchQuery = useQuery({
+    queryKey: ["kcd", "search", kcdQueryText],
+    queryFn: ({ signal }) => searchKcdCodes(kcdQueryText, signal),
+    enabled: checked && Boolean(kcdQueryText),
+    staleTime: 5 * 60 * 1000,
+  });
   const v = patient.vitals;
+
+  const persistDraft = async (showToast = true) => {
+    if (isSigned) {
+      toast.error("인증 완료된 기록은 수정하거나 다시 저장할 수 없습니다.");
+      return null;
+    }
+    setSaving(true);
+    try {
+      const saved = await saveClinicalRecordDraft(patient.id, {
+        record_payload: {
+          record,
+          field_statuses: clinicalFieldStatuses,
+          field_provenance: fieldProvenance as Record<string, unknown>,
+          generated,
+          diagnosis_rule_outs: diagnosisRuleOuts,
+        },
+        selected_kcd: selectedKcds,
+        clinician_id: "DEMO-DR-001",
+        clinician_name: currentUser.name,
+      });
+      setPersistedRecord(saved);
+      void queryClient.invalidateQueries({ queryKey: ["ed", "stays"] });
+      if (showToast) toast.success("응급진료기록을 임시저장했습니다.");
+      return saved;
+    } catch (error) {
+      toast.error("임시저장하지 못했습니다.", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const certifyRecord = async () => {
+    setSigning(true);
+    const saved = await persistDraft(false);
+    if (!saved) {
+      setSigning(false);
+      return;
+    }
+    try {
+      const signed = await signClinicalRecord(saved.id, {
+        clinician_id: "DEMO-DR-001",
+        clinician_name: currentUser.name,
+      });
+      setPersistedRecord(signed);
+      void queryClient.invalidateQueries({ queryKey: ["ed", "stays"] });
+      setCertifyOpen(false);
+      setStep(4);
+      toast.success("응급진료기록이 인증 저장되었습니다.");
+    } catch (error) {
+      toast.error("인증 저장하지 못했습니다.", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setSigning(false);
+    }
+  };
 
   const loadWhisperJson = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
@@ -457,12 +586,69 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
       setBlockOpen(true);
       return;
     }
+    if (diagnosisCount === 0) {
+      toast.error("주진단을 입력해 주세요.");
+      return;
+    }
+    if (selectedKcds.length !== diagnosisCount) {
+      toast.error("모든 진단에 KCD-9차 코드를 1개씩 선택해 주세요.", {
+        description: `입력한 진단 ${diagnosisCount}개 · 선택한 코드 ${selectedKcds.length}개`,
+      });
+      return;
+    }
     setStep(3);
   };
 
   const setField = (key: RecordFieldKey, value: string) => {
     setRecord((prev) => ({ ...prev, [key]: value }));
     setClinicalFieldStatuses((prev) => (prev ? { ...prev, [key]: statusOf(value) } : prev));
+  };
+
+  const setDiagnosis = (index: number, value: string) => {
+    const next = [...diagnosisEntries];
+    const diagnosisChanged = next[index] !== value;
+    next[index] = value;
+    setField("impression", next.join("\n"));
+    if (diagnosisChanged && selectedKcds[index]) {
+      setSelectedKcds((current) => current.slice(0, index));
+      setKcdSearch("");
+    }
+  };
+
+  const addSecondaryDiagnosis = () => {
+    if (!diagnosisEntries.at(-1)?.trim()) {
+      toast.error("현재 진단명을 먼저 입력해 주세요.");
+      return;
+    }
+    setField("impression", [...diagnosisEntries, ""].join("\n"));
+    setDiagnosisRuleOuts((current) => [...current, false]);
+  };
+
+  const removeSecondaryDiagnosis = (index: number) => {
+    setField(
+      "impression",
+      diagnosisEntries.filter((_, diagnosisIndex) => diagnosisIndex !== index).join("\n"),
+    );
+    setSelectedKcds((current) =>
+      current.filter((_, diagnosisIndex) => diagnosisIndex !== index),
+    );
+    setDiagnosisRuleOuts((current) =>
+      current.filter((_, diagnosisIndex) => diagnosisIndex !== index),
+    );
+    setKcdSearch("");
+  };
+
+  const setDiagnosisRuleOut = (index: number, checked: boolean) => {
+    setDiagnosisRuleOuts((current) => {
+      const next = [...current];
+      next[index] = checked;
+      return next;
+    });
+    setSelectedKcds((current) =>
+      current.map((item, diagnosisIndex) =>
+        diagnosisIndex === index ? { ...item, is_rule_out: checked } : item,
+      ),
+    );
   };
 
   return (
@@ -474,7 +660,13 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
           </Link>
         </Button>
         <Badge variant="outline" className="bg-mint-soft text-navy">
-          기록 상태: {certifiedAt ? "의사 인증 완료" : generated ? "작성 중" : patient.recordStatus}
+          기록 상태: {certifiedAt
+            ? "의사 인증 완료"
+            : hasSavedDraft
+              ? "임시저장"
+              : generated
+                ? "작성 중"
+                : patient.recordStatus}
         </Badge>
       </div>
 
@@ -539,7 +731,7 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
         <Card>
           <CardContent className="py-3">
             <p className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Stethoscope className="size-3.5" /> EMR 연동 Vital 정보 (AI 생성 아님)
+              <Stethoscope className="size-3.5" /> EMR 연동 Vital 정보
             </p>
             <div className="grid grid-cols-6 gap-2 text-center">
               {[
@@ -763,7 +955,50 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                             </Badge>
                           )}
                         </label>
-                        {key === "outcome" ? (
+                        {key === "impression" ? (
+                          <div className="space-y-2">
+                            {diagnosisEntries.map((diagnosis, index) => (
+                              <div key={index} className="flex items-center gap-2">
+                                <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground">
+                                  {index + 1}. {index === 0 ? "주진단" : "부진단"}
+                                </span>
+                                <Input
+                                  value={diagnosis}
+                                  placeholder={index === 0 ? "주진단 입력" : "부진단 입력"}
+                                  onChange={(event) => setDiagnosis(index, event.target.value)}
+                                />
+                                <label className="flex shrink-0 items-center gap-1.5 text-xs font-semibold">
+                                  <Checkbox
+                                    checked={diagnosisRuleOuts[index] ?? false}
+                                    onCheckedChange={(checked) =>
+                                      setDiagnosisRuleOut(index, checked === true)
+                                    }
+                                  />
+                                  R/O
+                                </label>
+                                {index > 0 ? (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    aria-label={`${index + 1}번 부진단 삭제`}
+                                    onClick={() => removeSecondaryDiagnosis(index)}
+                                  >
+                                    <X className="size-4" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            ))}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={addSecondaryDiagnosis}
+                            >
+                              <Plus className="size-4" /> 부진단 추가
+                            </Button>
+                          </div>
+                        ) : key === "outcome" ? (
                           <Select
                             {...(record.outcome ? { value: record.outcome } : {})}
                             onValueChange={(val) => setField("outcome", val)}
@@ -772,7 +1007,9 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                               <SelectValue placeholder="선택되지 않음" />
                             </SelectTrigger>
                             <SelectContent>
-                              {record.outcome && !outcomeOptions.includes(record.outcome) ? (
+                              {record.outcome &&
+                              record.outcome !== "진료 진행 중" &&
+                              !outcomeOptions.includes(record.outcome) ? (
                                 <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
                               ) : null}
                               {outcomeOptions.map((o) => (
@@ -804,14 +1041,20 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
               <div className="flex justify-end gap-2 border-t pt-3">
                 <Button
                   variant="outline"
-                  onClick={() => toast.success("응급진료기록이 임시저장되었습니다.")}
+                  disabled={saving || isSigned}
+                  onClick={() => void persistDraft()}
                 >
-                  <Save className="size-4" /> 임시저장
+                  {saving ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Save className="size-4" />
+                  )}
+                  임시저장
                 </Button>
                 <Button
                   onClick={() => {
-                    if (!generated) {
-                      toast.error("먼저 AI 응급기록을 생성해 주세요.");
+                    if (!canProceedToCheck) {
+                      toast.error("AI 응급기록을 생성하거나 직접 작성한 기록을 임시저장해 주세요.");
                       return;
                     }
                     setStep(2);
@@ -840,6 +1083,18 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                     <FileCheck2 className="size-4" /> AI 기록 완전성 검사
                   </>
                 )}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={saving || isSigned}
+                onClick={() => void persistDraft()}
+              >
+                {saving ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                임시저장
               </Button>
               <div className="flex-1">
                 <div className="mb-1 flex items-center justify-between text-xs">
@@ -888,7 +1143,7 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
             <div className="grid grid-cols-[1fr_360px] gap-5">
               <Card>
                 <CardHeader className="border-b py-3">
-                  <CardTitle className="text-base">검사 결과 및 누락 항목 보완</CardTitle>
+                  <CardTitle className="text-base">기록 작성 및 누락 항목 보완</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3 pt-4">
                   {fieldOrder.map((key) => {
@@ -914,8 +1169,49 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                             {checkStatusMeta[st].label}
                           </Badge>
                         </div>
-                        {st === "complete" ? (
-                          <p className="text-sm text-muted-foreground">{record[key]}</p>
+                        {key === "impression" ? (
+                          <div className="space-y-2">
+                            {diagnosisEntries.map((diagnosis, index) => (
+                              <div key={index} className="flex items-center gap-2">
+                                <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground">
+                                  {index + 1}. {index === 0 ? "주진단" : "부진단"}
+                                </span>
+                                <Input
+                                  value={diagnosis}
+                                  placeholder={index === 0 ? "주진단 입력" : "부진단 입력"}
+                                  onChange={(event) => setDiagnosis(index, event.target.value)}
+                                />
+                                <label className="flex shrink-0 items-center gap-1.5 text-xs font-semibold">
+                                  <Checkbox
+                                    checked={diagnosisRuleOuts[index] ?? false}
+                                    onCheckedChange={(checked) =>
+                                      setDiagnosisRuleOut(index, checked === true)
+                                    }
+                                  />
+                                  R/O
+                                </label>
+                                {index > 0 ? (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    aria-label={`${index + 1}번 부진단 삭제`}
+                                    onClick={() => removeSecondaryDiagnosis(index)}
+                                  >
+                                    <X className="size-4" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            ))}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={addSecondaryDiagnosis}
+                            >
+                              <Plus className="size-4" /> 부진단 추가
+                            </Button>
+                          </div>
                         ) : key === "outcome" ? (
                           <Select
                             {...(record.outcome ? { value: record.outcome } : {})}
@@ -950,29 +1246,148 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                 <Card>
                   <CardHeader className="border-b py-3">
                     <CardTitle className="flex items-center gap-2 text-sm">
-                      <Brain className="size-4 text-primary" /> AI 추천 추가 질문
+                      <Brain className="size-4 text-primary" /> KCD-9차 진단코드 검색 및 추천
                       <Badge variant="outline" className="ml-auto bg-mint-soft text-navy">
                         AI
                       </Badge>
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3 pt-4">
-                    {followUpQuestions.map((q) => (
-                      <div key={q.question} className="rounded-md border bg-secondary/40 p-3">
-                        <p className="text-sm">{q.question}</p>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="mt-2 w-full"
-                          onClick={() => {
-                            focusField(q.field);
-                            toast.info(`${recordFieldLabels[q.field]} 항목을 입력해 주세요.`);
-                          }}
-                        >
-                          기록에 반영
-                        </Button>
+                    {selectedKcds.length > 0 ? (
+                      <div className="space-y-2 rounded-md border border-primary/40 bg-accent/30 p-3">
+                        {selectedKcds.map((item, index) => (
+                          <div
+                            key={`${item.code}-${item.name}`}
+                            className="flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-muted-foreground">
+                                {index + 1}. {index === 0 ? "주진단" : "부진단"}
+                                {diagnosisRuleOuts[index] ? " · R/O" : ""}
+                              </p>
+                              <p className="truncate text-sm font-semibold">
+                                {item.name}{" "}
+                                <span className="font-mono text-primary">{item.code}</span>
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              aria-label={`${item.name} 선택 해제`}
+                              onClick={() => {
+                                setSelectedKcds((current) =>
+                                  current.slice(0, index),
+                                );
+                                setKcdSearch("");
+                              }}
+                            >
+                              <X className="size-4" />
+                            </Button>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    ) : null}
+                    <div>
+                      <p className="text-xs font-semibold text-muted-foreground">
+                        {nextDiagnosisIndex + 1}. {nextDiagnosisIndex === 0 ? "주진단" : "부진단"} 코드 추천
+                      </p>
+                      {nextDiagnosis ? (
+                        <p className="mt-1 text-sm font-semibold">{nextDiagnosis}</p>
+                      ) : (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          왼쪽에서 {nextDiagnosisIndex === 0 ? "주진단" : "부진단"}을 입력하거나 먼저 검색하세요.
+                        </p>
+                      )}
+                    </div>
+                    <Input
+                      value={kcdSearch}
+                      placeholder="KCD 코드 또는 진단명 검색"
+                      onChange={(event) => setKcdSearch(event.target.value)}
+                    />
+                    {kcdQueryText ? (
+                      <div className="space-y-2">
+                        {kcdSearchQuery.isFetching ? (
+                          <p className="flex items-center gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                            <Loader2 className="size-3 animate-spin" /> KCD-9차 상병마스터를 검색하고
+                            있습니다.
+                          </p>
+                        ) : null}
+                        {kcdSearchQuery.data?.items.map((candidate) => {
+                          const active = selectedKcds.some(
+                            (item) => item.code === candidate.code && item.name === candidate.name,
+                          );
+                          return (
+                            <div
+                              key={`${candidate.code}-${candidate.name}`}
+                              className={`rounded-md border p-3 ${
+                                active ? "border-primary bg-accent/40" : "bg-secondary/40"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-semibold">{candidate.name}</p>
+                                  <p className="font-mono text-sm font-bold text-primary">
+                                    {candidate.code}
+                                  </p>
+                                  {candidate.name_en ? (
+                                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                                      {candidate.name_en}
+                                    </p>
+                                  ) : null}
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant={active ? "default" : "outline"}
+                                  disabled={active}
+                                  onClick={() => {
+                                    const selection = {
+                                      code: candidate.code,
+                                      name: candidate.name,
+                                      is_rule_out: diagnosisRuleOuts[nextDiagnosisIndex] ?? false,
+                                    };
+                                    if (!nextDiagnosis) {
+                                      setDiagnosis(nextDiagnosisIndex, candidate.name);
+                                    }
+                                    setSelectedKcds((current) => [...current, selection]);
+                                    setKcdSearch("");
+                                  }}
+                                >
+                                  {active
+                                    ? "선택됨"
+                                    : nextDiagnosisIndex === 0
+                                      ? "주진단 선택"
+                                      : "부진단 선택"}
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {kcdSearchQuery.isError ? (
+                          <p className="rounded-md border border-risk-critical/40 bg-risk-critical-soft p-3 text-xs text-risk-critical">
+                            KCD 상병마스터를 조회하지 못했습니다. 잠시 후 다시 시도해 주세요.
+                          </p>
+                        ) : null}
+                        {!kcdSearchQuery.isFetching && kcdSearchQuery.data?.items.length === 0 ? (
+                          <div className="space-y-2 rounded-md border border-dashed p-3">
+                            <p className="text-xs text-muted-foreground">
+                              일치하는 KCD-9차 코드가 없습니다. 코드 또는 진단명을 다시 확인해 주세요.
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                        주진단 또는 부진단을 입력하면 해당 순서의 KCD-9차 코드 후보가 자동으로
+                        표시됩니다. 먼저 검색해서 코드를 선택하면 진단명도 자동으로 입력됩니다.
+                      </p>
+                    )}
+                    <p className="text-xs font-medium text-muted-foreground">
+                      입력한 진단 {diagnosisCount}개 · 선택한 코드 {selectedKcds.length}개
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      AI 추천 결과는 의료진의 진단 및 질병분류를 보조하는 정보입니다.
+                    </p>
                   </CardContent>
                 </Card>
 
@@ -981,12 +1396,12 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                     <p className="text-xs text-muted-foreground">
                       필수 누락 항목 {missingRequired.length}건이 남아 있습니다.
                     </p>
-                    <div className="flex gap-2">
-                      <Button variant="outline" className="flex-1" onClick={() => setStep(1)}>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button variant="outline" onClick={() => setStep(1)}>
                         이전
                       </Button>
-                      <Button className="flex-1" onClick={goStep3}>
-                        다음: 진단코드 추천
+                      <Button onClick={goStep3}>
+                        다음: 최종 기록
                       </Button>
                     </div>
                   </CardContent>
@@ -1001,100 +1416,7 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
       {step === 3 && (
         <Card>
           <CardHeader className="border-b py-3">
-            <CardTitle className="text-base">AI 진단코드 추천</CardTitle>
-            <p className="text-xs text-muted-foreground">
-              작성된 응급진료기록과 추정진단을 기반으로 KCD-9차 진단코드 후보를 추천합니다.
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-4 pt-4">
-            <div className="rounded-md bg-secondary/50 px-4 py-2.5 text-sm">
-              <span className="text-muted-foreground">추정진단 · </span>
-              <span className="font-semibold">{record.impression || "미확인"}</span>
-            </div>
-            <div className="grid grid-cols-3 gap-4">
-              {kcdCandidates.map((c) => {
-                const active = selectedCode === c.code;
-                return (
-                  <div
-                    key={c.code}
-                    className={`flex flex-col rounded-lg border p-4 transition-all ${
-                      active
-                        ? "border-primary bg-accent/40 shadow-md ring-2 ring-primary/30"
-                        : "border-border bg-card"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <Badge variant="outline">후보 {c.rank}</Badge>
-                      {active && (
-                        <Badge className="bg-primary text-primary-foreground">
-                          <Check className="mr-1 size-3" /> 선택됨
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="mt-3 text-lg font-bold">{c.name}</p>
-                    <p className="mt-1 font-mono text-2xl font-bold text-primary">{c.code}</p>
-                    <div className="mt-3">
-                      <div className="mb-1 flex justify-between text-xs">
-                        <span className="text-muted-foreground">적합도</span>
-                        <span className="tabular font-bold">{c.fitness}%</span>
-                      </div>
-                      <Progress value={c.fitness} />
-                    </div>
-                    <p className="mt-4 text-xs font-semibold">추천 근거</p>
-                    <ul className="mt-1.5 flex-1 space-y-1">
-                      {c.reasons.map((r) => (
-                        <li key={r} className="flex gap-2 text-xs text-muted-foreground">
-                          <span className="mt-1.5 size-1 shrink-0 rounded-full bg-primary" />
-                          {r}
-                        </li>
-                      ))}
-                    </ul>
-                    <Button
-                      className="mt-4"
-                      variant={active ? "default" : "outline"}
-                      onClick={() => {
-                        setSelectedCode(c.code);
-                        toast.success(`${c.name} (${c.code})을 선택했습니다.`);
-                      }}
-                    >
-                      이 코드 선택
-                    </Button>
-                  </div>
-                );
-              })}
-            </div>
-            <p className="rounded-md border border-risk-watch/40 bg-risk-watch-soft px-4 py-2.5 text-xs text-navy">
-              AI 추천 결과는 진단 및 질병분류를 보조하기 위한 정보입니다. 최종 진단과 KCD 코드는
-              담당 의사의 검토 및 인증 후 확정됩니다.
-            </p>
-            <div className="flex justify-end gap-2 border-t pt-3">
-              <Button variant="outline" onClick={() => setStep(2)}>
-                이전
-              </Button>
-              <Button
-                onClick={() => {
-                  if (!selectedCode) {
-                    toast.error("진단코드를 1개 선택해야 다음 단계로 이동할 수 있습니다.");
-                    return;
-                  }
-                  setStep(4);
-                }}
-              >
-                다음: 최종 기록 확인 <ArrowRight className="size-4" />
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 4 */}
-      {step === 4 && (
-        <Card>
-          <CardHeader className="flex-row items-center justify-between border-b py-3">
             <CardTitle className="text-base">최종 응급진료기록</CardTitle>
-            <Button variant="outline" size="sm" onClick={() => setStep(1)}>
-              기록 수정
-            </Button>
           </CardHeader>
           <CardContent className="pt-4">
             <dl className="divide-y">
@@ -1103,38 +1425,74 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                   <dt className="text-sm font-semibold text-muted-foreground">
                     {recordFieldLabels[key]}
                   </dt>
-                  <dd className="text-sm">{record[key] || "미확인"}</dd>
+                  <dd className="text-sm">
+                    {key === "impression" ? (
+                      <div className="space-y-1">
+                        {diagnosisEntries.filter((diagnosis) => diagnosis.trim()).map((diagnosis, index) => (
+                          <p key={`${index}-${diagnosis}`}>
+                            <span className="mr-2 font-semibold">
+                              {index === 0 ? "(주)" : "(부)"}
+                              {diagnosisRuleOuts[index] ? "(R/O)" : ""}
+                            </span>
+                            {diagnosis}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      record[key] || "미확인"
+                    )}
+                  </dd>
                 </div>
               ))}
               <div className="grid grid-cols-[160px_1fr] gap-4 py-2.5">
                 <dt className="text-sm font-semibold text-muted-foreground">선택된 KCD 진단코드</dt>
-                <dd className="text-sm font-semibold">
-                  {selectedCandidate?.name}{" "}
-                  <span className="font-mono text-primary">({selectedCandidate?.code})</span>
+                <dd className="space-y-3 text-sm">
+                  {selectedKcds.map((item, index) => (
+                    <div key={`${item.code}-${item.name}`}>
+                      <p>
+                        <span className="mr-2 font-semibold">
+                          {index === 0 ? "(주)" : "(부)"}
+                          {diagnosisRuleOuts[index] ? "(R/O)" : ""}
+                        </span>
+                        <span className="text-muted-foreground">추정진단:</span>{" "}
+                        <span className="font-semibold">{diagnosisEntries[index]?.trim()}</span>
+                      </p>
+                      <p className="ml-10">
+                        <span className="text-muted-foreground">KCD 진단:</span>{" "}
+                        <span className="font-semibold">{item.name}</span>{" "}
+                        <span className="font-mono font-semibold text-primary">({item.code})</span>
+                      </p>
+                    </div>
+                  ))}
                 </dd>
               </div>
             </dl>
             <Separator className="my-4" />
             <div className="flex items-center justify-between">
               <p className="text-xs text-muted-foreground">
-                최종 검토용 요약 화면입니다. 수정이 필요하면 “기록 수정”을 눌러 이전 단계로
-                이동하세요.
+                최종 검토용 요약 화면입니다. 수정이 필요하면 이전 단계로 이동하세요.
               </p>
-              <Button
-                onClick={() => {
-                  setAgreed(false);
-                  setCertifyOpen(true);
-                }}
-              >
-                <FileCheck2 className="size-4" /> 의사 검토 및 최종 인증
-              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setStep(2)}>
+                  <ArrowLeft className="size-4" /> 이전
+                </Button>
+                <Button
+                  disabled={isSigned}
+                  onClick={() => {
+                    setAgreed(false);
+                    setCertifyOpen(true);
+                  }}
+                >
+                  <FileCheck2 className="size-4" /> 의사 검토 및 최종 인증
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* STEP 5 */}
-      {step === 5 && (
+      {/* STEP 4 */}
+      {step === 4 && (
         <Card className="border-risk-stable/40">
           <CardContent className="space-y-4 py-10 text-center">
             <CheckCircle2 className="mx-auto size-12 text-risk-stable" />
@@ -1150,12 +1508,21 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-muted-foreground">주진단명</dt>
-                <dd className="font-medium">{selectedCandidate?.name}</dd>
+                <dt className="text-xs text-muted-foreground">진단명</dt>
+                <dd className="font-medium">
+                  {selectedKcds
+                    .map(
+                      (item, index) =>
+                        `${index === 0 ? "(주)" : "(부)"}${item.is_rule_out ? "(R/O)" : ""} ${item.name}`,
+                    )
+                    .join(", ")}
+                </dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">KCD 코드</dt>
-                <dd className="font-mono font-medium text-primary">{selectedCandidate?.code}</dd>
+                <dd className="font-mono font-medium text-primary">
+                  {selectedKcds.map((item) => item.code).join(", ")}
+                </dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">검토 의사 / 인증 일시</dt>
@@ -1165,7 +1532,7 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
               </div>
             </dl>
             <div className="flex justify-center gap-2 pt-4">
-              <Button variant="outline" onClick={() => setStep(4)}>
+              <Button variant="outline" onClick={() => setStep(3)}>
                 최종 기록 보기
               </Button>
               <Button asChild>
@@ -1222,8 +1589,16 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
             {[
               ["환자명", patient.name],
               ["환자번호", patient.id],
-              ["최종 주진단명", selectedCandidate?.name ?? "-"],
-              ["선택된 KCD 코드", selectedCandidate?.code ?? "-"],
+              [
+                "최종 진단명",
+                selectedKcds
+                  .map(
+                    (item, index) =>
+                      `${index === 0 ? "(주)" : "(부)"}${item.is_rule_out ? "(R/O)" : ""} ${item.name}`,
+                  )
+                  .join(", ") || "-",
+              ],
+              ["선택된 KCD 코드", selectedKcds.map((item) => item.code).join(", ") || "-"],
               ["검토 의사", `${currentUser.dept} ${currentUser.name}`],
               [
                 "인증 일시",
@@ -1248,18 +1623,9 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
             <Button variant="outline" onClick={() => setCertifyOpen(false)}>
               취소
             </Button>
-            <Button
-              disabled={!agreed}
-              onClick={() => {
-                setCertifiedAt(
-                  new Date().toLocaleString("ko-KR", { dateStyle: "medium", timeStyle: "short" }),
-                );
-                setCertifyOpen(false);
-                setStep(5);
-                toast.success("응급진료기록이 최종 인증 및 저장되었습니다.");
-              }}
-            >
-              최종 인증 및 저장
+            <Button disabled={!agreed || signing || saving} onClick={() => void certifyRecord()}>
+              {signing ? <Loader2 className="size-4 animate-spin" /> : null}
+              인증 저장
             </Button>
           </DialogFooter>
         </DialogContent>

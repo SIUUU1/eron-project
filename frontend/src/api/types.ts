@@ -80,7 +80,9 @@ export interface ClinicalDraftFields {
   history_of_present_illness: ClinicalDraftField;
   past_history: ClinicalDraftField;
   medications: ClinicalDraftField;
-  drug_allergy: ClinicalDraftField;
+  allergy: ClinicalDraftField;
+  /** Read compatibility for clinical-workflow payloads created before the allergy key rename. */
+  drug_allergy?: ClinicalDraftField;
   social_history: ClinicalDraftField;
   review_of_systems: ClinicalDraftField;
   physical_examination: ClinicalDraftField;
@@ -104,6 +106,41 @@ export interface ClinicalRecordWorkflowResponse {
     review_items: ClinicalDraftReviewItem[];
   };
   errors: unknown[];
+}
+
+export interface PersistedClinicalRecord {
+  id: number;
+  ed_stay_id: string;
+  status: "DRAFT" | "SIGNED";
+  record_payload: {
+    record: Record<string, string>;
+    field_statuses?: Record<string, string> | null;
+    field_provenance?: Record<string, unknown>;
+    generated?: boolean;
+  };
+  selected_kcd:
+    | Array<{ code: string; name: string; is_rule_out?: boolean }>
+    | { code: string; name: string; is_rule_out?: boolean }
+    | null;
+  clinician_id: string;
+  clinician_name: string;
+  created_at: string;
+  updated_at: string;
+  signed_by: string | null;
+  signed_at: string | null;
+}
+
+export interface KcdCodeItem {
+  code: string;
+  name: string;
+  name_en: string | null;
+}
+
+export interface KcdSearchResponse {
+  items: KcdCodeItem[];
+  total: number;
+  query: string;
+  limit: number;
 }
 
 export interface Meta {
@@ -145,6 +182,7 @@ export interface EdStayListItem {
   risk_probability: number | null;
   latest_vital: LatestVital;
   bed_id: string | null;
+  record_status: "DRAFT" | "SIGNED" | null;
   /** 퇴실 시각(데모 시간축). 아직 퇴실 전이면 null. */
   departed_at: string | null;
   /** 퇴실 유형. 아직 퇴실 전이면 null → 화면에서는 빈칸. */

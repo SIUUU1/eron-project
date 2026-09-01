@@ -254,7 +254,7 @@ class RuntimeValidationTests(unittest.TestCase):
 
     def test_g07_blocks_unassessed_allergy_recorded_as_none(self):
         document = workflow_document()
-        field = document["draft"]["fields"]["drug_allergy"]
+        field = document["draft"]["fields"]["allergy"]
         field.update(
             {
                 "value": "없음",
@@ -266,7 +266,7 @@ class RuntimeValidationTests(unittest.TestCase):
         validation = validate_clinical_workflow(document, policy_index_path=None)
 
         issue = next(item for item in validation["issues"] if item["rule_id"] == "G07")
-        self.assertEqual(issue["field_id"], "drug_allergy")
+        self.assertEqual(issue["field_id"], "allergy")
         self.assertEqual(issue["severity"], "BLOCK")
 
     def test_g08_blocks_a_plan_not_stated_by_the_clinician(self):
@@ -476,7 +476,7 @@ class RuntimeValidationTests(unittest.TestCase):
 
     def test_invalid_information_status_is_blocked_without_rewriting_it(self):
         document = workflow_document()
-        field = document["draft"]["fields"]["drug_allergy"]
+        field = document["draft"]["fields"]["allergy"]
         field["information_status"] = "UNKNOWN"
 
         validation = validate_clinical_workflow(document, policy_index_path=None)
@@ -487,7 +487,7 @@ class RuntimeValidationTests(unittest.TestCase):
             if item["rule_id"] == "ENUM_VALIDATION"
         )
         self.assertEqual(validation["status"], "BLOCK")
-        self.assertEqual(issue["field_id"], "drug_allergy")
+        self.assertEqual(issue["field_id"], "allergy")
         self.assertEqual(issue["severity"], "BLOCK")
         self.assertEqual(issue["value"], "UNKNOWN")
         self.assertEqual(field["information_status"], "UNKNOWN")

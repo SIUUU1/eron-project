@@ -34,7 +34,7 @@ LEGACY_TO_CANONICAL_FIELD_ID = {
     "history": "history_of_present_illness",
     "past-history": "past_history",
     "medication": "medications",
-    "allergy": "drug_allergy",
+    "allergy": "allergy",
     "social": "social_history",
     "review-of-systems": "review_of_systems",
     "physical": "physical_examination",
@@ -48,7 +48,7 @@ CANONICAL_FIELD_IDS = (
     "history_of_present_illness",
     "past_history",
     "medications",
-    "drug_allergy",
+    "allergy",
     "social_history",
     "review_of_systems",
     "physical_examination",
@@ -62,7 +62,7 @@ GUARDRAIL_TO_CANONICAL_FIELD_ID = {
     "past_medical_history": "past_history",
     "surgical_history": "past_history",
     "medication_history": "medications",
-    "allergy": "drug_allergy",
+    "allergy": "allergy",
     "physical_exam": "physical_examination",
     "plan": "treatment_plan",
     "assessment_candidates": "impression",
@@ -79,10 +79,18 @@ _AMBIGUOUS_MEDICAL_TERMS = ("리네일러",)
 
 
 def canonical_field_id(field_id: str) -> str:
+    if field_id == "drug_allergy":
+        return "allergy"
     return LEGACY_TO_CANONICAL_FIELD_ID.get(
         field_id,
         GUARDRAIL_TO_CANONICAL_FIELD_ID.get(field_id, field_id),
     )
+
+
+def _migrate_legacy_allergy_key(record: dict[str, Any]) -> dict[str, Any]:
+    if "allergy" not in record and "drug_allergy" in record:
+        record = {**record, "allergy": record["drug_allergy"]}
+    return record
 
 
 def _atomic_values(value: Any):
@@ -308,6 +316,7 @@ def to_clinical_workflow_v2(
         if isinstance(api2.get("clinical_record"), dict)
         else {}
     )
+    clinical_record = _migrate_legacy_allergy_key(clinical_record)
     canonical_fields = {
         canonical_id: _v2_field(
             canonical_id,
@@ -371,4 +380,3 @@ def to_clinical_workflow_v2(
         policy_evidence_provider=policy_evidence_provider,
     )
     return result
-

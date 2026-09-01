@@ -82,6 +82,35 @@ export async function apiPost<TRequest, TResponse>(
   return (await res.json()) as TResponse;
 }
 
+export async function apiPut<TRequest, TResponse>(
+  path: string,
+  body: TRequest,
+  signal?: AbortSignal,
+): Promise<TResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: "PUT",
+      signal: signal ?? null,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    throw new ApiError(0, "서버에 연결할 수 없습니다.");
+  }
+  if (!res.ok) {
+    const detail = await res
+      .json()
+      .then((responseBody: { detail?: unknown }) =>
+        typeof responseBody.detail === "string" ? responseBody.detail : res.statusText,
+      )
+      .catch(() => res.statusText || "요청을 처리하지 못했습니다.");
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as TResponse;
+}
+
 export async function apiPostFormData<TResponse>(
   path: string,
   body: FormData,

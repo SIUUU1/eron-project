@@ -1,10 +1,12 @@
-import { ApiError, apiPost, apiPostFormData } from "./client.ts";
+import { ApiError, apiGet, apiPost, apiPostFormData, apiPut } from "./client.ts";
 import type {
   ClinicalAppliedCandidate,
   ClinicalCandidateProvenance,
   ClinicalDraftField,
   ClinicalDraftReviewItem,
   ClinicalRecordWorkflowResponse,
+  KcdSearchResponse,
+  PersistedClinicalRecord,
   WhisperDraftRequest,
 } from "./types.ts";
 import type {
@@ -22,6 +24,7 @@ const recordFieldKeyByClinicalId: Record<string, RecordFieldKey> = {
   history_of_present_illness: "presentIllness",
   past_history: "pastHistory",
   medications: "medication",
+  allergy: "allergy",
   drug_allergy: "allergy",
   social_history: "socialHistory",
   review_of_systems: "systemReview",
@@ -70,9 +73,7 @@ export function parseWhisperDraftJson(source: string): WhisperDraftRequest {
   return value as WhisperDraftRequest;
 }
 
-export function whisperDraftToDialogue(
-  request: WhisperDraftRequest,
-): DraftDialogueTurn[] {
+export function whisperDraftToDialogue(request: WhisperDraftRequest): DraftDialogueTurn[] {
   return request.segments.map((segment) => ({
     speaker:
       typeof segment.speaker === "string" && segment.speaker.length > 0
@@ -89,6 +90,51 @@ export function createClinicalRecordDraft(
   return apiPost<WhisperDraftRequest, ClinicalRecordWorkflowResponse>(
     "/api/clinical-records/draft",
     request,
+    signal,
+  );
+}
+
+export interface ClinicalRecordSavePayload {
+  record_payload: PersistedClinicalRecord["record_payload"];
+  selected_kcd: PersistedClinicalRecord["selected_kcd"];
+  clinician_id: string;
+  clinician_name: string;
+}
+
+export function getPersistedClinicalRecord(stayId: string, signal?: AbortSignal) {
+  return apiGet<PersistedClinicalRecord | null>(
+    `/api/clinical-records/by-stay/${encodeURIComponent(stayId)}`,
+    signal,
+  );
+}
+
+export function saveClinicalRecordDraft(
+  stayId: string,
+  payload: ClinicalRecordSavePayload,
+  signal?: AbortSignal,
+) {
+  return apiPut<ClinicalRecordSavePayload, PersistedClinicalRecord>(
+    `/api/clinical-records/by-stay/${encodeURIComponent(stayId)}`,
+    payload,
+    signal,
+  );
+}
+
+export function signClinicalRecord(
+  recordId: number,
+  clinician: { clinician_id: string; clinician_name: string },
+  signal?: AbortSignal,
+) {
+  return apiPost<typeof clinician, PersistedClinicalRecord>(
+    `/api/clinical-records/${recordId}/sign`,
+    clinician,
+    signal,
+  );
+}
+
+export function searchKcdCodes(query: string, signal?: AbortSignal) {
+  return apiGet<KcdSearchResponse>(
+    `/api/kcd/search?q=${encodeURIComponent(query)}&limit=10`,
     signal,
   );
 }
@@ -112,11 +158,7 @@ export function transcribeClinicalRecordAudio(
 ): Promise<WhisperDraftRequest> {
   const body = new FormData();
   body.append("audio", audio);
-  return apiPostFormData<WhisperDraftRequest>(
-    "/api/clinical-records/transcribe",
-    body,
-    signal,
-  );
+  return apiPostFormData<WhisperDraftRequest>("/api/clinical-records/transcribe", body, signal);
 }
 
 export function clinicalAudioTranscriptionErrorMessage(error: unknown): string {
@@ -189,13 +231,14 @@ export function workflowDraftToEmergencyRecord(
   workflow: Pick<ClinicalRecordWorkflowResponse, "draft">,
 ): EmergencyRecord {
   const fields = workflow.draft.fields;
+  const allergy = fields.allergy ?? fields.drug_allergy;
   return {
     chiefComplaint: fields.chief_complaint.value,
     painAssessment: fields.pain_assessment.value,
     presentIllness: fields.history_of_present_illness.value,
     pastHistory: fields.past_history.value,
     medication: fields.medications.value,
-    allergy: fields.drug_allergy.value,
+    allergy: allergy?.value ?? "",
     socialHistory: fields.social_history.value,
     systemReview: fields.review_of_systems.value,
     physicalExam: fields.physical_examination.value,
@@ -206,10 +249,7 @@ export function workflowDraftToEmergencyRecord(
 }
 
 function clinicalDraftFieldStatus(field: ClinicalDraftField): CheckStatus {
-  if (
-    field.information_status === "UNCERTAIN" ||
-    field.suggestion_status === "UNRESOLVED"
-  ) {
+  if (field.information_status === "UNCERTAIN" || field.suggestion_status === "UNRESOLVED") {
     return "review";
   }
   if (field.information_status === "NOT_ASSESSED") return "missing";
@@ -220,13 +260,14 @@ export function workflowDraftToFieldStatuses(
   workflow: Pick<ClinicalRecordWorkflowResponse, "draft">,
 ): Record<RecordFieldKey, CheckStatus> {
   const fields = workflow.draft.fields;
+  const allergy = fields.allergy ?? fields.drug_allergy;
   return {
     chiefComplaint: clinicalDraftFieldStatus(fields.chief_complaint),
     painAssessment: clinicalDraftFieldStatus(fields.pain_assessment),
     presentIllness: clinicalDraftFieldStatus(fields.history_of_present_illness),
     pastHistory: clinicalDraftFieldStatus(fields.past_history),
     medication: clinicalDraftFieldStatus(fields.medications),
-    allergy: clinicalDraftFieldStatus(fields.drug_allergy),
+    allergy: allergy ? clinicalDraftFieldStatus(allergy) : "missing",
     socialHistory: clinicalDraftFieldStatus(fields.social_history),
     systemReview: clinicalDraftFieldStatus(fields.review_of_systems),
     physicalExam: clinicalDraftFieldStatus(fields.physical_examination),
@@ -251,9 +292,7 @@ function evidenceTimestamp(start: number | undefined, end: number | undefined): 
 }
 
 function candidateSource(value: unknown): CandidateSource | null {
-  return value === "RAW_EXACT" || value === "UMLS" || value === "NGRAM_FALLBACK"
-    ? value
-    : null;
+  return value === "RAW_EXACT" || value === "UMLS" || value === "NGRAM_FALLBACK" ? value : null;
 }
 
 function candidateSimilarity(value: unknown): number | null {
@@ -310,9 +349,7 @@ function unresolvedCandidate(item: ClinicalDraftReviewItem): TerminologyCandidat
 export function workflowDraftToFieldProvenance(
   workflow: Pick<ClinicalRecordWorkflowResponse, "api3" | "draft">,
 ): FieldProvenanceMap {
-  const segments = new Map(
-    workflow.api3.segments.map((segment) => [String(segment.id), segment]),
-  );
+  const segments = new Map(workflow.api3.segments.map((segment) => [String(segment.id), segment]));
   const output: FieldProvenanceMap = {};
   const fields = workflow.draft.fields as unknown as Record<string, ClinicalDraftField>;
 

@@ -28,6 +28,7 @@ secrets/
 *.pfx
 service-account*.json
 credentials*.json
+services/*/env
 
 
 # ---------------------------------------------------------------------
@@ -95,6 +96,7 @@ exports/
 pgdata/
 postgres_data/
 postgres-data/
+backups/
 
 
 # ---------------------------------------------------------------------

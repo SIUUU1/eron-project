@@ -133,7 +133,7 @@ def extract_clinical_record(
                 "evidence": None,
             },
         },
-        "drug_allergy": {
+        "allergy": {
             "raw_value": None,
             "status": "not_mentioned",
             "evidence": None,

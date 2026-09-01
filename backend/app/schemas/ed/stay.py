@@ -50,6 +50,7 @@ class EdStayListItem(BaseModel):
     risk_probability: float | None = Field(None, description="0.0~1.0. 모델 미연동 시 null")
     latest_vital: LatestVital
     bed_id: str | None = Field(None, description="데모 배정 (D2)")
+    record_status: str | None = Field(None, description="DRAFT | SIGNED. 기록이 없으면 null")
     departed_at: datetime | None = Field(
         None,
         description=(

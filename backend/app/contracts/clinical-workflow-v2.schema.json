@@ -147,7 +147,7 @@
             "history_of_present_illness",
             "past_history",
             "medications",
-            "drug_allergy",
+            "allergy",
             "social_history",
             "review_of_systems",
             "physical_examination",
@@ -157,7 +157,7 @@
           ],
           "additionalProperties": false,
           "patternProperties": {
-            "^(chief_complaint|pain_assessment|history_of_present_illness|past_history|medications|drug_allergy|social_history|review_of_systems|physical_examination|treatment_plan|impression|outcome)$": {
+            "^(chief_complaint|pain_assessment|history_of_present_illness|past_history|medications|allergy|social_history|review_of_systems|physical_examination|treatment_plan|impression|outcome)$": {
               "$ref": "#/$defs/draftField"
             }
           }
@@ -259,4 +259,3 @@
     }
   }
 }
-

@@ -372,7 +372,7 @@ export const aiAlerts = [
 ];
 
 export const incompleteRecords = [
-  { patient: "김민수", patientId: "P-20260812-001", missing: "약물 알레르기, 흡연력" },
+  { patient: "김민수", patientId: "P-20260812-001", missing: "알레르기, 흡연력" },
   { patient: "박준호", patientId: "P-20260812-003", missing: "현병력, 신체검진" },
   { patient: "이영희", patientId: "P-20260812-002", missing: "응급진료결과" },
   { patient: "허민호", patientId: null, missing: "퇴실 형태" },
@@ -408,7 +408,7 @@ export const sampleDialogue: DialogueTurn[] = [
   { speaker: "환자", text: "고혈압이랑 당뇨가 있어요." },
   { speaker: "의료진", text: "복용 중인 약이 있나요?" },
   { speaker: "환자", text: "혈압약과 당뇨약을 먹고 있습니다." },
-  { speaker: "의료진", text: "약물 알레르기는 있나요?" },
+  { speaker: "의료진", text: "알레르기는 있나요?" },
   { speaker: "환자", text: "잘 모르겠습니다." },
 ];
 
@@ -432,7 +432,7 @@ export const recordFieldLabels: Record<RecordFieldKey, string> = {
   presentIllness: "현병력",
   pastHistory: "과거력",
   medication: "복용약",
-  allergy: "약물 알레르기",
+  allergy: "알레르기",
   socialHistory: "사회력 (흡연·음주)",
   systemReview: "계통문진",
   physicalExam: "신체검진",
@@ -475,7 +475,7 @@ export const aiDraftRecord: EmergencyRecord = {
   outcome: "",
 };
 
-export const outcomeOptions = ["진료 진행 중", "귀가", "입원", "전원", "사망", "기타"];
+export const outcomeOptions = ["귀가", "입원", "전원", "사망", "기타"];
 
 export type CheckStatus = "complete" | "review" | "missing";
 

@@ -621,12 +621,12 @@ class LlamaServerClinicalExtractor:
                     social.pop(key)
                     warnings.append(f"wrong-topic social_history.{key} was discarded")
 
-        allergy = sanitized.get("drug_allergy")
+        allergy = sanitized.get("allergy")
         if allergy is not None and not has_context(
             allergy, ("알레르", "알러지", "과민")
         ):
-            sanitized.pop("drug_allergy", None)
-            warnings.append("wrong-topic drug_allergy was discarded")
+            sanitized.pop("allergy", None)
+            warnings.append("wrong-topic allergy was discarded")
 
         return sanitized, warnings
 

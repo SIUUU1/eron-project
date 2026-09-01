@@ -35,7 +35,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "history_of_present_illness",
                 "past_history",
                 "medications",
-                "drug_allergy",
+                "allergy",
                 "social_history",
                 "review_of_systems",
                 "physical_examination",
@@ -48,13 +48,13 @@ class ClinicalContractBundleTests(unittest.TestCase):
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
+                "34efdb7d7fd5b8dbb9c51d4d8fb2d9892ae367e75784877d15fc00ee425baf2a"
             ),
             "candidate_adjudication_v1.txt": (
-                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
+                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
             ),
             "draft_normalization_v1.txt": (
-                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
+                "75d0735d66183c46b4d640e718b07f8463f8a899f5f6c05d1658fa7c3664fa1f"
             ),
         }
 
@@ -73,16 +73,16 @@ class ClinicalContractBundleTests(unittest.TestCase):
         )
         expected_assets = {
             "contracts/clinical-workflow-v2.schema.json": (
-                "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
+                "1707d4bc4c6e6dcd695832ce349a80c8fe997392efe871f39bbb51f80f0dc3e4"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "a61583aa62ba4ccf5af35d07eee32cd84816980859ad183cdb9e816d95bc7120"
+                "34efdb7d7fd5b8dbb9c51d4d8fb2d9892ae367e75784877d15fc00ee425baf2a"
             ),
             "prompts/candidate_adjudication_v1.txt": (
-                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
+                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
             ),
             "prompts/draft_normalization_v1.txt": (
-                "69bd2f91a65bf8d9d61126932535145d5511e6d81bda3306969056e5583a1f3b"
+                "75d0735d66183c46b4d640e718b07f8463f8a899f5f6c05d1658fa7c3664fa1f"
             ),
         }
 

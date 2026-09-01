@@ -5,13 +5,25 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 import json
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 import httpx2
 from pydantic import ValidationError
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.schemas.clinical_record import WhisperDraftRequest
+from app.database import SessionLocal
+from app.models.clinical_record import ClinicalRecord
+from app.schemas.clinical_record import (
+    ClinicalRecordPersistedResponse,
+    ClinicalRecordSaveRequest,
+    ClinicalRecordSignRequest,
+    WhisperDraftRequest,
+)
 from app.services.clinicalnlp import (
     ClinicalNlpClient,
     ClinicalNlpTimeoutError,
@@ -32,6 +44,133 @@ from app.services.whisper import (
 
 router = APIRouter(prefix="/api/clinical-records", tags=["clinical-records"])
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+def migrate_legacy_allergy_key(value):
+    """Recursively migrate persisted JSON from drug_allergy to allergy."""
+
+    if isinstance(value, list):
+        return [migrate_legacy_allergy_key(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    migrated = {
+        key: migrate_legacy_allergy_key(item)
+        for key, item in value.items()
+        if key != "drug_allergy"
+    }
+    if "allergy" not in migrated and "drug_allergy" in value:
+        migrated["allergy"] = migrate_legacy_allergy_key(value["drug_allergy"])
+    return migrated
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def require_ed_stay(db: Session, ed_stay_id: str) -> None:
+    exists = db.execute(
+        text("SELECT 1 FROM mimic.edstays WHERE stay_id = :stay_id"),
+        {"stay_id": ed_stay_id},
+    ).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="ED stay not found")
+
+
+@router.get(
+    "/by-stay/{ed_stay_id}",
+    response_model=ClinicalRecordPersistedResponse | None,
+)
+def get_persisted_clinical_record(
+    ed_stay_id: str,
+    db: Session = Depends(get_db),
+):
+    record = db.scalar(select(ClinicalRecord).where(ClinicalRecord.ed_stay_id == ed_stay_id))
+    if record is not None:
+        migrated_payload = migrate_legacy_allergy_key(record.record_payload)
+        if migrated_payload != record.record_payload:
+            record.record_payload = migrated_payload
+            db.commit()
+            db.refresh(record)
+    return record
+
+
+@router.put(
+    "/by-stay/{ed_stay_id}",
+    response_model=ClinicalRecordPersistedResponse,
+)
+def save_clinical_record_draft(
+    ed_stay_id: str,
+    payload: ClinicalRecordSaveRequest,
+    db: Session = Depends(get_db),
+):
+    require_ed_stay(db, ed_stay_id)
+    record_payload = migrate_legacy_allergy_key(payload.record_payload)
+    selected_kcd = (
+        [item.model_dump() for item in payload.selected_kcd]
+        if isinstance(payload.selected_kcd, list)
+        else payload.selected_kcd.model_dump()
+        if payload.selected_kcd
+        else None
+    )
+    record = db.scalar(
+        select(ClinicalRecord)
+        .where(ClinicalRecord.ed_stay_id == ed_stay_id)
+        .with_for_update()
+    )
+    if record and record.status == "SIGNED":
+        raise HTTPException(status_code=409, detail="SIGNED record is immutable")
+    if record is None:
+        record = ClinicalRecord(
+            ed_stay_id=ed_stay_id,
+            status="DRAFT",
+            record_payload=record_payload,
+            selected_kcd=selected_kcd,
+            clinician_id=payload.clinician_id,
+            clinician_name=payload.clinician_name,
+        )
+        db.add(record)
+    else:
+        record.record_payload = record_payload
+        record.selected_kcd = selected_kcd
+        record.clinician_id = payload.clinician_id
+        record.clinician_name = payload.clinician_name
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Clinical record already exists") from error
+    db.refresh(record)
+    return record
+
+
+@router.post(
+    "/{record_id}/sign",
+    response_model=ClinicalRecordPersistedResponse,
+)
+def sign_clinical_record(
+    record_id: int,
+    payload: ClinicalRecordSignRequest,
+    db: Session = Depends(get_db),
+):
+    record = db.scalar(
+        select(ClinicalRecord).where(ClinicalRecord.id == record_id).with_for_update()
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Clinical record not found")
+    if record.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Clinical record is already SIGNED")
+    record.status = "SIGNED"
+    record.clinician_id = payload.clinician_id
+    record.clinician_name = payload.clinician_name
+    record.signed_by = payload.clinician_id
+    record.signed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+    return record
 
 
 async def get_clinicalnlp_client() -> AsyncIterator[ClinicalNlpClient | None]:
