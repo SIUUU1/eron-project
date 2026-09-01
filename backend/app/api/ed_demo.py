@@ -83,7 +83,11 @@ def set_speed(
     "/reset",
     response_model=DemoClock,
     summary="데모 시계 초기화",
-    description="실제 시각·실시간 속도로 되돌린다.",
+    description=(
+        "실제 시각·실시간 속도로 되돌리고, **의료진 재검토 확인 기록(app.prediction_ack)을 "
+        "비운다** — 지난 시연의 확인 상태가 새 시연에 남지 않게 한다. "
+        "예측 결과(app.prediction)와 MIMIC 원천 데이터는 지우지 않는다."
+    ),
 )
 def reset(db: Session = Depends(get_db)) -> DemoClock:
     return _to_schema(repo.reset(db))

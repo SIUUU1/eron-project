@@ -19,6 +19,26 @@ JOIN mimic.triage       t  ON t.stay_id    = e.stay_id
 JOIN mimic.patients     p  ON p.subject_id = e.subject_id
 LEFT JOIN app.patient_alias      al ON al.ed_stay_id = e.stay_id
 LEFT JOIN app.v_latest_prediction lp ON lp.stay_id   = e.stay_id
+-- 재검토 필요 알림(도래한 red 예측)과 그 확인 여부를 환자 단위로 집계한다.
+-- 🔑 데모 시각까지 도래한 예측만 센다. 시계를 되돌리면 미래 시점의 알림·확인기록이
+--    빠지므로 과거 상태가 오염되지 않는다.
+LEFT JOIN LATERAL (
+    SELECT count(*)                                              AS alert_total,
+           count(*) FILTER (WHERE ak.acknowledged_at IS NULL)    AS alert_unread
+    FROM app.prediction pr
+    -- ⏱ 확인기록은 데모 시각 기준으로 유효할 때만 센다. 시계를 되돌리면 그보다
+    --    나중에 한 확인은 없는 것으로 보고, 다시 앞으로 가면 되살아난다.
+    LEFT JOIN app.prediction_ack ak ON ak.ed_stay_id = pr.ed_stay_id
+                                   AND ak.prediction_time = pr.prediction_time
+                                   AND ak.acknowledged_demo_at <= app.demo_now()
+    WHERE pr.ed_stay_id = e.stay_id
+      AND pr.prediction_time + d.demo_offset <= app.demo_now()
+      AND (pr.detail->>'alarm')::boolean
+      AND pr.detail->>'band' = 'red'
+      -- 🔑 최신 예측이 재검토 필요일 때만 버튼·✓ 대상이다(실시간 AI 경고와 같은 규칙).
+      AND lp.detail->>'band' = 'red'
+      AND (lp.detail->>'alarm')::boolean
+) alert ON TRUE
 LEFT JOIN app.v_latest_vitalsign  lv ON lv.stay_id   = e.stay_id
 LEFT JOIN app.bed_assignment      ba ON ba.ed_stay_id = e.stay_id AND ba.released_at IS NULL
 LEFT JOIN public.clinical_records cr ON cr.ed_stay_id = CAST(e.stay_id AS text)
@@ -69,6 +89,12 @@ SELECT
     al.display_name,
     lp.risk_level,
     lp.risk_probability,
+    -- 모델이 준 3구간(green/amber/red). 화면 목록의 '현재 위험도'가 이걸 쓴다.
+    -- risk_level(4단계)은 .env RISK_* 경계이고, band 는 bundle.json 실측 경계다.
+    lp.detail->>'band' AS risk_band,
+    -- 재검토 필요 알림 수와 미확인 수. 버튼 활성·목록 ✓ 가 이 값을 쓴다.
+    coalesce(alert.alert_total, 0)  AS alert_total,
+    coalesce(alert.alert_unread, 0) AS alert_unread,
     lv.measured_at,
     lv.heartrate,
     lv.resprate,
@@ -119,6 +145,9 @@ def get_stay(db: Session, stay_id: int) -> Any | None:
             t.pain       AS tri_pain,
             al.display_name,
             lp.risk_level, lp.risk_probability,
+            lp.detail->>'band' AS risk_band,
+            coalesce(alert.alert_total, 0)  AS alert_total,
+            coalesce(alert.alert_unread, 0) AS alert_unread,
             ba.bed_id,
             adm.admission_location,
             EXISTS (SELECT 1 FROM mimic.icustays i WHERE i.hadm_id = e.hadm_id) AS icu_transferred
@@ -160,6 +189,44 @@ def list_predictions(db: Session, stay_id: int) -> list[Any]:
     return list(db.execute(sql, {"stay_id": stay_id}).mappings())
 
 
+# 같은 (stay, 모델버전, 예측시각) 은 한 행이다. 스케줄러가 겹쳐 돌아도 중복이 생기지
+# 않도록 UNIQUE 제약(prediction_unique)에 기대어 upsert 한다.
+# 재실행 시 값이 같으면 그대로, 입력이 늘어 값이 바뀌면 갱신된다.
+_UPSERT_PREDICTION = text("""
+    INSERT INTO app.prediction
+        (ed_stay_id, model_version, prediction_time, t_idx, horizon_minutes,
+         risk_probability, risk_level, detail)
+    VALUES
+        (:ed_stay_id, :model_version, :prediction_time, :t_idx, :horizon_minutes,
+         :risk_probability, :risk_level, CAST(:detail AS jsonb))
+    ON CONFLICT ON CONSTRAINT prediction_unique DO UPDATE
+       SET t_idx            = EXCLUDED.t_idx,
+           horizon_minutes  = EXCLUDED.horizon_minutes,
+           risk_probability = EXCLUDED.risk_probability,
+           risk_level       = EXCLUDED.risk_level,
+           detail           = EXCLUDED.detail
+""")
+
+
+def upsert_predictions(db: Session, rows: list[dict[str, Any]]) -> int:
+    """예측 결과를 app.prediction 에 기록한다. 반환은 기록한 행 수.
+
+    ⚠ prediction_time 은 **MIMIC 원본 시간축**이다. 화면 시각(데모 축)으로 넣으면
+      app.v_latest_prediction 의 `prediction_time + demo_offset <= demo_now()` 판정이
+      깨져 예측이 보이지 않거나 미래 예측이 새어 나온다.
+    """
+    if not rows:
+        return 0
+    db.execute(_UPSERT_PREDICTION, rows)
+    db.commit()
+    return len(rows)
+
+
 def stay_exists(db: Session, stay_id: int) -> bool:
-    sql = text("SELECT 1 FROM mimic.edstays WHERE stay_id = :stay_id")
+    """조회 가능한 stay 인가 = 데모 예측 대상인가.
+
+    ⚠ mimic.edstays 로 판정하면 안 된다. 그 테이블에는 예측 대상 밖의 과거 내원까지
+      들어 있어(raw source), 코호트에 없는 stay_id 가 404 대신 빈 200 을 받게 된다.
+    """
+    sql = text("SELECT 1 FROM app.cohort WHERE ed_stay_id = :stay_id")
     return db.execute(sql, {"stay_id": stay_id}).first() is not None

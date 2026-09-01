@@ -47,7 +47,25 @@ class EdStayListItem(BaseModel):
     chief_complaint: str | None = None
     chief_complaint_detail: str | None = None
     risk_level: str | None = Field(None, description="모델 미연동 시 null")
+    risk_band: str | None = Field(
+        None,
+        description=(
+            "모델의 3구간 — green(저위험) | amber(관찰 필요) | red(재평가 필요). "
+            "bundle.json risk_bands 실측 경계이며 risk_level(.env RISK_* 4단계)의 상위 분류다. "
+            "화면 목록의 '현재 위험도'가 이 값을 쓴다. 모델 미연동 시 null"
+        ),
+    )
     risk_probability: float | None = Field(None, description="0.0~1.0. 모델 미연동 시 null")
+    alert_total: int = Field(
+        0, description="현재 데모 시각까지 도래한 재검토 필요(red) 알림 수"
+    )
+    alert_unread: int = Field(
+        0, description="그중 아직 확인하지 않은 수. 0 보다 크면 '의료진 재검토' 버튼이 활성"
+    )
+    reviewed: bool = Field(
+        False,
+        description="재검토 필요 알림이 있고 **전부 확인**된 상태. 목록의 ✓ 표시 조건",
+    )
     latest_vital: LatestVital
     bed_id: str | None = Field(None, description="데모 배정 (D2)")
     record_status: str | None = Field(None, description="DRAFT | SIGNED. 기록이 없으면 null")
@@ -115,6 +133,12 @@ class EdStayDetail(BaseModel):
     disposition: str | None = None
     hospital: HospitalInfo
     risk_level: str | None = None
+    risk_band: str | None = Field(
+        None, description="모델 3구간 — green(저위험) | amber(관찰 필요) | red(재평가 필요)"
+    )
     risk_probability: float | None = None
+    alert_total: int = Field(0, description="도래한 재검토 필요(red) 알림 수")
+    alert_unread: int = Field(0, description="아직 확인하지 않은 재검토 필요 알림 수")
+    reviewed: bool = Field(False, description="재검토 필요 알림이 있고 전부 확인됐는가")
     bed_id: str | None = None
     meta: Meta

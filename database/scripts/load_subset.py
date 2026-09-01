@@ -46,6 +46,35 @@ DEMO_START = "--demo-start" in sys.argv
 DEMO_START_JITTER_MIN = 30
 SEED = os.environ.get("COHORT_SEED", "20260826")
 
+# --events-only : labevents / chartevents 만 다시 적재한다.
+# 전체 적재는 app.demo_stay 를 새로 뽑아 시연 시나리오가 바뀌므로, 검사·ICU 활력징후만
+# 고칠 때는 이 모드를 쓴다.
+EVENTS_ONLY = "--events-only" in sys.argv
+
+# --raw-history : mimic.edstays / mimic.admissions 를 코호트 환자의 전체 ED 이력으로
+# 보완한다. 없는 행만 추가하므로 기존 시연 상태(app.demo_stay·bed_assignment)를 건드리지 않는다.
+RAW_HISTORY = "--raw-history" in sys.argv
+
+# chartevents 에 whitelist 를 걸되, 목록은 모델 번들에서 읽는다.
+# 코드에 itemid 를 적어두면 모델이 개정될 때 조용히 어긋난다(실제로 224690 이 빠져 있었다).
+BUNDLE = Path(os.environ.get("ARTIFACTS_DIR", REPO / "artifacts")) / "bundle.json"
+
+# 모델이 쓰지 않지만 기존 적재에 포함돼 있던 항목. 데이터를 줄이는 것은 별도 결정이라
+# 그대로 유지한다. (223835 = FiO2)
+CHARTEVENTS_EXTRA_ITEMS = {"223835"}
+
+
+def chartevents_itemids() -> set[str]:
+    """artifacts/bundle.json["vital_itemids"] + 기존 유지 항목."""
+    if not BUNDLE.exists():
+        log(f"[FATAL] 모델 번들을 찾을 수 없습니다: {BUNDLE}")
+        log("        ARTIFACTS_DIR 를 지정하거나 artifacts/ 를 저장소 루트에 두세요.")
+        raise SystemExit(2)
+    import json
+    bundle = json.loads(BUNDLE.read_text(encoding="utf-8"))
+    wanted = {str(i) for ids in bundle["vital_itemids"].values() for i in ids}
+    return wanted | CHARTEVENTS_EXTRA_ITEMS
+
 
 # --------------------------------------------------------------------- utils
 
@@ -90,7 +119,212 @@ def as_int(v: str) -> str:
 
 # --------------------------------------------------------------------- main
 
+def load_clinical_events(hosp: Path, icu: Path, subjects: set, hadms: set) -> dict[str, int]:
+    """labevents · chartevents 적재.
+
+    🔑 labevents 에는 시간창을 걸지 않는다. 코호트 환자의 검사 이력 전체를 담는다.
+       모델의 lab_*_dt(마지막 검사 이후 경과시간)·lab_*_last 는 수개월~수년 전 검사까지
+       참조하도록 학습됐다. 체류 구간 근처만 담으면 참조 대상이 더 과거로 밀려
+       배치와 값이 어긋난다 — 에러 없이 성능만 떨어지므로 발견하기 어렵다.
+       관측 시점 컷오프(storetime <= t)는 feature layer 가 적용한다.
+
+    chartevents 는 itemid whitelist 를 걸되 목록을 모델 번들에서 읽는다.
+    """
+    counts: dict[str, int] = {}
+
+    # labevents: labevent_id,subject_id,hadm_id,specimen_id,itemid,order_provider_id,
+    #            charttime,storetime,value,valuenum,valueuom,...
+    def rows_labevents():
+        it = stream(require(hosp / "labevents.csv.gz")); next(it)
+        for r_ in it:
+            if r_[1] in subjects and r_[6]:
+                yield [r_[0], r_[1], r_[2], r_[4], r_[6], r_[7], r_[9]]
+
+    counts["mimic.labevents"] = copy_rows(
+        "mimic.labevents",
+        ["labevent_id", "subject_id", "hadm_id", "itemid",
+         "charttime", "storetime", "valuenum"],
+        rows_labevents())
+    log(f"  labevents       {counts['mimic.labevents']:>6}  (시간창 없음 · 전체 이력)")
+
+    # chartevents: subject_id,hadm_id,stay_id,caregiver_id,charttime,storetime,itemid,
+    #              value,valuenum,valueuom,warning
+    items = chartevents_itemids()
+    log(f"  chartevents itemid whitelist {len(items)}종 (bundle.json 기준)")
+
+    def rows_chartevents():
+        it = stream(require(icu / "chartevents.csv.gz")); next(it)
+        for r_ in it:
+            if r_[1] in hadms and r_[6] in items and r_[4]:
+                yield [r_[2], r_[0], r_[1], r_[6], r_[4], r_[8]]
+
+    counts["mimic.chartevents"] = copy_rows(
+        "mimic.chartevents",
+        ["icu_stay_id", "subject_id", "hadm_id", "itemid", "charttime", "valuenum"],
+        rows_chartevents())
+    log(f"  chartevents     {counts['mimic.chartevents']:>6}")
+    return counts
+
+
+def raw_history() -> int:
+    """mimic.edstays · mimic.admissions 를 코호트 환자의 전체 이력으로 보완한다(추가만).
+
+    lab 관찰창의 하한 t0 = "그 환자의 최초 ED 내원 - 24h" 를 재현하려면 예측 대상 밖의
+    과거 내원까지 raw source 에 있어야 한다. 예측 대상(app.cohort)은 그대로 둔다.
+    """
+    ed = require(ROOT / "MIMIC-IV-ED")
+    hosp = require(ROOT / "MIMIC-IV-HOSP")
+
+    log("[1/4] 스키마 적용 …")
+    psql_file(require(INIT / "01_schema.sql"))
+
+    cohort = db_rows("SELECT ed_stay_id, subject_id FROM app.cohort ORDER BY ed_stay_id")
+    if not cohort:
+        log("[FATAL] app.cohort 가 비어 있습니다.")
+        return 2
+    subjects = {r[1] for r in cohort}
+    have_stays = {r[0] for r in db_rows("SELECT stay_id FROM mimic.edstays")}
+    have_hadms = {r[0] for r in db_rows("SELECT hadm_id FROM mimic.admissions")}
+    log(f"코호트 subject {len(subjects)} · 현재 edstays {len(have_stays)} · admissions {len(have_hadms)}")
+
+    # admissions 를 먼저 넣어야 fk_edstays_hadm 이 깨지지 않는다.
+    log("[2/4] admissions 보완 …")
+
+    def rows_admissions():
+        it = stream(require(hosp / "admissions.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[1] not in have_hadms:
+                have_hadms.add(r_[1])
+                yield [r_[1], r_[0], r_[2], r_[3], r_[4], r_[5], r_[7], r_[8],
+                       r_[9], r_[11], r_[12], r_[13], r_[14], as_int(r_[15])]
+
+    n_adm = copy_rows(
+        "mimic.admissions",
+        ["hadm_id", "subject_id", "admittime", "dischtime", "deathtime", "admission_type",
+         "admission_location", "discharge_location", "insurance", "marital_status",
+         "race", "edregtime", "edouttime", "hospital_expire_flag"],
+        rows_admissions())
+    log(f"  admissions  +{n_adm}")
+
+    log("[3/4] edstays 보완 …")
+
+    def rows_edstays():
+        it = stream(require(ed / "edstays.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[2] not in have_stays:
+                have_stays.add(r_[2])
+                yield [r_[2], r_[0], r_[1], r_[3], r_[4], r_[5], r_[6], r_[7], r_[8]]
+
+    n_ed = copy_rows(
+        "mimic.edstays",
+        ["stay_id", "subject_id", "hadm_id", "intime", "outtime",
+         "gender", "race", "arrival_transport", "disposition"],
+        rows_edstays())
+    log(f"  edstays     +{n_ed}")
+
+    log("[4/4] 인덱스 · 제약 · 검증 …")
+    psql_file(require(INIT / "02_indexes.sql"))
+    psql_file(require(INIT / "03_constraints.sql"))
+
+    ok = True
+
+    def check(label: str, sql: str, expect: str) -> None:
+        nonlocal ok
+        got = scalar(sql)
+        good = got == expect
+        ok = ok and good
+        log(f"  {'✅' if good else '❌'} {label:<40} = {got:<8} (expect {expect})")
+
+    check("코호트 → edstays 미적재", """count(*) FROM app.cohort c
+            WHERE NOT EXISTS (SELECT 1 FROM mimic.edstays e WHERE e.stay_id = c.ed_stay_id)""", "0")
+    check("edstays 가 코호트 환자만 담는가", """count(*) FROM mimic.edstays e
+            WHERE NOT EXISTS (SELECT 1 FROM app.cohort c WHERE c.subject_id = e.subject_id)""", "0")
+    check("edstays→admissions 고아", """count(*) FROM mimic.edstays e
+            WHERE e.hadm_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM mimic.admissions a WHERE a.hadm_id = e.hadm_id)""", "0")
+    check("예측 대상(app.cohort) 불변", "count(*) FROM app.cohort",
+          str(len(cohort)))
+    check("데모 시간축 불변", "count(*) FROM app.demo_stay", str(len(cohort)))
+
+    log("")
+    log(f"  mimic.edstays = {scalar('count(*) FROM mimic.edstays')} (raw 전체 ED 이력)")
+    log(f"  app.cohort    = {scalar('count(*) FROM app.cohort')} (예측 대상)")
+    log("")
+    if not ok:
+        log("❌ 검증 실패")
+        return 1
+    log("✅ raw ED 이력 보완 완료")
+    return 0
+
+
+def events_only() -> int:
+    """labevents · chartevents 만 다시 적재한다. 시연 상태(app.*)는 건드리지 않는다."""
+    hosp = require(ROOT / "MIMIC-IV-HOSP")
+    icu = require(ROOT / "MIMIC-IV-ICU")
+
+    log("[1/4] 스키마 적용 …")
+    psql_file(require(INIT / "01_schema.sql"))
+
+    cohort = db_rows("SELECT ed_stay_id, subject_id, hadm_id FROM app.cohort ORDER BY ed_stay_id")
+    if not cohort:
+        log("[FATAL] app.cohort 가 비어 있습니다.")
+        return 2
+    subjects = {r[1] for r in cohort}
+    hadms = {r[2] for r in cohort if r[2]}
+    log(f"코호트: subject {len(subjects)} · hadm {len(hadms)}")
+
+    before_lab = scalar("count(*) FROM mimic.labevents")
+    before_chart = scalar("count(*) FROM mimic.chartevents")
+
+    log("[2/4] 대상 테이블만 비우기 …")
+    psql("TRUNCATE mimic.labevents, mimic.chartevents RESTART IDENTITY;")
+
+    log("[3/4] 재적재 …")
+    counts = load_clinical_events(hosp, icu, subjects, hadms)
+
+    log("[4/4] 인덱스 · 제약 · 검증 …")
+    psql_file(require(INIT / "02_indexes.sql"))
+    psql_file(require(INIT / "03_constraints.sql"))
+
+    after_lab = scalar("count(*) FROM mimic.labevents")
+    after_chart = scalar("count(*) FROM mimic.chartevents")
+    log("")
+    log(f"  labevents   {before_lab:>8} → {after_lab:>8}")
+    log(f"  chartevents {before_chart:>8} → {after_chart:>8}")
+
+    ok = True
+
+    def check(label: str, sql: str, expect: str) -> None:
+        nonlocal ok
+        got = scalar(sql)
+        good = got == expect
+        ok = ok and good
+        log(f"  {'✅' if good else '❌'} {label:<38} = {got:<8} (expect {expect})")
+
+    check("lab 고아행(subject 미존재)", """count(*) FROM mimic.labevents l
+            WHERE NOT EXISTS (SELECT 1 FROM mimic.patients p WHERE p.subject_id = l.subject_id)""", "0")
+    check("chart 고아행(ICU stay 미존재)", """count(*) FROM mimic.chartevents c
+            WHERE NOT EXISTS (SELECT 1 FROM mimic.icustays i WHERE i.icu_stay_id = c.icu_stay_id)""", "0")
+    check("lab charttime 결측", "count(*) FROM mimic.labevents WHERE charttime IS NULL", "0")
+    check("storetime 역전(보고 < 채혈)",
+          "count(*) FROM mimic.labevents WHERE storetime < charttime", "0")
+    check("모델 vital itemid 미적재",
+          f"""count(*) FROM (VALUES {','.join(f"('{i}')" for i in sorted(chartevents_itemids() - CHARTEVENTS_EXTRA_ITEMS))}) v(i)
+              WHERE NOT EXISTS (SELECT 1 FROM mimic.chartevents c WHERE c.itemid = v.i::int)""", "0")
+
+    log("")
+    if not ok:
+        log("❌ 검증 실패 — 적재를 신뢰할 수 없습니다.")
+        return 1
+    log(f"✅ 재적재 완료 · {sum(counts.values()):,} 행")
+    return 0
+
+
 def main() -> int:
+    if RAW_HISTORY:
+        return raw_history()
+    if EVENTS_ONLY:
+        return events_only()
     ed = require(ROOT / "MIMIC-IV-ED")
     hosp = require(ROOT / "MIMIC-IV-HOSP")
     icu = require(ROOT / "MIMIC-IV-ICU")
@@ -120,6 +354,7 @@ def main() -> int:
         DROP VIEW IF EXISTS mimic.v_ed_vitalsign_clean CASCADE;
         TRUNCATE app.alert, app.bed_assignment, app.bed, app.demo_stay,
                  app.patient_alias, app.prediction,
+                 mimic.labevents, mimic.chartevents,
                  mimic.ed_vitalsign, mimic.ed_diagnosis, mimic.triage,
                  mimic.icustays, mimic.edstays, mimic.admissions, mimic.patients
         RESTART IDENTITY CASCADE;
@@ -148,10 +383,13 @@ def main() -> int:
     log(f"  patients        {counts['mimic.patients']:>6}")
 
     # admissions
+    # 🔑 코호트 hadm 이 아니라 코호트 subject 전체를 담는다.
+    #    mimic.edstays 가 그 환자의 전체 ED 이력을 보존하므로(아래), 그 stay 들이 참조하는
+    #    hadm 이 없으면 fk_edstays_hadm 이 깨진다. obs_end 계산에도 dischtime/deathtime 이 필요하다.
     def rows_admissions():
         it = stream(require(hosp / "admissions.csv.gz")); next(it)
         for r_ in it:
-            if r_[1] in hadms:
+            if r_[0] in subjects:
                 yield [r_[1], r_[0], r_[2], r_[3], r_[4], r_[5], r_[7], r_[8],
                        r_[9], r_[11], r_[12], r_[13], r_[14], as_int(r_[15])]
 
@@ -164,12 +402,21 @@ def main() -> int:
     log(f"  admissions      {counts['mimic.admissions']:>6}")
 
     # edstays: subject_id,hadm_id,stay_id,intime,outtime,gender,race,arrival_transport,disposition
+    #
+    # 🔑 raw clinical source 와 prediction cohort 를 구분한다.
+    #      mimic.edstays = 코호트 환자의 **전체 ED 내원 이력** (raw source)
+    #      app.cohort    = ER:ON 데모의 **예측 대상** (그 부분집합)
+    #    lab feature 의 관찰창 하한 t0 는 "그 환자의 최초 ED 내원 - 24h" 라서,
+    #    코호트 stay 만 담으면 t0 가 뒤로 밀려 배치와 값이 어긋난다(실측 34명 중 17명만 일치).
+    #    demo_stay·triage·vitalsign 은 예측 대상(app.cohort)에만 만든다.
     def rows_edstays():
         it = stream(require(ed / "edstays.csv.gz")); next(it)
         for r_ in it:
-            if r_[2] in stays:
-                intimes[r_[2]] = r_[3]
-                outtimes[r_[2]] = r_[4]
+            if r_[0] in subjects:
+                if r_[2] in stays:
+                    # 데모 시간축 기준점은 예측 대상 stay 에서만 뽑는다
+                    intimes[r_[2]] = r_[3]
+                    outtimes[r_[2]] = r_[4]
                 yield [r_[2], r_[0], r_[1], r_[3], r_[4], r_[5], r_[6], r_[7], r_[8]]
 
     counts["mimic.edstays"] = copy_rows(
@@ -240,6 +487,8 @@ def main() -> int:
          "intime", "outtime", "los"],
         rows_icustays())
     log(f"  icustays        {counts['mimic.icustays']:>6}")
+
+    counts.update(load_clinical_events(hosp, icu, subjects, hadms))
 
     # 4) app 스캐폴딩 (D1 가명 · D6 데모 시간축 · D2 병상)
     log("[4/6] app 스키마 시드 …")
@@ -313,16 +562,21 @@ def main() -> int:
     counts["app.demo_stay"] = copy_rows(
         "app.demo_stay", ["ed_stay_id", "now_ref", "is_active"], rows_demo())
 
-    # D2: 병상 36개 (6구역 × 6). 프론트 mock 구역명과 동일하게 맞춘다.
-    zones = [("A", "A 구역 (Resus)"), ("B", "B 구역"), ("C", "C 구역"),
-             ("D", "D 구역"), ("E", "E 구역"), ("F", "F 구역")]
+    # D2: 병상 84개 (14구역 × 6). 화면 현황판은 이걸 48 + 36 두 페이지로 나눠 그린다.
+    # 🔑 구역당 6병상을 유지해야 페이지 경계(A~H = 48, I~N = 36)가 구역을 쪼개지 않는다.
+    zones = [(chr(ord("A") + i), f"{chr(ord('A') + i)} 구역") for i in range(14)]
+    zones[0] = ("A", "A 구역 (Resus)")
     beds = [(f"{p}{i:02d}", label, zi * 10 + i)
             for zi, (p, label) in enumerate(zones) for i in range(1, 7)]
     counts["app.bed"] = copy_rows("app.bed", ["bed_id", "zone", "sort_order"], beds)
 
-    # 데모 배정: 36병상 중 28개 사용. 결정론적으로 고른다.
+    # 데모 배정: 코호트 전원에게 병상을 준다. 목록에 보이는 환자가 현황판에도 보여야 한다.
+    # (퇴실한 환자는 조회 시점에 v_demo_stay 가 걸러내므로 그 병상은 빈 병상으로 나온다)
     ranked = sorted(ordered, key=lambda s: hashlib.md5(f"{SEED}:bed:{s}".encode()).hexdigest())
-    assigned = ranked[:28]
+    assigned = ranked[:len(beds)]
+    if len(ranked) > len(beds):
+        log(f"[WARN] 코호트 {len(ranked)}명 > 병상 {len(beds)}개 — "
+            f"{len(ranked) - len(beds)}명은 현황판에 나오지 않는다")
     counts["app.bed_assignment"] = copy_rows(
         "app.bed_assignment", ["bed_id", "ed_stay_id", "devices"],
         ([beds[i][0], s, "{}"] for i, s in enumerate(assigned)))
@@ -356,10 +610,13 @@ def main() -> int:
         ok = ok and good
         log(f"  {'✅' if good else '❌'} {label:<38} = {got:<8} (expect {expect})")
 
-    check("edstays 건수", "count(*) FROM mimic.edstays",
-          scalar("count(*) FROM app.cohort"))
+    # edstays 는 코호트보다 크다(전체 ED 이력). 개수가 아니라 포함관계를 본다.
     check("코호트 → edstays 미적재", """count(*) FROM app.cohort c
             WHERE NOT EXISTS (SELECT 1 FROM mimic.edstays e WHERE e.stay_id = c.ed_stay_id)""", "0")
+    check("edstays 가 코호트 환자만 담는가", """count(*) FROM mimic.edstays e
+            WHERE NOT EXISTS (SELECT 1 FROM app.cohort c WHERE c.subject_id = e.subject_id)""", "0")
+    log(f"  ·  mimic.edstays = {scalar('count(*) FROM mimic.edstays')} (raw 전체 ED 이력)"
+        f" · app.cohort = {scalar('count(*) FROM app.cohort')} (예측 대상)")
     check("triage 건수", "count(*) FROM mimic.triage", scalar("count(*) FROM app.cohort"))
     check("가명 건수", "count(*) FROM app.patient_alias", scalar("count(*) FROM app.cohort"))
     check("데모 시간축 건수", "count(*) FROM app.demo_stay", scalar("count(*) FROM app.cohort"))
@@ -372,7 +629,9 @@ def main() -> int:
     check("edstays→admissions 고아", """count(*) FROM mimic.edstays e
             WHERE e.hadm_id IS NOT NULL
               AND NOT EXISTS (SELECT 1 FROM mimic.admissions a WHERE a.hadm_id = e.hadm_id)""", "0")
+    # 계층은 예측 대상(app.cohort) 기준이다. raw 이력까지 세면 안 된다.
     check("ICU 이동 stay(계층 A)", """count(DISTINCT e.stay_id) FROM mimic.edstays e
+            JOIN app.cohort c ON c.ed_stay_id = e.stay_id
             JOIN mimic.icustays i ON i.hadm_id = e.hadm_id""",
           scalar("count(*) FROM app.cohort WHERE tier = 'A'"))
     check("acuity 결측", "count(*) FROM mimic.triage WHERE acuity IS NULL", "0")

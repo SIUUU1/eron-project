@@ -19,6 +19,17 @@ CREATE INDEX IF NOT EXISTS ix_vitalsign_stay_time ON mimic.ed_vitalsign (stay_id
 -- ICU 이동 여부 판정
 CREATE INDEX IF NOT EXISTS ix_icustays_hadm       ON mimic.icustays (hadm_id);
 
+-- 검사 결과: 모델 어댑터가 subject_id + storetime 으로 훑는다.
+-- itemid 단독 인덱스는 itemid 목록으로 거르는 IN 절을 위한 것이다.
+CREATE INDEX IF NOT EXISTS ix_labevents_subject_time ON mimic.labevents (subject_id, charttime);
+CREATE INDEX IF NOT EXISTS ix_labevents_subject_store ON mimic.labevents (subject_id, storetime);
+CREATE INDEX IF NOT EXISTS ix_labevents_item          ON mimic.labevents (itemid);
+
+-- ICU 활력징후: 모델 어댑터가 hadm_id + charttime 으로 훑는다.
+CREATE INDEX IF NOT EXISTS ix_chartevents_hadm_time   ON mimic.chartevents (hadm_id, charttime);
+CREATE INDEX IF NOT EXISTS ix_chartevents_stay_time   ON mimic.chartevents (icu_stay_id, charttime);
+CREATE INDEX IF NOT EXISTS ix_chartevents_item_time   ON mimic.chartevents (itemid, charttime);
+
 -- 예측: 최신 1건 + 확률 추이
 CREATE INDEX IF NOT EXISTS ix_prediction_stay_time ON app.prediction (ed_stay_id, prediction_time DESC);
 CREATE INDEX IF NOT EXISTS ix_prediction_level     ON app.prediction (risk_level);

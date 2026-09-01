@@ -1,3 +1,7 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -25,6 +29,7 @@ from app.api.ed_dashboard import router as ed_dashboard_router
 from app.api.ed_demo import router as ed_demo_router
 from app.api.clinical_records import router as clinical_record_router
 from app.api.kcd import router as kcd_router
+from app.services import prediction_runner
 
 
 # public 스키마의 기존 CRUD 도메인만 생성한다.
@@ -32,10 +37,41 @@ from app.api.kcd import router as kcd_router
 Base.metadata.create_all(bind=engine)
 
 
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """재예측 스케줄러를 앱 수명에 맞춰 띄운다.
+
+    PREDICT_AI_URL 이 없거나 PREDICT_SCHEDULER_ENABLED=false 면 띄우지 않는다.
+    riskmodel profile 이 꺼져 있어도 backend 는 정상 기동하며, 스케줄러는 매 주기
+    실패를 삼키고 다음 주기에 다시 시도한다.
+    """
+    task: asyncio.Task | None = None
+    if settings.predict_scheduler_enabled and settings.predict_ai_url:
+        task = asyncio.create_task(prediction_runner.scheduler_loop())
+    else:
+        logger.info(
+            "재예측 스케줄러 미기동 (enabled=%s · PREDICT_AI_URL=%s)",
+            settings.predict_scheduler_enabled, settings.predict_ai_url,
+        )
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 app = FastAPI(
     title="ER:ON Backend",
     description="AI 기반 응급실 통합 지원시스템 Backend",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 

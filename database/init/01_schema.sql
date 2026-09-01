@@ -107,6 +107,44 @@ CREATE TABLE IF NOT EXISTS mimic.icustays (
 );
 
 
+-- 검사 결과. 악화 예측 모델(services/riskmodel)의 lab feature 36개가 여기서 나온다.
+--
+-- 🔑 시간창으로 자르지 않는다. 모델의 lab_*_dt / lab_*_last 는 "환자의 마지막 검사가
+--    언제였나" 를 보는 feature 이고, 학습 분포상 그 간격의 중앙값이 약 95일,
+--    99 분위가 약 5.6년이다(artifacts/feature_spec.json). 체류 구간 근처만 적재하면
+--    참조 대상이 더 과거의 검사로 밀려 배치와 값이 어긋난다 — 에러 없이 성능만 떨어진다.
+--    관측 시점 컷오프(storetime <= t)는 DB 가 아니라 feature layer 가 적용한다.
+--
+-- itemid 화이트리스트도 걸지 않는다. 걸어두면 모델 개정으로 필요한 검사가 늘 때
+-- 조용히 결측이 된다.
+--
+-- hadm_id 에는 FK 를 걸지 않는다. 응급실에서 귀가한 환자의 검사는 입원 건에 묶이지
+-- 않아 NULL 비율이 높고, 시간창에 코호트 밖 입원의 검사가 걸릴 수 있다.
+CREATE TABLE IF NOT EXISTS mimic.labevents (
+    labevent_id BIGINT PRIMARY KEY,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    itemid      INTEGER   NOT NULL,
+    charttime   TIMESTAMP NOT NULL,   -- 채혈 시각
+    storetime   TIMESTAMP,            -- 결과 보고 시각. feature 는 이쪽을 쓴다
+    valuenum    DOUBLE PRECISION
+);
+
+-- ICU 활력징후. ED 퇴실 후 구간을 메우는 보조 원천이다(커버리지 낮음).
+--
+-- itemid 는 artifacts/bundle.json["vital_itemids"] 를 그대로 쓴다. 적재 스크립트가
+-- 그 파일에서 읽으므로 여기에 목록을 적어두지 않는다 — 두 곳에 적으면 어긋난다.
+-- 원본 stay_id 는 ED 의 stay_id 와 다른 식별자 체계라 icu_stay_id 로 이름을 분리한다.
+CREATE TABLE IF NOT EXISTS mimic.chartevents (
+    id          BIGSERIAL PRIMARY KEY,
+    icu_stay_id BIGINT    NOT NULL,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT    NOT NULL,
+    itemid      INTEGER   NOT NULL,
+    charttime   TIMESTAMP NOT NULL,
+    valuenum    DOUBLE PRECISION
+);
+
 -- ---------------------------------------------------------------------
 -- app 스키마
 -- ---------------------------------------------------------------------
@@ -196,6 +234,42 @@ CREATE TABLE IF NOT EXISTS app.bed_assignment (
     assigned_at TIMESTAMP NOT NULL DEFAULT now(),
     released_at TIMESTAMP
 );
+
+-- 의료진 "재검토 완료" 확인 상태.
+--
+-- 🔑 경고 자체는 app.prediction 에서 조회 시점에 파생한다(app.alert 는 쓰지 않는다).
+--    여기 저장하는 것은 **의료진이 확인했다는 사실** 하나뿐이다.
+--
+-- 🔑 PK 에 prediction_time 을 포함하는 이유
+--    확인은 "그 시점 예측에 대한 확인"이다. 다음 예측이 생기면 최신 prediction_time 이
+--    달라져 이 행과 짝이 맞지 않으므로 확인 표시가 저절로 풀린다.
+--    (별도 리셋 스케줄러가 필요 없다 — 최신 예측과의 관계로 계산한다)
+--
+-- ⚠ 모델의 alarm/band 를 바꾸지 않는다. AI 상태와 의료진 확인 상태는 별개다.
+CREATE TABLE IF NOT EXISTS app.prediction_ack (
+    ed_stay_id      BIGINT    NOT NULL,
+    -- app.prediction.prediction_time 과 같은 **MIMIC 원본 시간축**이다.
+    prediction_time TIMESTAMP NOT NULL,
+    -- ⏱ 실제 서버 시각(감사 기록용).
+    acknowledged_at TIMESTAMP NOT NULL DEFAULT now(),
+    -- ⏱ **데모 시각**. 확인이 유효한지는 이 값으로 판정한다.
+    --    데모 시계를 되돌리면 그보다 나중에 한 확인은 '아직 하지 않은 것'이 되어야 한다
+    --    (기록을 지우지 않고 시간 기준으로만 무효화한다 — 다시 앞으로 가면 되살아난다).
+    acknowledged_demo_at TIMESTAMP NOT NULL DEFAULT app.demo_now(),
+    acknowledged_by TEXT,
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (ed_stay_id, prediction_time)
+);
+
+-- 기존 배포본 보완 (컬럼이 없으면 추가하고 데모 현재 시각으로 채운다)
+ALTER TABLE app.prediction_ack
+    ADD COLUMN IF NOT EXISTS acknowledged_demo_at TIMESTAMP;
+UPDATE app.prediction_ack SET acknowledged_demo_at = app.demo_now()
+ WHERE acknowledged_demo_at IS NULL;
+ALTER TABLE app.prediction_ack
+    ALTER COLUMN acknowledged_demo_at SET NOT NULL,
+    ALTER COLUMN acknowledged_demo_at SET DEFAULT app.demo_now();
+
 
 -- 모델 연동 전까지 비어 있다 (가짜 경고를 만들지 않는다)
 CREATE TABLE IF NOT EXISTS app.alert (

@@ -1,23 +1,46 @@
-"""ED stay 조회 API (읽기 전용).
+"""ED stay 조회 API.
 
 기존 /api/patients 는 자체 CRUD 도메인이라 그대로 두고, MIMIC 기반 조회는
 /api/ed/* 신규 네임스페이스를 쓴다 (docs/architecture.md §6, D4 확정).
+
+조회 전용이지만 예측 갱신(POST /predictions/run) 하나만 예외다. 쓰기 대상은
+app.prediction 이며 MIMIC 원천 데이터는 건드리지 않는다. 평소에는 스케줄러가
+같은 일을 하고, 이 endpoint 는 데모 시계를 움직인 직후 즉시 반영할 때 쓴다.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
+import httpx2
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.deps import get_db
 from app.repositories import dashboard as dashboard_repo
 from app.repositories import ed_stays as repo
-from app.schemas.ed.prediction import PredictionMeta, PredictionsResponse
+from app.schemas.ed.prediction import PredictionMeta, PredictionsResponse, PredictionRunResult
 from app.schemas.ed.stay import EdStayDetail, EdStayPage, LatestVital
 from app.schemas.ed.vitals import VitalsMeta, VitalsResponse
 from app.services import ed as svc
+from app.services import prediction_runner
+from app.services.riskmodel import RiskModelClient
 
 router = APIRouter(prefix="/api/ed", tags=["ED Stays"])
+
+
+async def get_riskmodel_client() -> AsyncIterator[RiskModelClient | None]:
+    """PREDICT_AI_URL 이 없으면 None. 호출부가 503 으로 바꾼다."""
+    if not settings.predict_ai_url:
+        yield None
+        return
+    async with httpx2.AsyncClient() as http_client:
+        yield RiskModelClient(
+            base_url=settings.predict_ai_url,
+            timeout_seconds=settings.predict_ai_timeout_seconds,
+            http_client=http_client,
+        )
 
 RISK_LEVELS = {"critical", "rising", "watch", "stable"}
 
@@ -147,5 +170,34 @@ def get_stay_predictions(stay_id: int, db: Session = Depends(get_db)) -> Predict
         predictions=[svc.to_prediction_point(r) for r in rows],
         latest=svc.latest_prediction(rows),
         count=len(rows),
-        meta=PredictionMeta(model_connected=bool(rows)),
+        meta=PredictionMeta.for_rows(bool(rows)),
     )
+
+
+@router.post(
+    "/predictions/run",
+    response_model=PredictionRunResult,
+    summary="악화 예측 갱신",
+    description=(
+        "스케줄러와 **같은 로직**으로 이번 슬롯에 계산이 필요한 환자만 재예측한다. "
+        "`all=true` 면 코호트 전원을 다시 계산한다(데모 시계를 되돌린 뒤 복구용). "
+        "같은 예측 시점을 다시 계산해도 행이 늘지 않는다(멱등)."
+    ),
+    responses={503: {"description": "예측 서비스 미연동 또는 연결 실패"}},
+)
+async def run_predictions(
+    db: Session = Depends(get_db),
+    client: RiskModelClient | None = Depends(get_riskmodel_client),
+    all: bool = Query(  # noqa: A002 — 쿼리 파라미터 이름을 화면 계약에 맞춘다
+        False,
+        description="true 면 코호트 전원을 다시 계산한다(데모 시계를 되돌린 뒤 복구용)",
+    ),
+) -> PredictionRunResult:
+    if client is None:
+        raise HTTPException(status_code=503, detail="PREDICT_AI_URL is not configured")
+    # 스케줄러와 같은 선택 로직을 쓴다. 슬롯 기준도 동일하게 '지금까지 도래한 슬롯'.
+    slot = None if all else prediction_runner.current_slot(prediction_runner.demo_now(db))
+    summary = await prediction_runner.run_once(db, client, force_all=all, slot_limit=slot)
+    if summary["failed"] and not summary["scored"]:
+        raise HTTPException(status_code=503, detail="risk model service unavailable")
+    return PredictionRunResult(**summary)

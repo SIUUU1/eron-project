@@ -20,7 +20,7 @@ from app.schemas.ed.dashboard import (
     BedZone,
     ReassessItem,
 )
-from app.schemas.ed.prediction import LatestPrediction, PredictionPoint
+from app.schemas.ed.prediction import LatestPrediction, PredictionPoint, RiskSignal
 from app.schemas.ed.stay import (
     EdStayDetail,
     EdStayListItem,
@@ -104,7 +104,12 @@ def to_list_item(row: Any) -> EdStayListItem:
         chief_complaint=(complaint.split(",")[0].strip() if complaint else None),
         chief_complaint_detail=complaint,
         risk_level=row["risk_level"],
+        risk_band=row["risk_band"],
         risk_probability=row["risk_probability"],
+        alert_total=row["alert_total"],
+        alert_unread=row["alert_unread"],
+        # 재검토 필요 알림이 있고 전부 확인된 상태에서만 ✓ 를 띄운다.
+        reviewed=bool(row["alert_total"]) and not row["alert_unread"],
         latest_vital=_latest_vital(row),
         bed_id=row["bed_id"],
         record_status=row["record_status"],
@@ -146,7 +151,11 @@ def to_detail(row: Any, cohort_size: int | None, *, model_connected: bool = Fals
             icu_transferred=bool(row["icu_transferred"]),
         ),
         risk_level=row["risk_level"],
+        risk_band=row["risk_band"],
         risk_probability=row["risk_probability"],
+        alert_total=row["alert_total"],
+        alert_unread=row["alert_unread"],
+        reviewed=bool(row["alert_total"]) and not row["alert_unread"],
         bed_id=row["bed_id"],
         meta=build_meta(cohort_size, model_connected=model_connected),
     )
@@ -183,32 +192,46 @@ def to_prediction_point(row: Any) -> PredictionPoint:
 
 
 def latest_prediction(rows: list[Any]) -> LatestPrediction:
+    """최신 예측 1건 + 그 시점의 기여 신호.
+
+    ⚠ 신호 문장은 riskmodel 이 만든 것을 그대로 옮긴다. 여기서 문구를 만들거나
+      순서를 바꾸지 않는다 — 모델이 실제로 본 신호와 화면 문구가 어긋난다.
+      권고(recommendations)는 이 모델이 생성하지 않으므로 항상 비어 있다.
+    """
     if not rows:
         # 모델 미연동. 지어내지 않고 비운다.
         return LatestPrediction()
     last = rows[-1]
     detail = last["detail"] or {}
+    signals = [RiskSignal(**s) for s in detail.get("reason_detail") or []]
     return LatestPrediction(
         risk_probability=last["risk_probability"],
         risk_level=last["risk_level"],
-        # TODO — 모델 output 구조 확정 시 detail 에서 정식 필드로 승격
-        risk_factors=list(detail.get("risk_factors", [])),
-        recommendations=list(detail.get("recommendations", [])),
+        risk_factors=[s.text for s in signals],
+        risk_signals=signals,
+        # ⚠ signals 가 비어도 reason_type/title 은 넘긴다. 임상 방향 gate 도입 후
+        #   "위험도는 올랐지만 확인된 악화 신호가 없음" 이 정상 상태로 존재한다.
+        reason_type=detail.get("reason_type"),
+        reason_title=detail.get("reason_title"),
+        reason_basis=detail.get("reason_basis"),
+        clinical_worsening_confirmed=detail.get("clinical_worsening_confirmed"),
+        reason_notice=detail.get("reason_notice"),
+        risk_delta=detail.get("risk_delta"),
     )
 
 
 # ------------------------------------------------------------------ dashboard
 
 def to_bed_item(row: Any) -> tuple[BedItem, str]:
-    """(병상, 구역) 을 돌려준다. 예측이 없으면 acuity 로 색을 정한다."""
+    """(병상, 구역) 을 돌려준다. 색은 모델 3구간, 아직 예측이 없으면 pending 이다."""
     if row["ed_stay_id"] is None:
         return BedItem(bed_id=row["bed_id"], status="empty"), row["zone"]
 
-    level = row["risk_level"] or risk.level_from_acuity(row["acuity"])
+    band = row["risk_band"]
     return (
         BedItem(
             bed_id=row["bed_id"],
-            status=risk.bed_status(level),
+            status=risk.bed_status(band),
             stay_id=str(row["ed_stay_id"]),
             display_name=row["display_name"],
             age=age_at(row["anchor_age"], row["anchor_year"], row["intime"]),
@@ -222,11 +245,12 @@ def to_bed_item(row: Any) -> tuple[BedItem, str]:
 def build_bed_zones(rows: list[Any]) -> tuple[list[BedZone], BedSummary, bool]:
     zones: list[BedZone] = []
     index: dict[str, BedZone] = {}
-    counts = {"critical": 0, "moderate": 0, "low": 0, "empty": 0}
+    counts = {"critical": 0, "moderate": 0, "low": 0, "pending": 0, "empty": 0}
     any_prediction = False
 
     for row in rows:
-        if row["risk_level"] is not None:
+        # 예측이 하나라도 반영됐는지(화면 안내 문구용).
+        if row["risk_band"] is not None:
             any_prediction = True
         bed, zone_name = to_bed_item(row)
         counts[bed.status] = counts.get(bed.status, 0) + 1
@@ -241,17 +265,35 @@ def build_bed_zones(rows: list[Any]) -> tuple[list[BedZone], BedSummary, bool]:
 
 
 def beds_meta(any_prediction: bool) -> BedsMeta:
+    """색의 근거. 예측이 하나도 도래하지 않았으면 'none' 이다(대체 색을 쓰지 않는다)."""
+    return BedsMeta(status_source="prediction" if any_prediction else "none")
+
+
+def reassess_meta(any_prediction: bool) -> BedsMeta:
+    """재평가 큐의 정렬 근거. 여기는 예측이 없을 때 ESI 중증도로 **대체 정렬**한다.
+
+    병상 색(beds_meta)과 기준이 다르므로 meta 도 따로 만든다 — 병상은 근거가 없으면
+    색을 칠하지 않고(pending), 큐는 그래도 순서를 매겨야 하기 때문이다.
+    """
     return BedsMeta(status_source="prediction" if any_prediction else "triage_acuity")
 
 
+# 설명이 비어 있을 때 쓰는 문구. 경보 사실만 말하고 임상 해석을 붙이지 않는다.
+_ALARM_ONLY_MESSAGE = "모델 경보 임계값 초과"
+
+
 def to_alert_item(row: Any) -> AlertItem:
+    """경보 1건. message 는 모델이 만든 신호 문장을 그대로 쓴다."""
     return AlertItem(
         id=row["id"],
         stay_id=str(row["ed_stay_id"]),
         display_name=row["display_name"],
         alert_time=row["alert_time"],
         level=row["level"],
-        message=row["message"],
+        band=row["band"],
+        risk_probability=row["risk_probability"],
+        message=row["reason"] or _ALARM_ONLY_MESSAGE,
+        reason_type=row["reason_type"],
         acknowledged_at=row["acknowledged_at"],
     )
 
@@ -274,7 +316,9 @@ def to_reassess_items(rows: list[Any]) -> tuple[list[ReassessItem], bool]:
                 stay_id=str(row["stay_id"]),
                 display_name=row["display_name"],
                 risk_level=row["risk_level"],
+                risk_band=row["risk_band"],
                 risk_probability=row["risk_probability"],
+                bed_id=row["bed_id"],
                 acuity=row["acuity"],
                 due_minutes=minutes,
                 due_label=label,

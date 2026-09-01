@@ -39,14 +39,33 @@ def level_from_acuity(acuity: int | None) -> RiskLevel | None:
     return "stable"
 
 
-# 병상 현황판은 4단계(critical/moderate/low/empty)만 쓴다.
-_BED_STATUS = {"critical": "critical", "rising": "moderate", "watch": "moderate", "stable": "low"}
+# 병상 상태 = 화면 색. 모델 3구간을 그대로 쓴다.
+# 🔑 risk_level(4단계, .env RISK_*)로 매핑하면 화면이 어긋난다 — 13.3~40% 환자가
+#    환자 목록에서는 "재평가 필요"(red)인데 현황판에서는 "관찰 필요"로 칠해졌다.
+#
+#   empty    빈 병상            회색
+#   pending  환자는 있지만 아직 첫 예측 전   흰색  ← 위험도 카운트에 넣지 않는다
+#   critical 재평가 필요 (red)
+#   moderate 관찰 필요   (amber)
+#   low      저위험      (green)
+_BED_STATUS_BY_BAND = {"red": "critical", "amber": "moderate", "green": "low"}
+
+BED_STATUS_PENDING = "pending"
 
 
-def bed_status(level: RiskLevel | None) -> str:
-    if level is None:
-        return "low"
-    return _BED_STATUS.get(level, "low")
+def bed_status(band: str | None) -> str:
+    """병상 상태. **예측이 없으면 pending 이다.**
+
+    🔑 예전에는 예측이 없을 때 triage acuity(ESI)로 색을 대신 칠했다. 그러면 ED 도착
+       +1시간이 안 된 환자가 이미 위험도가 판정된 것처럼 보이고, 상태별 환자 수도
+       실제 예측과 어긋난다. 판정할 근거가 없으면 없다고 표시한다.
+
+    ⚠ band 가 None 인 경우는 두 가지다 — 첫 예측 시점(ED 도착 +1h) 이전이거나,
+      데모 시계를 되돌려 그 예측이 아직 도래하지 않은 경우. 둘 다 pending 이 맞다.
+    """
+    if band is None:
+        return BED_STATUS_PENDING
+    return _BED_STATUS_BY_BAND.get(band, BED_STATUS_PENDING)
 
 
 # 재평가 우선순위. frontend settings.tsx 의 임계값 UI 와 정합.

@@ -43,6 +43,20 @@ BEGIN
             FOREIGN KEY (hadm_id) REFERENCES mimic.admissions(hadm_id);
     END IF;
 
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_labevents_subject') THEN
+        ALTER TABLE mimic.labevents
+            ADD CONSTRAINT fk_labevents_subject
+            FOREIGN KEY (subject_id) REFERENCES mimic.patients(subject_id);
+    END IF;
+
+    -- labevents.hadm_id 에는 FK 를 걸지 않는다 (01_schema.sql 주석 참조).
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_chartevents_icustay') THEN
+        ALTER TABLE mimic.chartevents
+            ADD CONSTRAINT fk_chartevents_icustay
+            FOREIGN KEY (icu_stay_id) REFERENCES mimic.icustays(icu_stay_id);
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_prediction_stay') THEN
         ALTER TABLE app.prediction
             ADD CONSTRAINT fk_prediction_stay

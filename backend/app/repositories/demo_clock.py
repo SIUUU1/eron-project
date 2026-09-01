@@ -70,10 +70,30 @@ def set_speed(db: Session, speed: float) -> Any:
 
 
 def reset(db: Session) -> Any:
-    """시나리오를 처음 상태로 되돌린다.
+    """시나리오를 처음 상태로 되돌린다. **의료진 확인 기록도 함께 지운다.**
 
     매핑 기준점(epoch_virtual)까지 현재 시각으로 다시 잡으므로,
     적재 직후의 재실/퇴실 구성이 그대로 복원된다.
+
+    🔑 왜 알림 상태를 같이 지우는가
+       시계만 되돌리면 지난 시연에서 누른 "의료진 재검토" 기록이 그대로 남아,
+       새 시연에서 같은 알림이 처음부터 확인된 것처럼 보인다.
+
+    🔑 지우는 것과 남기는 것
+       지움 : app.prediction_ack (확인 기록) · app.alert (미사용 · 방어적으로 비움)
+       남김 : app.prediction (예측 결과) · mimic.* (원천 데이터) · app.cohort 등
+       예측은 알림의 원천이지 알림 자체가 아니고, 다시 계산해도 같은 값이라
+       지울 이유가 없다. 시계가 처음으로 돌아가면 자연스럽게 다시 감춰진다.
+
+    ⚠ 환자 배치(app.demo_stay.now_ref)는 건드리지 않는다. 적재가 정한 체류 지점이
+      시나리오 그 자체이고, 그중 일부는 리셋 직후부터 ED 도착 +1h 를 넘겨 있어
+      예측 결과를 갖는다 — 규칙대로 도래한 예측이라 감추지 않는다.
+
+    ⚠ 시계를 '이동'(advance)할 때는 아무것도 지우지 않는다. 그때는 확인 기록의
+      acknowledged_demo_at 이 현재 데모 시각보다 미래면 자동으로 무효가 된다.
+    ⚠ app.prediction 은 지우지 않는다. 되돌아간 시점 기준으로 아직 도래하지 않은
+      예측이 되어 화면에서 자동으로 빠지고, 시계가 다시 그 시점을 지나면 같은 값으로
+      다시 보인다(모델을 다시 돌려도 같은 결과다).
     """
     db.execute(
         text("""
@@ -85,5 +105,8 @@ def reset(db: Session) -> Any:
              WHERE id = 1
         """)
     )
+    # prediction_ack 를 참조하는 FK 가 없어 삭제 순서를 따질 필요가 없다.
+    db.execute(text("DELETE FROM app.prediction_ack"))
+    db.execute(text("DELETE FROM app.alert"))
     db.commit()
     return read(db)
