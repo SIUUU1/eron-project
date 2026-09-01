@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -69,10 +70,17 @@ For each segment, also return medical_terms containing only expressions useful f
 
 Return only the requested JSON object."""
 
-_COMPACT_TRANSLATION_SYSTEM_PROMPT = """You are a clinical dialogue translator, not a clinical decision maker.
+_COMPACT_TRANSLATION_SYSTEM_PROMPT = """You are a clinical dialogue translator and medical search-query preprocessor, not a clinical decision maker.
 Use every context segment to understand ambiguous Korean+English mixed medical speech. Translate only the requested target segments into natural English. Preserve uncertainty, negation, ingredient-versus-product naming level, and every clinical fact. Do not diagnose, summarize, add, or omit content. Keep uncertain phonetic terms literal when their meaning cannot be resolved safely.
 
-Return only the requested compact translations JSON object. Do not return medical terms, explanations, source text, categories, or duplicate translations."""
+For every target segment, also return each distinct medical expression in medical_terms. Expressions coordinated by commas, Korean conjunctions, or English conjunctions such as "and" or "or" must be separate items; never return only the most prominent expression.
+- source_text must be an exact substring copied from that target's original text.
+- search_terms_en contains exactly one concise English medical dictionary query.
+- term_type must use the supplied schema category that best describes the literal expression.
+- Include only symptoms/signs, explicit diseases/diagnoses, drugs, allergies, anatomy, tests/procedures/surgery, vitals/numeric clinical values, or devices.
+- Do not infer diagnoses or add facts. Preserve ingredient-versus-product naming level.
+
+Return only the requested compact translations JSON object. Do not return explanations or duplicate terms."""
 
 
 def _masked_segments(
@@ -157,7 +165,6 @@ class LlamaServerMedicalQueryExpander:
         context_size: int = 8192,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         max_passes: int = 1,
-        translation_batch_size: int = 3,
         timeout: float = 600,
         llm_client: ClinicalLlmClient | None = None,
     ):
@@ -168,9 +175,6 @@ class LlamaServerMedicalQueryExpander:
         if not 1 <= max_passes <= 3:
             raise ValueError("max_passes must be between 1 and 3")
         self.max_passes = max_passes
-        if not 1 <= translation_batch_size <= 8:
-            raise ValueError("translation_batch_size must be between 1 and 8")
-        self.translation_batch_size = translation_batch_size
         self.timeout = timeout
         self.llm_client = llm_client
 
@@ -223,9 +227,6 @@ class LlamaServerMedicalQueryExpander:
             context_size=int(os.environ.get("CLINICALNLP_API3_CONTEXT", "8192")),
             max_output_tokens=max_output_tokens,
             max_passes=int(os.environ.get("CLINICALNLP_QUERY_EXPANSION_PASSES", "1")),
-            translation_batch_size=int(
-                os.environ.get("CLINICALNLP_TRANSLATION_BATCH_SIZE", "3")
-            ),
             timeout=timeout,
             llm_client=llm_client,
         )
@@ -235,7 +236,7 @@ class LlamaServerMedicalQueryExpander:
         *,
         context_segments: list[dict[str, str]],
         target_segment_ids: list[str],
-    ) -> dict[str, str]:
+    ) -> dict[str, dict[str, Any]]:
         user_payload = {
             "context_segments": context_segments,
             "target_segment_ids": target_segment_ids,
@@ -251,12 +252,28 @@ class LlamaServerMedicalQueryExpander:
             translations = model_result.get("translations")
             if not isinstance(translations, dict):
                 raise ValueError("InvalidModelResponse")
-            normalized: dict[str, str] = {}
+            normalized: dict[str, dict[str, Any]] = {}
             for target_id in target_segment_ids:
-                translated_text = translations.get(target_id)
+                translated = translations.get(target_id)
+                # Accept the former string-only payload as a bounded fallback
+                # while deployed model servers roll onto the richer schema.
+                if isinstance(translated, str):
+                    translated = {
+                        "translated_text_en": translated,
+                        "medical_terms": [],
+                    }
+                if not isinstance(translated, dict):
+                    raise ValueError("InvalidModelResponse")
+                translated_text = translated.get("translated_text_en")
+                medical_terms = translated.get("medical_terms")
                 if not isinstance(translated_text, str) or not translated_text.strip():
                     raise ValueError("InvalidModelResponse")
-                normalized[target_id] = " ".join(translated_text.split())
+                if not isinstance(medical_terms, list):
+                    raise ValueError("InvalidModelResponse")
+                normalized[target_id] = {
+                    "translated_text_en": " ".join(translated_text.split()),
+                    "medical_terms": medical_terms,
+                }
             return normalized
         request_payload = json.dumps(
             {
@@ -303,12 +320,26 @@ class LlamaServerMedicalQueryExpander:
         )
         if not isinstance(translations, dict):
             raise ValueError("InvalidModelResponse")
-        normalized: dict[str, str] = {}
+        normalized: dict[str, dict[str, Any]] = {}
         for target_id in target_segment_ids:
-            translated_text = translations.get(target_id)
+            translated = translations.get(target_id)
+            if isinstance(translated, str):
+                translated = {
+                    "translated_text_en": translated,
+                    "medical_terms": [],
+                }
+            if not isinstance(translated, dict):
+                raise ValueError("InvalidModelResponse")
+            translated_text = translated.get("translated_text_en")
+            medical_terms = translated.get("medical_terms")
             if not isinstance(translated_text, str) or not translated_text.strip():
                 raise ValueError("InvalidModelResponse")
-            normalized[target_id] = " ".join(translated_text.split())
+            if not isinstance(medical_terms, list):
+                raise ValueError("InvalidModelResponse")
+            normalized[target_id] = {
+                "translated_text_en": " ".join(translated_text.split()),
+                "medical_terms": medical_terms,
+            }
         return normalized
 
     def _request_translation_batch_with_retry(
@@ -317,8 +348,8 @@ class LlamaServerMedicalQueryExpander:
         context_segments: list[dict[str, str]],
         target_segment_ids: list[str],
         call_counter: list[int] | None = None,
-    ) -> tuple[dict[str, str], list[tuple[str, Exception]]]:
-        def request(ids: list[str]) -> dict[str, str]:
+    ) -> tuple[dict[str, dict[str, Any]], list[tuple[str, Exception]]]:
+        def request(ids: list[str]) -> dict[str, dict[str, Any]]:
             if call_counter is not None:
                 call_counter[0] += 1
             return self._request_compact_translation(
@@ -334,14 +365,126 @@ class LlamaServerMedicalQueryExpander:
         except Exception as error:
             if len(target_segment_ids) == 1:
                 return {}, [(target_segment_ids[0], error)]
-        translations: dict[str, str] = {}
+        midpoint = len(target_segment_ids) // 2
+        translations: dict[str, dict[str, Any]] = {}
         failures: list[tuple[str, Exception]] = []
-        for target_id in target_segment_ids:
-            try:
-                translations.update(request([target_id]))
-            except Exception as error:
-                failures.append((target_id, error))
+        for target_ids in (
+            target_segment_ids[:midpoint],
+            target_segment_ids[midpoint:],
+        ):
+            partial_translations, partial_failures = (
+                self._request_translation_batch_with_retry(
+                    context_segments=context_segments,
+                    target_segment_ids=target_ids,
+                    call_counter=call_counter,
+                )
+            )
+            translations.update(partial_translations)
+            failures.extend(partial_failures)
         return translations, failures
+
+    @staticmethod
+    def _estimated_tokens(value: Any) -> int:
+        text = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
+        # UTF-8 bytes / 3 intentionally overestimates ordinary English while
+        # remaining conservative for Korean and mixed clinical dialogue.
+        return max(1, math.ceil(len(text.encode("utf-8")) / 3))
+
+    def _translation_request_fits(
+        self,
+        *,
+        context_segments: list[dict[str, str]],
+        target_segment_ids: list[str],
+    ) -> bool:
+        user_payload = {
+            "context_segments": context_segments,
+            "target_segment_ids": target_segment_ids,
+        }
+        response_format = compact_translation_response_format(target_segment_ids)
+        input_tokens = (
+            self._estimated_tokens(_COMPACT_TRANSLATION_SYSTEM_PROMPT)
+            + self._estimated_tokens(user_payload)
+            + self._estimated_tokens(response_format)
+            + 64
+        )
+        target_ids = set(target_segment_ids)
+        source_tokens = sum(
+            self._estimated_tokens(segment["text"])
+            for segment in context_segments
+            if segment["segment_id"] in target_ids
+        )
+        estimated_output_tokens = max(
+            96,
+            math.ceil(source_tokens * 2.25) + 40 * len(target_segment_ids),
+        )
+        context_budget = max(256, math.floor(self.context_size * 0.9))
+        output_budget = max(128, math.floor(self.max_output_tokens * 0.9))
+        return (
+            estimated_output_tokens <= output_budget
+            and input_tokens + estimated_output_tokens <= context_budget
+        )
+
+    def _translation_context_for_range(
+        self,
+        segments: list[dict[str, str]],
+        start: int,
+        end: int,
+    ) -> list[dict[str, str]]:
+        target_ids = [segment["segment_id"] for segment in segments[start:end]]
+        if self._translation_request_fits(
+            context_segments=segments,
+            target_segment_ids=target_ids,
+        ):
+            return segments
+
+        left = max(0, start - 2)
+        right = min(len(segments), end + 2)
+        context_segments = segments[left:right]
+        while not self._translation_request_fits(
+            context_segments=context_segments,
+            target_segment_ids=target_ids,
+        ) and (left < start or right > end):
+            left_distance = start - left
+            right_distance = right - end
+            if right > end and right_distance >= left_distance:
+                right -= 1
+            elif left < start:
+                left += 1
+            context_segments = segments[left:right]
+        return context_segments
+
+    def _translation_batches(
+        self,
+        segments: list[dict[str, str]],
+    ) -> list[tuple[list[dict[str, str]], list[str]]]:
+        batches: list[tuple[list[dict[str, str]], list[str]]] = []
+
+        def add_range(start: int, end: int) -> None:
+            target_ids = [
+                segment["segment_id"] for segment in segments[start:end]
+            ]
+            context_segments = self._translation_context_for_range(
+                segments,
+                start,
+                end,
+            )
+            if end - start == 1 or self._translation_request_fits(
+                context_segments=context_segments,
+                target_segment_ids=target_ids,
+            ):
+                batches.append((context_segments, target_ids))
+                return
+            midpoint = start + (end - start) // 2
+            add_range(start, midpoint)
+            add_range(midpoint, end)
+
+        if segments:
+            add_range(0, len(segments))
+        return batches
 
     @staticmethod
     def _response_format(segment_ids: list[str]) -> dict[str, Any]:
@@ -912,29 +1055,18 @@ class LlamaServerMedicalQueryExpander:
         translation_started = time.perf_counter()
         translation_calls = [0]
         try:
-            translated_segments: list[dict[str, Any]] = []
+            translated_payloads: dict[str, dict[str, Any]] = {}
             failed_translations: list[tuple[str, Exception]] = []
-            for position in range(0, len(transport_segments), self.translation_batch_size):
-                target_ids = [
-                    segment["segment_id"]
-                    for segment in transport_segments[
-                        position : position + self.translation_batch_size
-                    ]
-                ]
+            for context_segments, target_ids in self._translation_batches(
+                transport_segments
+            ):
                 translations, failures = self._request_translation_batch_with_retry(
-                    context_segments=transport_segments,
+                    context_segments=context_segments,
                     target_segment_ids=target_ids,
                     call_counter=translation_calls,
                 )
                 failed_translations.extend(failures)
-                translated_segments.extend(
-                    {
-                        "segment_id": original_ids[target_id],
-                        "translated_text_en": translations[target_id],
-                    }
-                    for target_id in target_ids
-                    if target_id in translations
-                )
+                translated_payloads.update(translations)
         except Exception as error:
             return {
                 "status": "unavailable",
@@ -951,7 +1083,7 @@ class LlamaServerMedicalQueryExpander:
                     "translation_calls": translation_calls[0],
                 },
             }
-        if not translated_segments and failed_translations:
+        if not translated_payloads and failed_translations:
             return {
                 "status": "unavailable",
                 "fallback_used": True,
@@ -971,13 +1103,42 @@ class LlamaServerMedicalQueryExpander:
                     "translation_calls": translation_calls[0],
                 },
             }
+        translated_segments, items = self._sanitize_full_translation(
+            {
+                "segments": [
+                    {
+                        "segment_id": original_ids[target_id],
+                        **translated,
+                    }
+                    for target_id, translated in translated_payloads.items()
+                    if target_id in original_ids
+                ]
+            },
+            compact_segments,
+        )
+        if not translated_segments and translated_payloads:
+            return {
+                "status": "unavailable",
+                "fallback_used": True,
+                "method": "GEMMA_FULL_SEGMENT_TRANSLATION",
+                "translated_segments": [],
+                "items": [],
+                "error_code": "InvalidModelResponse",
+                "_telemetry": {
+                    "translation_ms": round(
+                        (time.perf_counter() - translation_started) * 1000,
+                        3,
+                    ),
+                    "translation_calls": translation_calls[0],
+                },
+            }
         partial = bool(failed_translations)
         return {
             "status": "available",
             "fallback_used": partial,
             "method": "GEMMA_FULL_SEGMENT_TRANSLATION",
             "translated_segments": translated_segments,
-            "items": [],
+            "items": items,
             "partial": partial,
             "failed_segment_ids": [
                 original_ids[target_id]

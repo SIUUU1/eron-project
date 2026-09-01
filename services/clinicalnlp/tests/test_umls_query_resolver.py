@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import closing, nullcontext
 from copy import deepcopy
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 import sqlite3
 import tempfile
 import unittest
@@ -232,14 +232,18 @@ class _FailingSearchDictionary:
 class _ScoreByQueryDictionary:
     def __init__(self) -> None:
         self.search_calls: list[str] = []
+        self.collection_calls: list[frozenset[str] | None] = []
 
     def raw_matches(self, *, raw_text, context):
         del raw_text, context
         return ()
 
     def search(self, query_text, *, limit, collections=None):
-        del limit, collections
+        del limit
         self.search_calls.append(query_text)
+        self.collection_calls.append(
+            frozenset(collections) if collections is not None else None
+        )
         score = 0.41 if query_text == "ocular emergency" else 1.0
         return (
             LocalDictionaryMatch(
@@ -250,6 +254,77 @@ class _ScoreByQueryDictionary:
                 canonical_en="acute angle-closure glaucoma",
                 retrieval_score=score,
             ),
+        )
+
+
+class _SemanticMissFieldHitDictionary:
+    def __init__(self) -> None:
+        self.collection_calls: list[frozenset[str] | None] = []
+
+    def raw_matches(self, *, raw_text, context):
+        del raw_text, context
+        return ()
+
+    def search(self, query_text, *, limit, collections=None):
+        del query_text, limit
+        selected = frozenset(collections) if collections is not None else None
+        self.collection_calls.append(selected)
+        if selected != frozenset({"drug_terms"}):
+            return ()
+        return (
+            LocalDictionaryMatch(
+                collection="drug_terms",
+                entity_id="drug:ingredient:10",
+                dictionary_version="sha256:" + "b" * 64,
+                canonical_ko="암로디핀",
+                canonical_en="amlodipine",
+                retrieval_score=1.0,
+            ),
+        )
+
+
+class _BatchRecordingDictionary:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def raw_matches(self, *, raw_text, context):
+        del raw_text, context
+        return ()
+
+    def search_many(
+        self,
+        requests,
+        *,
+        limit,
+        exact_only=False,
+        skip_exact=False,
+    ):
+        del limit
+        requests = tuple(requests)
+        self.calls.append((requests, exact_only, skip_exact))
+        matches = tuple(() for _ in requests)
+        if skip_exact:
+            matches = tuple(
+                (
+                    LocalDictionaryMatch(
+                        collection="emergency_terms",
+                        entity_id="emergency:2",
+                        dictionary_version="sha256:" + "c" * 64,
+                        canonical_ko="급성 폐쇄각 녹내장",
+                        canonical_en="acute angle-closure glaucoma",
+                        retrieval_score=0.91,
+                    ),
+                )
+                for _ in requests
+            )
+        return SimpleNamespace(
+            matches=matches,
+            dictionary_ms=0.0,
+            vector_ms=0.0,
+            exact_statement_count=1 if exact_only else 0,
+            vector_statement_count=1 if skip_exact else 0,
+            vector_collection_ms=(),
+            vector_collection_statement_counts=(),
         )
 
 
@@ -329,6 +404,132 @@ class OfficialRawExactRetrieverTests(unittest.TestCase):
 
 
 class UmlsPrimaryResolverTests(unittest.TestCase):
+    def test_disjoint_field_and_semantic_routes_skip_dictionary_search(self):
+        surface = "acute angle-closure glaucoma"
+        dictionary = _ScoreByQueryDictionary()
+        resolver = UmlsPrimaryMedicalQueryResolver(
+            dictionary=dictionary,
+            span_linker=_RecordingSpanLinker(
+                [{
+                    "segment_id": "seg_1",
+                    "text": surface,
+                    "start_char": 0,
+                    "end_char": len(surface),
+                    "umls_candidates": [{
+                        "cui": "C0154778",
+                        "canonical_name": surface,
+                        "semantic_types": ["T047"],
+                        "linking_score": 0.99,
+                    }],
+                }]
+            ),
+        )
+
+        resolution = resolver.resolve(
+            MedicalQueryDocument(
+                segments=(MedicalQuerySegment(
+                    segment_id="seg_1",
+                    raw_text="암로디핀을 복용 중입니다.",
+                    translated_text_en=surface,
+                    collection_hints=frozenset({"drug_terms"}),
+                ),)
+            )
+        )
+
+        self.assertEqual(dictionary.collection_calls, [])
+        self.assertEqual(resolution.candidates, ())
+        self.assertEqual(resolution.telemetry.routing_conflict_count, 1)
+        self.assertEqual(resolution.telemetry.routed_query_count, 0)
+
+    def test_disjoint_field_route_never_falls_back_to_the_unrelated_field_collection(self):
+        surface = "acute angle-closure glaucoma"
+        dictionary = _SemanticMissFieldHitDictionary()
+        resolver = UmlsPrimaryMedicalQueryResolver(
+            dictionary=dictionary,
+            span_linker=_RecordingSpanLinker(
+                [{
+                    "segment_id": "seg_1",
+                    "text": surface,
+                    "start_char": 0,
+                    "end_char": len(surface),
+                    "umls_candidates": [{
+                        "cui": "C0154778",
+                        "canonical_name": surface,
+                        "semantic_types": ["T047"],
+                        "linking_score": 0.99,
+                    }],
+                }]
+            ),
+        )
+
+        resolution = resolver.resolve(
+            MedicalQueryDocument(
+                segments=(MedicalQuerySegment(
+                    segment_id="seg_1",
+                    raw_text="암로디핀을 복용 중입니다.",
+                    translated_text_en=surface,
+                    collection_hints=frozenset({"drug_terms"}),
+                ),)
+            )
+        )
+
+        self.assertEqual(dictionary.collection_calls, [])
+        self.assertEqual(resolution.candidates, ())
+        self.assertEqual(resolution.telemetry.routing_conflict_count, 1)
+
+    def test_vector_search_uses_only_the_umls_canonical_query_after_exact_miss(self):
+        surface = "possible angle closure of the eye"
+        canonical = "acute angle-closure glaucoma"
+        dictionary = _BatchRecordingDictionary()
+        resolver = UmlsPrimaryMedicalQueryResolver(
+            dictionary=dictionary,
+            span_linker=_RecordingSpanLinker(
+                [{
+                    "segment_id": "seg_1",
+                    "text": surface,
+                    "surface_query": surface,
+                    "start_char": 0,
+                    "end_char": len(surface),
+                    "umls_candidates": [{
+                        "cui": "C0154778",
+                        "canonical_name": canonical,
+                        "semantic_types": ["T047"],
+                        "linking_score": 0.99,
+                    }],
+                }]
+            ),
+        )
+
+        resolution = resolver.resolve(
+            MedicalQueryDocument(
+                segments=(MedicalQuerySegment(
+                    segment_id="seg_1",
+                    raw_text="급성 폐쇄각 녹내장 가능성이 있습니다.",
+                    translated_text_en=surface,
+                ),)
+            )
+        )
+
+        self.assertEqual(
+            dictionary.calls,
+            [
+                (
+                    (
+                        (surface, frozenset({"emergency_terms"})),
+                        (canonical, frozenset({"emergency_terms"})),
+                    ),
+                    True,
+                    False,
+                ),
+                (
+                    ((canonical, frozenset({"emergency_terms"})),),
+                    False,
+                    True,
+                ),
+            ],
+        )
+        self.assertEqual(len(resolution.candidates), 1)
+
     def test_dictionary_delegates_vector_search_through_repository_seam(self):
         class RecordingVectorRepository:
             version = "test-vector-v1"
@@ -355,6 +556,8 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                     ),),),
                     elapsed_ms=4.25,
                     statement_count=1,
+                    collection_elapsed_ms=(("emergency_terms", 4.0),),
+                    collection_statement_counts=(("emergency_terms", 1),),
                 )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -375,6 +578,14 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertEqual(batch.matches[0][0].retrieval_score, 0.91)
         self.assertEqual(batch.vector_ms, 4.25)
         self.assertEqual(batch.vector_statement_count, 1)
+        self.assertEqual(
+            batch.vector_collection_ms,
+            (("emergency_terms", 4.0),),
+        )
+        self.assertEqual(
+            batch.vector_collection_statement_counts,
+            (("emergency_terms", 1),),
+        )
         self.assertEqual(len(vectors.calls), 1)
 
     def test_dictionary_batch_reuses_read_only_connections_for_sixty_four_queries(self):
@@ -405,6 +616,23 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertLessEqual(connect.call_count, 4)
         self.assertLessEqual(batch.exact_statement_count, 4)
         self.assertEqual(batch.vector_statement_count, 0)
+
+    def test_vector_followup_can_skip_an_already_completed_exact_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=OfficialRawExactRetriever(root),
+            )
+
+            batch = dictionary.search_many(
+                (("unknown clinical term", frozenset({"emergency_terms"})),),
+                limit=5,
+                skip_exact=True,
+            )
+
+        self.assertEqual(batch.exact_statement_count, 0)
 
     def test_sqlite_vec_extension_loads_once_per_request_session(self):
         import sqlite_vec
@@ -1228,7 +1456,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         )
         self.assertNotIn("fabricated span", [query for query, _ in dictionary.search_calls])
 
-    def test_resolver_enforces_five_candidates_even_if_adapter_over_returns(self):
+    def test_resolver_enforces_three_candidates_per_medical_span(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _create_dictionary_fixture(root)
@@ -1289,7 +1517,7 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
             )
 
         self.assertEqual(dictionary.search_calls, [(surface, 5)])
-        self.assertEqual(len(resolution.candidates), 5)
+        self.assertEqual(len(resolution.candidates), 3)
 
     def test_query_budget_is_eight_per_segment_and_128_per_document(self):
         with tempfile.TemporaryDirectory() as directory:

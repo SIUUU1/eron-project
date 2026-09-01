@@ -23,6 +23,10 @@ parity tools. The HTTP service has no SQLite backend flag, path setting, or
 SQLite bind mount. Legacy SQLite/shadow environment variables are rejected at
 startup so an operator cannot mistake a PostgreSQL process for a rollback.
 
+Candidate retrieval uses UMLS semantic types as the primary collection route.
+Grounded clinical-field hints narrow compatible routes and are consulted only
+as a conditional fallback when the semantic route returns no candidate.
+
 ## Local configuration
 
 Copy `.env.example` to `.env` and set `OLLAMA_API_KEY`. The real `.env` is

@@ -123,6 +123,7 @@ class MedicalQuerySegment:
     segment_id: str
     raw_text: str
     translated_text_en: str | None = None
+    collection_hints: frozenset[LocalDictionaryCollection] | None = None
 
     def __post_init__(self) -> None:
         if not _valid_segment_id(self.segment_id):
@@ -139,6 +140,17 @@ class MedicalQuerySegment:
         ):
             raise InvalidMedicalQueryDocumentError(
                 "translated_text_en must be non-empty when present"
+            )
+        if self.collection_hints is not None and (
+            not isinstance(self.collection_hints, frozenset)
+            or not self.collection_hints
+            or any(
+                collection not in LOCAL_DICTIONARY_COLLECTIONS[:-1]
+                for collection in self.collection_hints
+            )
+        ):
+            raise InvalidMedicalQueryDocumentError(
+                "collection_hints must contain supported medical vector collections"
             )
 
 
@@ -389,6 +401,10 @@ class QueryResolutionTelemetry:
     exact_statement_count: int = 0
     vector_statement_count: int = 0
     search_cache_hit_count: int = 0
+    routed_query_count: int = 0
+    routing_conflict_count: int = 0
+    vector_collection_ms: tuple[tuple[str, float], ...] = ()
+    vector_collection_statement_counts: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -409,10 +425,40 @@ class QueryResolutionTelemetry:
             ("exact_statement_count", self.exact_statement_count),
             ("vector_statement_count", self.vector_statement_count),
             ("search_cache_hit_count", self.search_cache_hit_count),
+            ("routed_query_count", self.routed_query_count),
+            ("routing_conflict_count", self.routing_conflict_count),
         ):
             if type(value) is not int or value < 0:
                 raise InvalidQueryResolutionError(
                     f"{name} must be a non-negative integer"
+                )
+        vector_collections = frozenset(LOCAL_DICTIONARY_COLLECTIONS[:-1])
+        seen_ms: set[str] = set()
+        for collection, value in self.vector_collection_ms:
+            if collection not in vector_collections or collection in seen_ms:
+                raise InvalidQueryResolutionError(
+                    "vector_collection_ms must contain unique vector collections"
+                )
+            seen_ms.add(collection)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise InvalidQueryResolutionError(
+                    "vector collection time must be a finite non-negative number"
+                )
+        seen_counts: set[str] = set()
+        for collection, value in self.vector_collection_statement_counts:
+            if collection not in vector_collections or collection in seen_counts:
+                raise InvalidQueryResolutionError(
+                    "vector_collection_statement_counts must contain unique vector collections"
+                )
+            seen_counts.add(collection)
+            if type(value) is not int or value < 0:
+                raise InvalidQueryResolutionError(
+                    "vector collection statement count must be a non-negative integer"
                 )
 
 

@@ -291,6 +291,9 @@ class LlamaServerClinicalExtractor:
             }
             if corrected_text != raw_text:
                 compact["corrected_text"] = corrected_text
+            translated_text = segment.get("translated_text_en")
+            if isinstance(translated_text, str) and translated_text.strip():
+                compact["translated_text_en"] = translated_text.strip()
 
             annotations: list[dict[str, Any]] = []
             for position, annotation in enumerate(segment.get("annotations", [])):
@@ -670,7 +673,9 @@ class LlamaServerClinicalExtractor:
         result["validation_warnings"].extend(warnings)
         return result
 
-    def extract(self, whisper_payload: dict[str, Any]) -> dict[str, Any]:
+    def extract_record(self, whisper_payload: dict[str, Any]) -> dict[str, Any]:
+        """Generate only the conversation-grounded clinical record stage."""
+
         stage_errors: list[dict[str, str]] = []
         try:
             result = self._extract_clinical_record_stage(whisper_payload)
@@ -692,6 +697,22 @@ class LlamaServerClinicalExtractor:
                     "prompt_version": CLINICAL_PROMPT_VERSION,
                 },
             }
+        result["stage_errors"] = stage_errors
+        return result
+
+    def finalize_record(
+        self,
+        result: dict[str, Any],
+        whisper_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adjudicate candidates after retrieval without regenerating the record."""
+
+        if not isinstance(result, dict):
+            raise ValueError("clinical record stage returned an invalid contract")
+        stage_errors = result.get("stage_errors")
+        if not isinstance(stage_errors, list):
+            stage_errors = []
+            result["stage_errors"] = stage_errors
 
         candidate_payload = self._candidate_payload(whisper_payload)
         (
@@ -789,4 +810,10 @@ class LlamaServerClinicalExtractor:
         )
         result["stage_errors"] = stage_errors
         return result
+
+    def extract(self, whisper_payload: dict[str, Any]) -> dict[str, Any]:
+        return self.finalize_record(
+            self.extract_record(whisper_payload),
+            whisper_payload,
+        )
 

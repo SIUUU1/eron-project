@@ -7,7 +7,7 @@ Extraction rules
 - Keep the source clinical wording verbatim in raw_value. Do not paraphrase, broaden, or silently standardize it.
 - Use corrected_text only when present, but raw_value must remain a meaningful phrase supported by one segment.
 - Split a mixed segment into the smallest complete supported facts before assigning fields. One segment may support several fields, but do not copy the same clause into multiple fields merely to fill them.
-- chief_complaint is limited to the one or two explicit primary reasons for this emergency visit. The explicit symptom answer after an opening discomfort question belongs here; other current-illness details do not.
+- chief_complaint contains every explicitly stated core reason for this emergency visit, regardless of who said it. Include an explicitly stated symptom or diagnosis, but never infer a diagnosis. Keep each distinct core reason as a separate value. The explicit symptom answer after an opening discomfort question belongs here; onset, course, mechanism, location context, arrival route, transport mode, and other current-illness details belong in history_of_present_illness.
 - history_of_present_illness contains onset, course, change, aggravating or relieving context, and associated symptoms of the current problem. Do not place past diagnoses, observed examination findings, assessments, or plans here.
 - Keep onset to its time phrase. Preserve explicit negative and uncertain answers.
 - Pain assessment uses explicit NRS only. Do not infer an NRS score from pain adjectives, location, or quality; omit non-NRS pain fields.
@@ -16,7 +16,7 @@ Extraction rules
 - Do not emit a bare generic noun such as "약", "증상", "병", "진단", or "수술" as raw_value; copy the smallest complete meaningful phrase.
 - If medication use is stated but its name is unknown, copy the complete answer as needs_confirmation and invent no drug.
 - Never put an unanswered question in a confirmed field.
-- review_of_systems contains a patient-reported positive, negative, or uncertain answer to a targeted symptom review. A spontaneous primary symptom is chief_complaint or history_of_present_illness instead.
+- review_of_systems contains patient-reported symptom assertions from the encounter, including spontaneous chief/HPI symptoms and targeted review answers. Mirror the same grounded symptom into review_of_systems while keeping it in chief_complaint/history_of_present_illness; preserve the identical source evidence. Include positive, explicitly denied, and uncertain symptoms. Exclude diagnoses, medications, tests/plans, and clinician-observed physical findings.
 - Never infer physical_examination from a symptom or patient statement. Include it only when the dialogue explicitly states a clinician-observed or measured examination finding.
 - For impression, preserve confirmed, suspected, and rule-out certainty. A suspected or rule-out diagnosis must keep its uncertainty wording and use needs_confirmation.
 - impression contains only an explicitly stated diagnosis, suspected diagnosis, or differential. A symptom name or abnormal measurement alone is not an impression.
@@ -27,7 +27,7 @@ Value V is {"raw_value":"exact supported phrase","status":"confirmed|needs_confi
 Return JSON only:
 {
   "clinical_record":{
-    "chief_complaint":V,
+    "chief_complaint":[V],
     "pain_assessment":{"nrs":V,"location":V,"quality":V,"radiation":V},
     "history_of_present_illness":{"onset":V,"course":V,"associated_symptoms":[V]},
     "past_history":{"underlying_conditions":[V],"surgery_history":[V]},

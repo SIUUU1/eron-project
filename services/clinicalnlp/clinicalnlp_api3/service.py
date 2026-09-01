@@ -61,7 +61,6 @@ class ServiceSettings:
     clinical_max_tokens: int
     query_max_tokens: int
     query_passes: int
-    translation_batch_size: int
     database_url: str
     umls_enabled: bool
     umls_timeout_seconds: float
@@ -112,15 +111,6 @@ class ServiceSettings:
             raise ConfigurationError(
                 "CLINICALNLP_HTTP_PORT must be between 0 and 65535"
             )
-        translation_batch_size = _positive_int(
-            values,
-            "CLINICALNLP_TRANSLATION_BATCH_SIZE",
-            3,
-        )
-        if translation_batch_size > 8:
-            raise ConfigurationError(
-                "CLINICALNLP_TRANSLATION_BATCH_SIZE must be between 1 and 8"
-            )
         umls_python_value = values.get("CLINICALNLP_UMLS_PYTHON", "").strip()
         database_url = values.get(
             "CLINICALNLP_DATABASE_URL",
@@ -158,7 +148,6 @@ class ServiceSettings:
                 "CLINICALNLP_QUERY_EXPANSION_PASSES",
                 1,
             ),
-            translation_batch_size=translation_batch_size,
             database_url=database_url,
             umls_enabled=_boolean(values, "CLINICALNLP_UMLS_ENABLED", True),
             umls_timeout_seconds=_positive_float(
@@ -261,7 +250,6 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         context_size=settings.context_size,
         max_output_tokens=settings.query_max_tokens,
         max_passes=settings.query_passes,
-        translation_batch_size=settings.translation_batch_size,
         timeout=settings.ollama_timeout_seconds,
         llm_client=query_client,
     )

@@ -312,6 +312,7 @@ function appliedCandidate(
     cui: null,
     semanticType: null,
     similarity: null,
+    alreadyApplied: true,
   };
 }
 
@@ -331,6 +332,7 @@ function reviewCandidate(
     cui: provenance.cui?.trim() || null,
     semanticType: semanticTypes.length > 0 ? semanticTypes.join(", ") : null,
     similarity: candidateSimilarity(provenance.similarity),
+    selectionGroupIds: [item.id],
   };
 }
 
@@ -346,10 +348,88 @@ function unresolvedCandidate(item: ClinicalDraftReviewItem): TerminologyCandidat
   };
 }
 
+const candidateSourcePriority: Record<CandidateSource, number> = {
+  RAW_EXACT: 0,
+  UMLS: 1,
+  NGRAM_FALLBACK: 2,
+  UNRESOLVED: 3,
+};
+
+function normalizedCandidateConcept(candidate: TerminologyCandidate): string {
+  return (candidate.canonicalValue ?? candidate.query)
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/[\s‐‑‒–—-]+/gu, " ");
+}
+
+function mergeTerminologyCandidates(
+  left: TerminologyCandidate,
+  right: TerminologyCandidate,
+): TerminologyCandidate {
+  const representative =
+    candidateSourcePriority[left.source] <= candidateSourcePriority[right.source]
+      ? left
+      : right;
+  const supplement = representative === left ? right : left;
+  const sources = Array.from(
+    new Set([
+      ...(left.sources ?? [left.source]),
+      ...(right.sources ?? [right.source]),
+    ]),
+  ).sort((a, b) => candidateSourcePriority[a] - candidateSourcePriority[b]);
+  const similarities = [left.similarity, right.similarity].filter(
+    (value): value is number => value !== null,
+  );
+  const selectionGroupIds = Array.from(
+    new Set([...(left.selectionGroupIds ?? []), ...(right.selectionGroupIds ?? [])]),
+  );
+  return {
+    ...representative,
+    cui: representative.cui ?? supplement.cui,
+    semanticType: representative.semanticType ?? supplement.semanticType,
+    similarity: similarities.length > 0 ? Math.max(...similarities) : null,
+    alreadyApplied: left.alreadyApplied === true || right.alreadyApplied === true,
+    ...(sources.length > 1 ? { sources } : {}),
+    ...(selectionGroupIds.length > 0 ? { selectionGroupIds } : {}),
+  };
+}
+
+function consolidateTerminologyCandidates(
+  candidates: TerminologyCandidate[],
+): TerminologyCandidate[] {
+  const output: TerminologyCandidate[] = [];
+  const indexesByConcept = new Map<string, number[]>();
+  candidates.forEach((candidate) => {
+    const concept = normalizedCandidateConcept(candidate);
+    const indexes = indexesByConcept.get(concept) ?? [];
+    const compatibleIndex = indexes.find((index) => {
+      const existing = output[index];
+      return !existing.cui || !candidate.cui || existing.cui === candidate.cui;
+    });
+    if (compatibleIndex !== undefined) {
+      output[compatibleIndex] = mergeTerminologyCandidates(
+        output[compatibleIndex],
+        candidate,
+      );
+      return;
+    }
+    indexes.push(output.length);
+    indexesByConcept.set(concept, indexes);
+    output.push(candidate);
+  });
+  return output;
+}
+
 export function workflowDraftToFieldProvenance(
-  workflow: Pick<ClinicalRecordWorkflowResponse, "api3" | "draft">,
+  workflow: Pick<
+    ClinicalRecordWorkflowResponse,
+    "api3" | "query_expansion" | "draft"
+  >,
 ): FieldProvenanceMap {
-  const segments = new Map(workflow.api3.segments.map((segment) => [String(segment.id), segment]));
+  const segments = new Map(
+    workflow.api3.segments.map((segment) => [String(segment.id), segment]),
+  );
   const output: FieldProvenanceMap = {};
   const fields = workflow.draft.fields as unknown as Record<string, ClinicalDraftField>;
 
@@ -373,6 +453,7 @@ export function workflowDraftToFieldProvenance(
     if (!raw) return;
     const correctedText = segment?.corrected_text?.trim();
     const corrected = correctedText && correctedText !== raw ? correctedText : null;
+    const translated = translations.get(String(segmentId));
     const field = fields[fieldId];
     const evidence: PatientEvidence = {
       segmentId: String(segmentId),
@@ -383,6 +464,7 @@ export function workflowDraftToFieldProvenance(
       speaker: segment?.speaker?.trim() || "화자 미확인",
       raw,
       corrected,
+      ...(translated ? { translated } : {}),
       appliedValue: field?.value ?? "",
     };
     target.evidence.push(evidence);
@@ -414,13 +496,7 @@ export function workflowDraftToFieldProvenance(
 
   Object.values(output).forEach((field) => {
     if (!field) return;
-    const seen = new Set<string>();
-    field.candidates = field.candidates.filter((candidate) => {
-      const identity = [candidate.source, candidate.canonicalValue, candidate.cui].join("|");
-      if (seen.has(identity)) return false;
-      seen.add(identity);
-      return true;
-    });
+    field.candidates = consolidateTerminologyCandidates(field.candidates);
   });
 
   return Object.fromEntries(

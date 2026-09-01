@@ -334,6 +334,8 @@ def build_annotations(
                 "start_char",
                 "end_char",
                 "_annotation_group_id",
+                "_search_term_en",
+                "_term_type",
             }
         }
         review_status = str(candidate.get("review_status") or "").casefold()
@@ -356,9 +358,17 @@ def build_annotations(
                 },
                 "candidates": [],
                 "_review_flags": [],
+                "_search_terms_en": [],
+                "_term_types": [],
             },
         )
         group["candidates"].append(candidate_output)
+        search_term_en = str(candidate.get("_search_term_en") or "").strip()
+        if search_term_en and search_term_en not in group["_search_terms_en"]:
+            group["_search_terms_en"].append(search_term_en)
+        term_type = str(candidate.get("_term_type") or "").strip()
+        if term_type and term_type not in group["_term_types"]:
+            group["_term_types"].append(term_type)
         group["_review_flags"].append(
             collection == "kcd9_terms"
             or candidate.get("match_type")
@@ -412,14 +422,17 @@ def build_annotations(
             unique = unique[:max_candidates_per_span]
         else:
             unique = deduplicated[:max_candidates_per_span]
-        annotations.append(
-            {
-                "type": group["type"],
-                "source_span": group["source_span"],
-                "candidates": unique,
-                "needs_review": len(unique) > 1 or any(group["_review_flags"]),
-            }
-        )
+        annotation = {
+            "type": group["type"],
+            "source_span": group["source_span"],
+            "candidates": unique,
+            "needs_review": len(unique) > 1 or any(group["_review_flags"]),
+        }
+        if group["_search_terms_en"]:
+            annotation["search_terms_en"] = list(group["_search_terms_en"])
+        if len(group["_term_types"]) == 1:
+            annotation["term_type"] = group["_term_types"][0]
+        annotations.append(annotation)
     return annotations
 
 

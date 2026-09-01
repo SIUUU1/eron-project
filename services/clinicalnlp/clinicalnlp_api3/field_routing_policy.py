@@ -53,6 +53,16 @@ _TERM_TYPE_ORDER = (
     VITAL,
     DEVICE,
 )
+_TERM_TYPE_COLLECTION = {
+    SYMPTOM: "emergency_terms",
+    DISEASE: "emergency_terms",
+    DRUG: "drug_terms",
+    ALLERGY: "drug_terms",
+    ANATOMY: "anatomy_terms",
+    PROCEDURE: "procedure_terms",
+    VITAL: "emergency_terms",
+    DEVICE: "procedure_terms",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +73,8 @@ class FieldPolicy:
 
 FIELD_POLICIES = {
     "chief_complaint": FieldPolicy(
-        "The explicit primary reason for the emergency visit, in patient wording.",
+        "Every explicitly stated core reason for the emergency visit, regardless "
+        "of speaker; symptoms and explicitly stated diagnoses are allowed.",
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "pain_assessment": FieldPolicy(
@@ -197,7 +208,22 @@ def _atomic_values(value: Any) -> Iterable[dict[str, Any]]:
 
 def evidence_fields_by_segment(
     clinical_record: dict[str, Any],
+    *,
+    segments: Iterable[dict[str, Any]] = (),
 ) -> dict[str, tuple[FieldEvidence, ...]]:
+    segment_ids_by_time: dict[tuple[object, object], str] = {}
+    ambiguous_times: set[tuple[object, object]] = set()
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("id") is None:
+            continue
+        key = (segment.get("start"), segment.get("end"))
+        if key in segment_ids_by_time:
+            ambiguous_times.add(key)
+        else:
+            segment_ids_by_time[key] = str(segment["id"])
+    for key in ambiguous_times:
+        segment_ids_by_time.pop(key, None)
+
     routed: dict[str, list[FieldEvidence]] = {}
     for field_id in CANONICAL_FIELD_ORDER:
         for value in _atomic_values(clinical_record.get(field_id)):
@@ -207,13 +233,49 @@ def evidence_fields_by_segment(
                 if isinstance(evidence, dict)
                 else None
             )
+            if segment_id is None and isinstance(evidence, dict):
+                segment_id = segment_ids_by_time.get(
+                    (evidence.get("start"), evidence.get("end"))
+                )
             raw_value = str(value.get("raw_value") or "").strip()
-            if not isinstance(segment_id, str) or not segment_id or not raw_value:
+            if segment_id is None or not str(segment_id) or not raw_value:
                 continue
+            normalized_segment_id = str(segment_id)
             entry = FieldEvidence(field_id=field_id, raw_value=raw_value)
-            if entry not in routed.setdefault(segment_id, []):
-                routed[segment_id].append(entry)
+            if entry not in routed.setdefault(normalized_segment_id, []):
+                routed[normalized_segment_id].append(entry)
     return {key: tuple(value) for key, value in routed.items()}
+
+
+def field_collection_hints_by_segment(
+    clinical_record: dict[str, Any],
+    *,
+    segments: Iterable[dict[str, Any]] = (),
+) -> dict[str, frozenset[str]]:
+    """Map grounded record evidence to the vector collections it can use.
+
+    Empty-policy fields such as social history intentionally contribute no
+    hint. A missing hint therefore preserves the existing unrestricted safety
+    path instead of suppressing terminology candidates.
+    """
+
+    routed: dict[str, set[str]] = {}
+    for segment_id, evidence in evidence_fields_by_segment(
+        clinical_record,
+        segments=segments,
+    ).items():
+        collections = {
+            _TERM_TYPE_COLLECTION[term_type]
+            for item in evidence
+            for term_type in FIELD_POLICIES[item.field_id].allowed_term_types
+            if term_type in _TERM_TYPE_COLLECTION
+        }
+        if collections:
+            routed[segment_id] = collections
+    return {
+        segment_id: frozenset(collections)
+        for segment_id, collections in routed.items()
+    }
 
 
 def _semantic_types(candidate: dict[str, Any]) -> set[str]:
@@ -372,20 +434,30 @@ def choose_evidence_field(
     preferred = _preferred_fields((*declared_categories, *categories))
     preferred_rank = {field_id: index for index, field_id in enumerate(preferred)}
 
-    compatible: list[tuple[int, int, int, int, int, str]] = []
     normalized_source = source_text.strip().casefold()
-    for entry in entries:
+    exact_entries = [
+        entry
+        for entry in entries
+        if normalized_source
+        and (
+            normalized_source in entry.raw_value.casefold()
+            or entry.raw_value.casefold() in normalized_source
+        )
+    ]
+    # A translated candidate deliberately keeps the whole RAW sentence as its
+    # source span because translated offsets cannot be presented as RAW
+    # offsets. If that sentence grounds one or more draft atoms, candidates
+    # must stay inside those atoms instead of being moved to an unrelated field
+    # merely because its dictionary collection happens to be compatible.
+    routed_entries = exact_entries or entries
+
+    compatible: list[tuple[int, int, int, int, int, str]] = []
+    for entry in routed_entries:
         policy = FIELD_POLICIES.get(entry.field_id)
         if policy is None or not categories & policy.allowed_term_types:
             continue
         normalized_value = entry.raw_value.casefold()
-        exact_atom = bool(
-            normalized_source
-            and (
-                normalized_source in normalized_value
-                or normalized_value in normalized_source
-            )
-        )
+        exact_atom = entry in exact_entries
         compatible.append(
             (
                 0 if exact_atom else 1,

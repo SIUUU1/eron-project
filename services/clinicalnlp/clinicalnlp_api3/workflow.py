@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import math
 import re
@@ -8,9 +9,13 @@ from typing import Any, Iterable
 
 from .field_routing_policy import (
     CANONICAL_TO_DRAFT_FIELD,
+    FIELD_POLICIES,
+    SYMPTOM,
+    candidate_term_types,
     choose_evidence_field,
     evidence_fields_by_segment,
     fallback_field_for_term_type,
+    field_collection_hints_by_segment,
     filter_candidates_for_field,
 )
 from .pipeline import run_api3
@@ -58,12 +63,82 @@ _CANONICAL_TO_LEGACY_FIELD_ID = {
     canonical: legacy for legacy, canonical in _SUPPORTED_FIELD_SOURCES.items()
 }
 
+_CLINICAL_NOTE_ACTION_STEMS = (
+    "증가",
+    "감소",
+    "악화",
+    "호전",
+    "발생",
+    "시행",
+    "확인",
+    "관찰",
+    "투여",
+    "복용",
+    "호소",
+    "보고",
+    "진단",
+    "측정",
+    "내원",
+    "입원",
+    "퇴원",
+    "전원",
+)
+_CLINICAL_NOTE_ENDING = re.compile(r"(?=\s*(?:[.!]|$))", re.MULTILINE)
+
+
+def _clinical_note_style(value: Any) -> str:
+    """Format display-only draft prose without changing source evidence."""
+
+    text = str(value or "")
+    if not text:
+        return text
+    action_stems = "|".join(map(re.escape, _CLINICAL_NOTE_ACTION_STEMS))
+    replacements = (
+        (r"보였습니다", "보였음"),
+        (r"보입니다", "보임"),
+        (r"있었습니다", "있었음"),
+        (r"없었습니다", "없었음"),
+        (r"있습니다", "있음"),
+        (r"없습니다", "없음"),
+        (rf"(?P<stem>{action_stems})했습니다", r"\g<stem>함"),
+        (r"변했습니다", "변했음"),
+        (rf"(?P<stem>{action_stems})(?:되었|됐)습니다", r"\g<stem>됨"),
+        (r"되었습니다", "되었음"),
+        (r"됐습니다", "됐음"),
+        (r"했습니다", "했음"),
+        (r"됩니다", "됨"),
+        (r"입니다", "임"),
+        (r"합니다", "함"),
+        (r"였습니다", "였음"),
+        (r"았습니다", "았음"),
+        (r"었습니다", "었음"),
+        (r"아픕니다", "아픔"),
+        (r"빠릅니다", "빠름"),
+        (r"느립니다", "느림"),
+        (r"나쁩니다", "나쁨"),
+        (r"납니다", "남"),
+        (r"갑니다", "감"),
+        (r"옵니다", "옴"),
+        (r"봅니다", "봄"),
+        (r"줍니다", "줌"),
+        (r"둡니다", "둠"),
+        (r"씁니다", "씀"),
+        (r"습니다", "음"),
+    )
+    for ending, replacement in replacements:
+        text = re.sub(ending + _CLINICAL_NOTE_ENDING.pattern, replacement, text, flags=re.MULTILINE)
+    return text
+
 def _is_question_text(text: Any) -> bool:
     normalized = str(text or "").strip()
     if "?" in normalized:
         return not bool(normalized.rsplit("?", 1)[1].strip())
     return bool(
-        re.search(r"(?:나요|가요|까요|습니까|있으세요|없으세요|되나요)[.!]?\s*$", normalized)
+        re.search(
+            r"(?:있나요|없나요|하나요|인가요|셨나요|했나요|가요|까요|습니까|"
+            r"있으세요|없으세요|되나요)[.!]?\s*$",
+            normalized,
+        )
     )
 
 
@@ -938,6 +1013,241 @@ def _draft_field(
     return {"value": value, "status": status, "evidence": evidence}
 
 
+def _chief_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    atoms = list(_atomic_values(source))
+    segments = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    values: list[str] = []
+    seen_values: set[str] = set()
+    evidence_values: list[dict[str, Any]] = []
+    allowed_term_types = FIELD_POLICIES["chief_complaint"].allowed_term_types
+
+    def append_value(value: Any) -> None:
+        normalized = " ".join(str(value or "").split()).strip(" ;")
+        identity = normalized.casefold()
+        if normalized and identity not in seen_values:
+            seen_values.add(identity)
+            values.append(normalized)
+
+    for atom in atoms:
+        raw_value = str(atom.get("raw_value") or "").strip()
+        if not raw_value:
+            continue
+        evidence = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if evidence is not None and evidence not in evidence_values:
+            evidence_values.append(evidence)
+        segment = segments.get(str(evidence.get("segment_id"))) if evidence else None
+        atom_values: list[str] = []
+        if segment is not None:
+            for annotation in segment.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
+                term_type = annotation.get("term_type")
+                source_text = str(
+                    (annotation.get("source_span") or {}).get("text") or ""
+                ).strip()
+                if source_text and not (
+                    source_text.casefold() in raw_value.casefold()
+                    or raw_value.casefold() in source_text.casefold()
+                ):
+                    continue
+                candidates = filter_candidates_for_field(
+                    "chief_complaint",
+                    annotation.get("candidates", []),
+                    annotation_term_type=term_type,
+                )
+                if term_type not in allowed_term_types and not candidates:
+                    continue
+                translated_term = next(
+                    (
+                        str(term).strip()
+                        for term in annotation.get("search_terms_en", [])
+                        if str(term).strip()
+                    ),
+                    "",
+                )
+                if translated_term:
+                    atom_values.append(
+                        translated_term[:1].upper() + translated_term[1:]
+                    )
+                    continue
+                canonical_en = next(
+                    (
+                        str(candidate.get("canonical_en") or "").strip()
+                        for candidate in candidates
+                        if str(candidate.get("canonical_en") or "").strip()
+                    ),
+                    "",
+                )
+                if canonical_en:
+                    atom_values.append(canonical_en)
+            if not atom_values:
+                translated_text = str(segment.get("translated_text_en") or "").strip()
+                if translated_text:
+                    atom_values.append(translated_text)
+        if not atom_values:
+            atom_values.append(
+                _english_draft_value(
+                    atom,
+                    api3_segments,
+                    candidate_decisions or [],
+                )
+            )
+        for value in atom_values:
+            append_value(value)
+
+    statuses = {str(item.get("status")) for item in atoms}
+    if values:
+        status = (
+            "needs_review"
+            if statuses & {"needs_confirmation", "asked_but_unanswered"}
+            else "filled"
+        )
+        value = ", ".join(values)
+    elif statuses & {"needs_confirmation", "asked_but_unanswered"}:
+        status = "needs_review"
+        value = "확인 필요"
+    else:
+        status = "unknown"
+        value = "미확인"
+    return {"value": value, "status": status, "evidence": evidence_values}
+
+
+def _ros_symptom_atoms(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    yield from _atomic_values(record.get("chief_complaint"))
+    history = record.get("history_of_present_illness")
+    if isinstance(history, dict):
+        yield from _atomic_values(history.get("associated_symptoms"))
+    yield from _atomic_values(record.get("review_of_systems"))
+
+
+def _ros_candidate_labels(
+    atom: dict[str, Any],
+    segment: dict[str, Any],
+) -> tuple[list[str], bool]:
+    raw_value = str(atom.get("raw_value") or "").strip()
+    labels: list[str] = []
+    needs_review = False
+    for annotation in segment.get("annotations", []):
+        if (
+            not isinstance(annotation, dict)
+            or annotation.get("type") != "medical_term_candidate"
+        ):
+            continue
+        source_text = str(
+            (annotation.get("source_span") or {}).get("text") or ""
+        ).strip()
+        if source_text and source_text not in raw_value and raw_value not in source_text:
+            continue
+        candidates = [
+            candidate
+            for candidate in annotation.get("candidates", [])
+            if isinstance(candidate, dict)
+            and SYMPTOM
+            in candidate_term_types(
+                candidate,
+                annotation_term_type=annotation.get("term_type"),
+            )
+        ]
+        if not candidates:
+            continue
+        candidate = candidates[0]
+        label = str(
+            candidate.get("canonical_ko")
+            or candidate.get("canonical_en")
+            or ""
+        ).strip()
+        if label and label not in labels:
+            labels.append(label)
+        needs_review = needs_review or bool(annotation.get("needs_review"))
+    return labels, needs_review
+
+
+_ROS_NEGATION_RE = re.compile(
+    r"(?:없(?:습니다|어요|다|음|었)|아니(?:요|다|었습니다)|"
+    r"하지\s*않|안\s+\S+|부인)"
+)
+_ROS_UNCERTAINTY_RE = re.compile(
+    r"(?:모르|기억(?:이)?\s*(?:안|못)|확실하지|불확실|정확하지|"
+    r"것\s*같|듯(?:해|합니|하|$)|아마|확인\s*필요)"
+)
+
+
+def _ros_assertion(atom: dict[str, Any]) -> str:
+    raw_value = str(atom.get("raw_value") or "")
+    status = str(atom.get("status") or "")
+    if status in {"needs_confirmation", "asked_but_unanswered"} or (
+        _ROS_UNCERTAINTY_RE.search(raw_value)
+    ):
+        return "uncertain"
+    if _ROS_NEGATION_RE.search(raw_value):
+        return "negative"
+    return "positive"
+
+
+def _ros_summary_field(
+    record: dict[str, Any],
+    api3_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    segments = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    assertions_by_label: dict[str, tuple[str, set[str]]] = {}
+    evidence_values: list[dict[str, Any]] = []
+    needs_review = False
+    for atom in _ros_symptom_atoms(record):
+        evidence = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        segment = segments.get(str(evidence.get("segment_id"))) if evidence else None
+        if segment is None:
+            continue
+        labels, candidate_needs_review = _ros_candidate_labels(atom, segment)
+        if not labels:
+            raw_label = str(atom.get("raw_value") or "").strip(" \t\r\n.,!?")
+            labels = [raw_label] if raw_label else []
+        assertion = _ros_assertion(atom)
+        for label in labels:
+            identity = " ".join(label.split()).casefold()
+            if identity not in assertions_by_label:
+                assertions_by_label[identity] = (label, set())
+            assertions_by_label[identity][1].add(assertion)
+        if labels and evidence not in evidence_values:
+            evidence_values.append(evidence)
+        needs_review = (
+            needs_review
+            or candidate_needs_review
+            or assertion == "uncertain"
+        )
+    if not assertions_by_label:
+        return {"value": "", "status": "empty", "evidence": []}
+    values: list[str] = []
+    for label, assertions in assertions_by_label.values():
+        if "positive" in assertions and "negative" in assertions:
+            suffix = "+/- · 확인 필요"
+            needs_review = True
+        elif "uncertain" in assertions:
+            suffix = "확인 필요"
+        elif "negative" in assertions:
+            suffix = "-"
+        else:
+            suffix = "+"
+        values.append(f"{label}({suffix})")
+    return {
+        "value": "\n".join(values),
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence_values,
+    }
+
+
 def _nrs_draft_field(
     pain_assessment: Any,
     api3_segments: list[dict[str, Any]],
@@ -1066,7 +1376,10 @@ def _review_items(
     clinical_record: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    evidence_routes = evidence_fields_by_segment(clinical_record or {})
+    evidence_routes = evidence_fields_by_segment(
+        clinical_record or {},
+        segments=api3_document.get("segments") or [],
+    )
     decision_actions = {
         (decision.get("segment_id"), decision.get("annotation_index")): decision.get(
             "action"
@@ -1097,13 +1410,19 @@ def _review_items(
             ]
             source_span = annotation.get("source_span") or {}
             term_type = annotation.get("term_type")
+            grounded_evidence = evidence_routes.get(str(segment.get("id")), ())
             canonical_field = choose_evidence_field(
-                evidence_routes.get(str(segment.get("id")), ()),
+                grounded_evidence,
                 source_text=str(source_span.get("text") or ""),
                 candidates=raw_candidates,
                 annotation_term_type=term_type,
             )
             if canonical_field is None:
+                # A candidate that conflicts with a field already grounded to
+                # this segment must not be moved to another draft field. Keep
+                # the conversation-grounded draft and omit the unrelated hit.
+                if grounded_evidence:
+                    continue
                 canonical_field = fallback_field_for_term_type(term_type)
             previous_segment = (
                 segments[segment_position - 1] if segment_position > 0 else None
@@ -1500,9 +1819,28 @@ def build_draft(
     api2_document: dict[str, Any] | None,
     api3_document: dict[str, Any],
     candidate_decisions: list[dict[str, Any]] | None = None,
+    translated_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     fields = _empty_draft_fields()
-    api3_segments = list(api3_document.get("segments", []))
+    translations = {
+        str(item.get("segment_id")): str(item.get("translated_text_en") or "").strip()
+        for item in translated_segments or []
+        if isinstance(item, dict)
+        and item.get("segment_id") is not None
+        and str(item.get("translated_text_en") or "").strip()
+    }
+    api3_segments = [
+        {
+            **segment,
+            **(
+                {"translated_text_en": translations[str(segment.get("id"))]}
+                if str(segment.get("id")) in translations
+                else {}
+            ),
+        }
+        for segment in api3_document.get("segments", [])
+        if isinstance(segment, dict)
+    ]
     record: dict[str, Any] = {}
     if api2_document is not None:
         record = api2_document.get("clinical_record") or {}
@@ -1510,6 +1848,12 @@ def build_draft(
             if field_id == "pain":
                 fields[field_id] = _nrs_draft_field(
                     record.get(source_key), api3_segments
+                )
+            elif field_id == "chief":
+                fields[field_id] = _chief_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
                 )
             else:
                 fields[field_id] = _draft_field(
@@ -1525,6 +1869,8 @@ def build_draft(
                         "treatment-plan",
                     },
                 )
+
+        fields["review-of-systems"] = _ros_summary_field(record, api3_segments)
 
         _apply_draft_suggestions(
             fields,
@@ -1543,12 +1889,15 @@ def build_draft(
         field["status"] = "needs_review"
         if not item.get("candidates") and field["suggestion_status"] == "UNCHANGED":
             field["suggestion_status"] = "UNRESOLVED"
+    for field in fields.values():
+        field["value"] = _clinical_note_style(field.get("value"))
     return {"fields": fields, "review_items": review_items}
 
 
 def _api2_payload(
     whisper_payload: dict[str, Any],
     api3_document: dict[str, Any],
+    query_expansion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidate_keys = {
         "collection",
@@ -1590,6 +1939,17 @@ def _api2_payload(
             compacted.append(item)
         return compacted
 
+    translations = {
+        item.get("segment_id"): item.get("translated_text_en")
+        for item in (
+            query_expansion.get("translated_segments", [])
+            if isinstance(query_expansion, dict)
+            else []
+        )
+        if isinstance(item, dict)
+        and isinstance(item.get("translated_text_en"), str)
+        and item.get("translated_text_en", "").strip()
+    }
     result = dict(whisper_payload)
     result["segments"] = [
         {
@@ -1599,6 +1959,11 @@ def _api2_payload(
             "text": segment["corrected_text"],
             "raw_text": segment["raw_text"],
             "corrected_text": segment["corrected_text"],
+            **(
+                {"translated_text_en": translations[segment["id"]]}
+                if segment["id"] in translations
+                else {}
+            ),
             "annotations": compact_annotations(segment["annotations"]),
         }
         for segment in api3_document["segments"]
@@ -1657,6 +2022,9 @@ def _resolved_candidates_for_pipeline(
     validated_segments: list[dict[str, Any]],
     query_expansion: dict[str, Any],
     medical_query_resolver: Any,
+    *,
+    collection_hints_by_source_id: dict[Any, frozenset[str]] | None = None,
+    medical_term_query_source_ids: frozenset[str] = frozenset(),
 ) -> tuple[dict[Any, list[dict[str, Any]]], Any]:
     from .medical_query_resolver import (
         MedicalQueryDocument,
@@ -1679,11 +2047,82 @@ def _resolved_candidates_for_pipeline(
             ):
                 translations.setdefault(source_id, translated_text)
 
+    raw_text_by_source_id = {
+        source["id"]: source["text"] for source in validated_segments
+    }
+    expansion_spans: dict[str | int, list[dict[str, Any]]] = {}
+    for item in query_expansion.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = item.get("segment_id")
+        raw_text = raw_text_by_source_id.get(source_id)
+        source_span = item.get("source_span")
+        if not isinstance(raw_text, str) or not isinstance(source_span, dict):
+            continue
+        source_text = source_span.get("text")
+        start_char = source_span.get("start_char")
+        end_char = source_span.get("end_char")
+        if (
+            not isinstance(source_text, str)
+            or not isinstance(start_char, int)
+            or isinstance(start_char, bool)
+            or not isinstance(end_char, int)
+            or isinstance(end_char, bool)
+            or start_char < 0
+            or end_char <= start_char
+            or end_char > len(raw_text)
+            or raw_text[start_char:end_char] != source_text
+        ):
+            continue
+        search_terms = tuple(dict.fromkeys(
+            " ".join(value.split()).casefold()
+            for value in item.get("search_terms_en") or []
+            if isinstance(value, str) and value.strip()
+        ))
+        if not search_terms:
+            continue
+        expansion_spans.setdefault(source_id, []).append(
+            {
+                "source_text": source_text,
+                "start_char": start_char,
+                "end_char": end_char,
+                "search_terms": search_terms,
+                "term_type": item.get("term_type"),
+            }
+        )
+
     source_by_internal_id: dict[str, dict[str, Any]] = {}
     query_segments: list[MedicalQuerySegment] = []
     for position, source in enumerate(validated_segments, start=1):
         raw_text = source["text"]
         if not raw_text:
+            continue
+        collection_hints = (
+            collection_hints_by_source_id.get(str(source["id"]))
+            if collection_hints_by_source_id is not None
+            else None
+        )
+        explicit_queries: list[str] = []
+        seen_queries: set[str] = set()
+        if str(source["id"]) in medical_term_query_source_ids:
+            for expansion_span in expansion_spans.get(source["id"], []):
+                for search_term in expansion_span["search_terms"]:
+                    if search_term in seen_queries:
+                        continue
+                    seen_queries.add(search_term)
+                    explicit_queries.append(search_term)
+        if explicit_queries:
+            for query_position, search_term in enumerate(explicit_queries, start=1):
+                internal_id = f"q{position:04d}m{query_position:03d}"
+                source_by_internal_id[internal_id] = source
+                query_segments.append(
+                    MedicalQuerySegment(
+                        segment_id=internal_id,
+                        raw_text=raw_text,
+                        translated_text_en=search_term,
+                        collection_hints=collection_hints,
+                    )
+                )
             continue
         internal_id = f"q{position:04d}"
         source_by_internal_id[internal_id] = source
@@ -1692,6 +2131,7 @@ def _resolved_candidates_for_pipeline(
                 segment_id=internal_id,
                 raw_text=raw_text,
                 translated_text_en=translations.get(source["id"]),
+                collection_hints=collection_hints,
             )
         )
 
@@ -1712,6 +2152,7 @@ def _resolved_candidates_for_pipeline(
             continue
         evidence = candidate.evidence
         annotation_group_id: str | None = None
+        mapped_term_type: object = None
         if evidence.scope == "exact_raw_span":
             raw_span = evidence.raw_span
             if raw_span is None:
@@ -1726,6 +2167,26 @@ def _resolved_candidates_for_pipeline(
             translated_span = evidence.translated_query_span
             if translated_span is None:
                 continue
+            search_identities = {
+                " ".join(translated_span.text.split()).casefold(),
+                " ".join(
+                    str(candidate.dictionary_match.canonical_en or "").split()
+                ).casefold(),
+            } - {""}
+            mapped_spans = {
+                (
+                    item["source_text"],
+                    item["start_char"],
+                    item["end_char"],
+                    item.get("term_type"),
+                )
+                for item in expansion_spans.get(source["id"], [])
+                if search_identities & set(item["search_terms"])
+            }
+            if len(mapped_spans) == 1:
+                source_text, start_char, end_char, mapped_term_type = next(
+                    iter(mapped_spans)
+                )
             annotation_group_id = (
                 f"translated:{translated_span.start_char}:"
                 f"{translated_span.end_char}:{translated_span.text}"
@@ -1752,6 +2213,12 @@ def _resolved_candidates_for_pipeline(
             "review_status": candidate.review_status,
             "retrieval_score": match.retrieval_score,
         }
+        if evidence.scope != "exact_raw_span":
+            translated_span = evidence.translated_query_span
+            if translated_span is not None:
+                output["_search_term_en"] = translated_span.text
+        if mapped_term_type:
+            output["_term_type"] = mapped_term_type
         provenance_source = {
             "raw_exact": "RAW_EXACT",
             "approved_alias": "RAW_EXACT",
@@ -1808,20 +2275,40 @@ def run_clinical_workflow(
         return value if type(value) is int and value >= 0 else 0
 
     validated_segments = validate_whisper_payload(whisper_payload)
-    # Translation is the first retrieval preparation stage. Running the hybrid
-    # retriever here used to scan every dictionary and vector collection before
-    # translation, then repeat the same work in the resolver.
     covered_spans: list[dict[str, Any]] = []
-    translation_started = time.perf_counter()
-    query_expansion = run_query_expansion(
-        query_expander,
-        validated_segments,
-        covered_spans=covered_spans,
+    staged_extract_record = getattr(clinical_extractor, "extract_record", None)
+    staged_finalize_record = getattr(clinical_extractor, "finalize_record", None)
+    staged_extraction = callable(staged_extract_record) and callable(
+        staged_finalize_record
     )
-    measured_translation_ms = round(
-        (time.perf_counter() - translation_started) * 1000,
-        3,
-    )
+    extracted_record_stage: dict[str, Any] | None = None
+    clinical_record_stage_ms = 0.0
+
+    def run_translation_stage() -> tuple[dict[str, Any], float]:
+        started = time.perf_counter()
+        expanded = run_query_expansion(
+            query_expander,
+            validated_segments,
+            covered_spans=covered_spans,
+        )
+        return expanded, round((time.perf_counter() - started) * 1000, 3)
+
+    def run_record_stage() -> tuple[dict[str, Any], float]:
+        started = time.perf_counter()
+        extracted = staged_extract_record(whisper_payload)
+        return extracted, round((time.perf_counter() - started) * 1000, 3)
+
+    # Translation and conversation-grounded field extraction use the same
+    # immutable STT input and separate model clients, so only these two stages
+    # are parallelized. Candidate adjudication still waits for retrieval.
+    if staged_extraction:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            translation_future = executor.submit(run_translation_stage)
+            record_future = executor.submit(run_record_stage)
+            query_expansion, measured_translation_ms = translation_future.result()
+            extracted_record_stage, clinical_record_stage_ms = record_future.result()
+    else:
+        query_expansion, measured_translation_ms = run_translation_stage()
     query_expansion_telemetry = query_expansion.pop("_telemetry", None)
     if not isinstance(query_expansion_telemetry, dict):
         query_expansion_telemetry = {}
@@ -1842,6 +2329,14 @@ def run_clinical_workflow(
         "exact_statement_count": 0,
         "vector_statement_count": 0,
         "search_cache_hit_count": 0,
+        "vector_drug_terms_ms": 0.0,
+        "vector_drug_terms_statement_count": 0,
+        "vector_procedure_terms_ms": 0.0,
+        "vector_procedure_terms_statement_count": 0,
+        "vector_anatomy_terms_ms": 0.0,
+        "vector_anatomy_terms_statement_count": 0,
+        "vector_emergency_terms_ms": 0.0,
+        "vector_emergency_terms_statement_count": 0,
         "clinical_extraction_ms": 0.0,
     }
     errors: list[dict[str, str]] = []
@@ -1881,6 +2376,27 @@ def run_clinical_workflow(
     if medical_query_resolver is not None:
         resolver_mode = getattr(medical_query_resolver, "mode", None)
         try:
+            clinical_record = (
+                extracted_record_stage.get("clinical_record")
+                if isinstance(extracted_record_stage, dict)
+                and isinstance(extracted_record_stage.get("clinical_record"), dict)
+                else {}
+            )
+            collection_hints = field_collection_hints_by_segment(
+                clinical_record,
+                segments=validated_segments,
+            )
+            chief_query_source_ids = frozenset(
+                segment_id
+                for segment_id, field_evidence in evidence_fields_by_segment(
+                    clinical_record,
+                    segments=validated_segments,
+                ).items()
+                if any(
+                    evidence.field_id == "chief_complaint"
+                    for evidence in field_evidence
+                )
+            )
             (
                 projected_candidates_by_segment,
                 query_resolution,
@@ -1888,6 +2404,8 @@ def run_clinical_workflow(
                 validated_segments,
                 query_expansion,
                 medical_query_resolver,
+                collection_hints_by_source_id=collection_hints,
+                medical_term_query_source_ids=chief_query_source_ids,
             )
             query_resolution_summary = {
                 "schema_version": query_resolution.schema_version,
@@ -1916,6 +2434,30 @@ def run_clinical_workflow(
                 telemetry["search_cache_hit_count"] = telemetry_count(
                     getattr(resolution_telemetry, "search_cache_hit_count", 0)
                 )
+                collection_ms = dict(
+                    getattr(resolution_telemetry, "vector_collection_ms", ())
+                )
+                collection_statement_counts = dict(
+                    getattr(
+                        resolution_telemetry,
+                        "vector_collection_statement_counts",
+                        (),
+                    )
+                )
+                for collection in (
+                    "drug_terms",
+                    "procedure_terms",
+                    "anatomy_terms",
+                    "emergency_terms",
+                ):
+                    telemetry[f"vector_{collection}_ms"] = telemetry_number(
+                        collection_ms.get(collection, 0.0)
+                    )
+                    telemetry[
+                        f"vector_{collection}_statement_count"
+                    ] = telemetry_count(
+                        collection_statement_counts.get(collection, 0)
+                    )
             if query_resolution.mode != "shadow":
                 resolved_candidates_by_segment = projected_candidates_by_segment
         except Exception as error:
@@ -1946,9 +2488,18 @@ def run_clinical_workflow(
     api2_document: dict[str, Any] | None = None
     clinical_extraction_started = time.perf_counter()
     try:
-        api2_document = clinical_extractor.extract(
-            _api2_payload(whisper_payload, api3_document)
+        api2_payload = _api2_payload(
+            whisper_payload,
+            api3_document,
+            query_expansion,
         )
+        if staged_extraction and extracted_record_stage is not None:
+            api2_document = staged_finalize_record(
+                extracted_record_stage,
+                api2_payload,
+            )
+        else:
+            api2_document = clinical_extractor.extract(api2_payload)
         if isinstance(api2_document, dict):
             stage_errors = api2_document.pop("stage_errors", None)
             if isinstance(stage_errors, list):
@@ -1984,8 +2535,9 @@ def run_clinical_workflow(
             }
         )
     finally:
+        finalization_ms = (time.perf_counter() - clinical_extraction_started) * 1000
         telemetry["clinical_extraction_ms"] = round(
-            (time.perf_counter() - clinical_extraction_started) * 1000,
+            clinical_record_stage_ms + finalization_ms,
             3,
         )
 
@@ -2014,6 +2566,9 @@ def run_clinical_workflow(
             api2_document,
             api3_document,
             candidate_decisions,
+            query_expansion.get("translated_segments")
+            if isinstance(query_expansion.get("translated_segments"), list)
+            else None,
         ),
         "errors": errors,
         "telemetry": {
