@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import copy
 import math
 import re
@@ -34,6 +33,7 @@ DRAFT_FIELD_IDS = (
     "physical",
     "impression",
     "treatment-plan",
+    "outcome",
 )
 _CLINICIAN_REVIEW_ONLY_MATCH_TYPES = frozenset(
     {
@@ -58,6 +58,7 @@ _SUPPORTED_FIELD_SOURCES = {
     "physical": "physical_examination",
     "impression": "impression",
     "treatment-plan": "treatment_plan",
+    "outcome": "outcome",
 }
 _CANONICAL_TO_LEGACY_FIELD_ID = {
     canonical: legacy for legacy, canonical in _SUPPORTED_FIELD_SOURCES.items()
@@ -175,6 +176,7 @@ def _normalize_api2_document(
     api3_document: dict[str, Any],
     *,
     preserve_unsupported: bool = False,
+    translated_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(api2_document)
     record = normalized.get("clinical_record")
@@ -186,6 +188,15 @@ def _normalize_api2_document(
         for segment in api3_document.get("segments", [])
         if isinstance(segment, dict)
     ]
+    translations = {
+        str(item.get("segment_id")): str(
+            item.get("translated_text_en") or ""
+        ).strip()
+        for item in translated_segments or []
+        if isinstance(item, dict)
+        and item.get("segment_id") is not None
+        and str(item.get("translated_text_en") or "").strip()
+    }
 
     def evidence_segment(value: dict[str, Any]) -> dict[str, Any] | None:
         evidence = value.get("evidence")
@@ -233,8 +244,16 @@ def _normalize_api2_document(
                 warnings.append("clinical value supported only by a question requires validation")
                 return copy.deepcopy(value) if preserve_unsupported else discarded
             compact_value = "".join(raw_value.split())
-            compact_source = "".join(source_text.split())
-            if compact_value not in compact_source:
+            source_texts = {
+                source_text,
+                str(segment.get("corrected_text") or ""),
+                translations.get(str(segment.get("id")), ""),
+            }
+            if not any(
+                compact_value in "".join(candidate.split())
+                for candidate in source_texts
+                if candidate
+            ):
                 warnings.append("clinical value not found in source segment requires validation")
                 return copy.deepcopy(value) if preserve_unsupported else discarded
             cleaned_value = copy.deepcopy(value)
@@ -267,18 +286,50 @@ def _normalize_api2_document(
     if not isinstance(history, dict):
         history = {}
         record["history_of_present_illness"] = history
-    history["associated_symptoms"] = _as_list(history.get("associated_symptoms"))
-    for field_name in (
-        "review_of_systems",
-        "physical_examination",
-        "impression",
-        "treatment_plan",
+    for key in (
+        "aggravating_factors",
+        "alleviating_factors",
+        "associated_symptoms",
+        "pre_hospital_care",
     ):
-        record[field_name] = _as_list(record.get(field_name))
+        history[key] = _as_list(history.get(key))
+    review_of_systems = record.get("review_of_systems")
+    structured_ros = isinstance(review_of_systems, dict) and "text" in review_of_systems
+    if structured_ros:
+        review_of_systems["items"] = _as_list(review_of_systems.get("items"))
+    else:
+        record["review_of_systems"] = _as_list(review_of_systems)
+    physical_examination = record.get("physical_examination")
+    structured_physical_exam = (
+        isinstance(physical_examination, dict)
+        and "text" in physical_examination
+    )
+    if structured_physical_exam:
+        physical_examination["findings"] = _as_list(
+            physical_examination.get("findings")
+        )
+    else:
+        record["physical_examination"] = _as_list(physical_examination)
+    treatment_plan = record.get("treatment_plan")
+    structured_treatment_plan = (
+        isinstance(treatment_plan, dict) and "text" in treatment_plan
+    )
+    if structured_treatment_plan:
+        treatment_plan["items"] = _as_list(treatment_plan.get("items"))
+    else:
+        record["treatment_plan"] = _as_list(treatment_plan)
+    impression = record.get("impression")
+    structured_impression = isinstance(impression, dict) and "text" in impression
+    if structured_impression:
+        impression["items"] = _as_list(impression.get("items"))
+    else:
+        record["impression"] = _as_list(impression)
+    outcome = record.get("outcome")
+    if not (isinstance(outcome, dict) and "information_status" in outcome):
+        record.pop("outcome", None)
     segment_positions = {
         segment.get("id"): position for position, segment in enumerate(segments)
     }
-    retained_associated: list[Any] = []
     for item in history["associated_symptoms"]:
         source_segment = evidence_segment(item) if isinstance(item, dict) else None
         source_position = (
@@ -305,21 +356,20 @@ def _normalize_api2_document(
                 "가슴",
             )
         )
-        if is_symptom_review_answer:
+        if is_symptom_review_answer and not structured_ros:
             if item not in record["review_of_systems"]:
                 record["review_of_systems"].append(item)
-        else:
-            retained_associated.append(item)
-    history["associated_symptoms"] = retained_associated
 
     ros_values = {
         str(item.get("raw_value") or "")
-        for item in record["review_of_systems"]
+        for item in (record["review_of_systems"] if not structured_ros else [])
         if isinstance(item, dict)
     }
     symptom_terms = ("소변", "기침", "열", "구토", "설사", "어지", "숨", "가슴", "통증")
     uncertainty_pattern = r"(?:모르|확실|것 같|기억)"
     for position, segment in enumerate(segments):
+        if structured_ros:
+            break
         question = str(segment.get("raw_text") or "")
         if not (
             _is_question_text(question)
@@ -364,6 +414,12 @@ def _normalize_api2_document(
     past_history["surgery_history"] = _as_list(
         past_history.get("surgery_history")
     )
+    past_history["previous_admissions"] = _as_list(
+        past_history.get("previous_admissions")
+    )
+    past_history_has_model_text = bool(
+        str(past_history.get("text") or "").strip()
+    )
     retained_surgeries: list[Any] = []
     for item in past_history["surgery_history"]:
         raw_value = (
@@ -388,6 +444,8 @@ def _normalize_api2_document(
         if isinstance(item, dict)
     }
     for position, segment in enumerate(segments):
+        if past_history_has_model_text:
+            break
         question = str(segment.get("raw_text") or "")
         is_history_question = _is_question_text(question) and any(
             term in question for term in ("앓고", "병력", "진단받", "수술")
@@ -454,6 +512,16 @@ def _normalize_api2_document(
             },
         }
 
+    allergy = record.get("drug_allergy")
+    has_structured_allergy = isinstance(allergy, dict) and bool(
+        str(allergy.get("text") or "").strip()
+        or _as_list(allergy.get("items"))
+        or _as_list(allergy.get("specific_denials"))
+        or any(
+            str(atom.get("raw_value") or "").strip()
+            for atom in _atomic_values(allergy.get("allergy_status"))
+        )
+    )
     allergy_segment = next(
         (
             segment
@@ -472,7 +540,7 @@ def _normalize_api2_document(
         ),
         None,
     )
-    if allergy_segment is not None:
+    if allergy_segment is not None and not has_structured_allergy:
         allergy_text = str(allergy_segment.get("raw_text") or "").strip()
         record["drug_allergy"] = grounded_value(
             allergy_segment,
@@ -532,6 +600,60 @@ def _normalize_api2_document(
                 past_history["underlying_conditions"].append(item)
                 existing_conditions[raw_hypertension] = item
 
+    social_history = record.get("social_history")
+    if not isinstance(social_history, dict):
+        social_history = {}
+        record["social_history"] = social_history
+    smoking = social_history.get("smoking")
+    smoking_has_model_text = isinstance(smoking, dict) and bool(
+        str(smoking.get("text") or "").strip()
+    )
+
+    def confirmed_numeric_value(value: Any) -> float | None:
+        for atom in _atomic_values(value):
+            if atom.get("status") != "confirmed":
+                continue
+            number = atom.get("value")
+            if isinstance(number, bool) or not isinstance(number, (int, float)):
+                continue
+            if math.isfinite(float(number)) and float(number) >= 0:
+                return float(number)
+        return None
+
+    if isinstance(smoking, dict) and smoking_has_model_text:
+        packs_per_day = confirmed_numeric_value(smoking.get("packs_per_day"))
+        cigarettes_per_day = confirmed_numeric_value(
+            smoking.get("cigarettes_per_day")
+        )
+        duration_years = confirmed_numeric_value(smoking.get("duration_years"))
+        if (
+            packs_per_day is not None
+            and cigarettes_per_day is not None
+            and not math.isclose(
+                packs_per_day,
+                cigarettes_per_day / 20,
+                rel_tol=0,
+                abs_tol=0.001,
+            )
+        ):
+            smoking["measurement_conflict"] = True
+        effective_packs_per_day = packs_per_day
+        formula = "packs_per_day * duration_years"
+        if effective_packs_per_day is None and cigarettes_per_day is not None:
+            effective_packs_per_day = cigarettes_per_day / 20
+            formula = "cigarettes_per_day / 20 * duration_years"
+        if effective_packs_per_day is not None and duration_years is not None:
+            pack_years = round(effective_packs_per_day * duration_years, 3)
+            smoking["pack_years"] = (
+                int(pack_years) if pack_years.is_integer() else pack_years
+            )
+            smoking["pack_years_provenance"] = {
+                "basis_type": "STRUCTURED_MEASUREMENT",
+                "status": "APPROVED",
+                "formula": formula,
+                "cigarettes_per_pack": 20,
+            }
+
     smoking_segment = next(
         (
             segment
@@ -545,7 +667,7 @@ def _normalize_api2_document(
         ),
         None,
     )
-    if smoking_segment is not None:
+    if smoking_segment is not None and not smoking_has_model_text:
         smoking_text = str(smoking_segment.get("raw_text") or "").strip()
         pack_year = re.search(r"(?P<count>\d+)\s*팩\s*이어", smoking_text)
         quit_year = re.search(r"(?P<years>\d+)\s*년\s*전\s*금연", smoking_text)
@@ -557,10 +679,6 @@ def _normalize_api2_document(
                 f"quit smoking {quit_year.group('years')} years ago"
             )
         if normalized_parts:
-            social_history = record.get("social_history")
-            if not isinstance(social_history, dict):
-                social_history = {}
-                record["social_history"] = social_history
             social_history["smoking"] = grounded_value(
                 smoking_segment,
                 smoking_text,
@@ -573,6 +691,9 @@ def _normalize_api2_document(
         medications = {}
         record["medications"] = medications
     medications["items"] = _as_list(medications.get("items"))
+    medications_has_model_text = bool(
+        str(medications.get("text") or "").strip()
+    )
 
     def medication_score(text: str) -> int:
         score = 0
@@ -612,7 +733,7 @@ def _normalize_api2_document(
         ),
         default=-1,
     )
-    if best_answer is not None:
+    if best_answer is not None and not medications_has_model_text:
         answer_text = str(best_answer.get("raw_text") or "").strip()
         answer_score = medication_score(answer_text)
         if answer_score > existing_score and answer_score >= 3:
@@ -635,9 +756,20 @@ def _normalize_api2_document(
     allergy = record.get("drug_allergy")
     has_allergy_value = (
         isinstance(allergy, dict)
-        and allergy.get("status") in {"confirmed", "needs_confirmation"}
-        and isinstance(allergy.get("raw_value"), str)
-        and bool(allergy["raw_value"].strip())
+        and (
+            (
+                allergy.get("status") in {"confirmed", "needs_confirmation"}
+                and isinstance(allergy.get("raw_value"), str)
+                and bool(allergy["raw_value"].strip())
+            )
+            or bool(str(allergy.get("text") or "").strip())
+            or bool(_as_list(allergy.get("items")))
+            or bool(_as_list(allergy.get("specific_denials")))
+            or any(
+                str(atom.get("raw_value") or "").strip()
+                for atom in _atomic_values(allergy.get("allergy_status"))
+            )
+        )
     )
     if not has_allergy_value:
         allergy_answer: dict[str, Any] | None = None
@@ -1013,6 +1145,510 @@ def _draft_field(
     return {"value": value, "status": status, "evidence": evidence}
 
 
+def _hpi_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+
+    text = str(source.get("text") or "").strip()
+    atoms = list(_atomic_values(source))
+    grounded_atoms = [
+        atom for atom in atoms if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in grounded_atoms:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if text:
+        needs_review = not grounded_atoms or any(
+            atom.get("status") in {"needs_confirmation", "asked_but_unanswered"}
+            for atom in atoms
+        )
+        return {
+            "value": text,
+            "status": "needs_review" if needs_review else "filled",
+            "evidence": evidence,
+        }
+    if not grounded_atoms:
+        return {"value": "", "status": "empty", "evidence": []}
+    return _draft_field(
+        source,
+        api3_segments,
+        candidate_decisions=candidate_decisions,
+    )
+
+
+def _past_history_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+
+    text = str(source.get("text") or "").strip()
+    atoms = list(_atomic_values(source))
+    grounded_atoms = [
+        atom for atom in atoms if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in grounded_atoms:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if text:
+        displays_no_history = bool(
+            re.fullmatch(
+                r"(?:NONE|특이\s*과거력\s*없음)[.!]?",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+        def explicitly_denied(value: Any) -> bool:
+            status_atoms = [
+                atom
+                for atom in _atomic_values(value)
+                if str(atom.get("raw_value") or "").strip()
+            ]
+            return bool(status_atoms) and all(
+                atom.get("status") == "confirmed"
+                and re.search(
+                    r"(?:없|아니|그런\s*적|하지\s*않|안\s+\S+|"
+                    r"\bno\b|\bnone\b|\bden(?:y|ies|ied)\b)",
+                    str(atom.get("raw_value") or ""),
+                    re.IGNORECASE,
+                )
+                for atom in status_atoms
+            )
+
+        complete_denial = all(
+            explicitly_denied(source.get(key))
+            for key in (
+                "medical_history_status",
+                "surgical_history_status",
+                "admission_history_status",
+            )
+        )
+        needs_review = not grounded_atoms or any(
+            atom.get("status") in {"needs_confirmation", "asked_but_unanswered"}
+            for atom in atoms
+        )
+        if displays_no_history and not complete_denial:
+            needs_review = True
+        return {
+            "value": text,
+            "status": "needs_review" if needs_review else "filled",
+            "evidence": evidence,
+        }
+    return _draft_field(
+        source,
+        api3_segments,
+        candidate_decisions=candidate_decisions,
+    )
+
+
+def _medications_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+
+    text = str(source.get("text") or "").strip()
+    atoms = list(_atomic_values(source))
+    grounded_atoms = [
+        atom for atom in atoms if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in grounded_atoms:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if text:
+        needs_review = not grounded_atoms or any(
+            atom.get("status") in {"needs_confirmation", "asked_but_unanswered"}
+            for atom in atoms
+        )
+        medication_items = _deduplicated(
+            " ".join(str(atom.get("raw_value") or "").split()).casefold()
+            for atom in _atomic_values(source.get("items"))
+            if str(atom.get("raw_value") or "").strip()
+        )
+        display_items = [
+            item.strip() for item in text.split(",") if item.strip()
+        ]
+        if len(display_items) < len(medication_items):
+            needs_review = True
+        displays_no_medication = bool(
+            re.fullmatch(
+                r"(?:NONE|복용(?:\s*중인)?\s*약\s*없음|복용약\s*없음)[.!]?",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        if displays_no_medication:
+            segments = [
+                segment for segment in api3_segments if isinstance(segment, dict)
+            ]
+            segment_positions = {
+                str(segment.get("id")): position
+                for position, segment in enumerate(segments)
+                if segment.get("id") is not None
+            }
+            status_atoms = [
+                atom
+                for atom in _atomic_values(source.get("medication_status"))
+                if str(atom.get("raw_value") or "").strip()
+            ]
+            broad_denial = False
+            for atom in status_atoms:
+                raw_value = str(atom.get("raw_value") or "").strip()
+                is_denial = atom.get("status") == "confirmed" and bool(
+                    re.search(
+                        r"(?:없|아니|먹지\s*않|복용하지\s*않|안\s+\S+|"
+                        r"\bno\b|\bnone\b|\bden(?:y|ies|ied)\b)",
+                        raw_value,
+                        re.IGNORECASE,
+                    )
+                )
+                normalized = _evidence_with_segment_id(
+                    atom.get("evidence"), api3_segments
+                )
+                position = (
+                    segment_positions.get(str(normalized.get("segment_id")))
+                    if normalized is not None
+                    else None
+                )
+                previous_text = (
+                    str(segments[position - 1].get("raw_text") or "")
+                    if isinstance(position, int) and position > 0
+                    else ""
+                )
+                broad_question = bool(
+                    re.search(
+                        r"(?:평소|현재)?.*(?:복용약|드시는\s*약|먹는\s*약|"
+                        r"복용하는\s*약|복용\s*중인\s*약)|"
+                        r"(?:what|any)\s+medications?|medications?\s+do\s+you\s+take",
+                        previous_text,
+                        re.IGNORECASE,
+                    )
+                )
+                broad_statement = bool(
+                    re.search(
+                        r"(?:복용약|먹는\s*약|복용\s*중인\s*약).*(?:없|none|no)",
+                        raw_value,
+                        re.IGNORECASE,
+                    )
+                )
+                if is_denial and (broad_question or broad_statement):
+                    broad_denial = True
+                    break
+            positive_items = any(
+                str(atom.get("raw_value") or "").strip()
+                for atom in _atomic_values(source.get("items"))
+            )
+            if not broad_denial or positive_items:
+                needs_review = True
+        return {
+            "value": text,
+            "status": "needs_review" if needs_review else "filled",
+            "evidence": evidence,
+        }
+    return _draft_field(
+        source,
+        api3_segments,
+        candidate_decisions=candidate_decisions,
+    )
+
+
+def _allergy_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(source, dict) or "text" not in source:
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+
+    text = str(source.get("text") or "").strip()
+    atoms = list(_atomic_values(source))
+    grounded_atoms = [
+        atom for atom in atoms if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in grounded_atoms:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if not text:
+        if not grounded_atoms:
+            return {"value": "미확인", "status": "unknown", "evidence": []}
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+
+    needs_review = not grounded_atoms or any(
+        atom.get("status") in {"needs_confirmation", "asked_but_unanswered"}
+        for atom in atoms
+    )
+    if ";" in text:
+        needs_review = True
+    structured_items = [
+        item
+        for item in _as_list(source.get("items"))
+        if isinstance(item, dict)
+    ]
+    allowed_allergy_types = {
+        "drug",
+        "contrast media",
+        "latex",
+        "food",
+        "other",
+    }
+    for item in structured_items:
+        allergy_type = str(item.get("allergy_type") or "").strip().casefold()
+        has_allergen = any(
+            str(atom.get("raw_value") or "").strip()
+            for atom in _atomic_values(item.get("allergen"))
+        )
+        has_reaction = any(
+            str(atom.get("raw_value") or "").strip()
+            for atom in _atomic_values(item.get("reaction"))
+        )
+        if allergy_type not in allowed_allergy_types or not has_allergen:
+            needs_review = True
+        if has_reaction and not has_allergen:
+            needs_review = True
+    positive_items = [
+        item
+        for item in structured_items
+        if any(
+            str(atom.get("raw_value") or "").strip()
+            for atom in _atomic_values(item.get("allergen"))
+        )
+    ]
+    display_items = [item.strip() for item in text.split(",") if item.strip()]
+    if len(display_items) < len(positive_items):
+        needs_review = True
+
+    displays_no_allergy = bool(
+        re.fullmatch(
+            r"(?:NONE|알레르기\s*없음|특이\s*알레르기\s*없음|"
+            r"no\s+known\s+allerg(?:y|ies)|no\s+allerg(?:y|ies))[.!]?",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if displays_no_allergy:
+        segments = [
+            segment for segment in api3_segments if isinstance(segment, dict)
+        ]
+        segment_positions = {
+            str(segment.get("id")): position
+            for position, segment in enumerate(segments)
+            if segment.get("id") is not None
+        }
+        broad_denial = False
+        for atom in _atomic_values(source.get("allergy_status")):
+            raw_value = str(atom.get("raw_value") or "").strip()
+            if atom.get("status") != "confirmed" or not re.search(
+                r"(?:없|아니|해당\s*없|\bno\b|\bnone\b|\bden(?:y|ies|ied)\b)",
+                raw_value,
+                re.IGNORECASE,
+            ):
+                continue
+            normalized = _evidence_with_segment_id(
+                atom.get("evidence"), api3_segments
+            )
+            position = (
+                segment_positions.get(str(normalized.get("segment_id")))
+                if normalized is not None
+                else None
+            )
+            previous_text = (
+                str(segments[position - 1].get("raw_text") or "").strip()
+                if isinstance(position, int) and position > 0
+                else ""
+            )
+            broad_question = bool(
+                re.search(
+                    r"^(?:혹시\s*)?(?:(?:약(?:물)?|음식)(?:이나|이나\s+음식|·|,|과|와)\s*)?"
+                    r"알(?:레르기|러지)|^(?:do\s+you\s+have|any)\b.*\ballerg",
+                    previous_text,
+                    re.IGNORECASE,
+                )
+            )
+            broad_statement = bool(
+                re.search(
+                    r"^(?:저는\s*)?알(?:레르기|러지).*(?:없|no|none)",
+                    raw_value,
+                    re.IGNORECASE,
+                )
+            )
+            if broad_question or broad_statement:
+                broad_denial = True
+                break
+        if not broad_denial or positive_items:
+            needs_review = True
+
+    return {
+        "value": text,
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence,
+    }
+
+
+def _social_history_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(source, dict) or "text" not in source:
+        return _draft_field(
+            source,
+            api3_segments,
+            empty_when_missing=True,
+            candidate_decisions=candidate_decisions,
+        )
+
+    text = str(source.get("text") or "").strip()
+    atoms = list(_atomic_values(source))
+    grounded_atoms = [
+        atom for atom in atoms if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in grounded_atoms:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if not text:
+        if not grounded_atoms:
+            return {"value": "미확인", "status": "unknown", "evidence": []}
+        has_structured_child = any(
+            isinstance(source.get(key), dict) and "text" in source[key]
+            for key in ("smoking", "alcohol")
+        )
+        fallback = _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+        )
+        if has_structured_child:
+            fallback["status"] = "needs_review"
+        return fallback
+
+    needs_review = not grounded_atoms or any(
+        atom.get("status") in {"needs_confirmation", "asked_but_unanswered"}
+        for atom in atoms
+    )
+    smoking = source.get("smoking")
+    alcohol = source.get("alcohol")
+    smoking_text = (
+        str(smoking.get("text") or "").strip()
+        if isinstance(smoking, dict)
+        else ""
+    )
+    alcohol_text = (
+        str(alcohol.get("text") or "").strip()
+        if isinstance(alcohol, dict)
+        else ""
+    )
+    if smoking_text and smoking_text not in text:
+        needs_review = True
+    if alcohol_text and alcohol_text not in text:
+        needs_review = True
+    if re.search(r"\b(?:heavy|high[- ]risk)\s+drinker\b", text, re.IGNORECASE):
+        needs_review = True
+
+    if isinstance(smoking, dict):
+        if smoking.get("measurement_conflict") is True:
+            needs_review = True
+        state = str(smoking.get("state") or "").strip().casefold()
+        allowed_states = {"current smoker", "former smoker", "never smoker", ""}
+        if state not in allowed_states:
+            needs_review = True
+        status_text = " ".join(
+            str(atom.get("raw_value") or "").strip()
+            for atom in _atomic_values(smoking.get("smoking_status"))
+        )
+        if state == "current smoker" and re.search(
+            r"(?:안\s*피|피우지\s*않|흡연하지\s*않|금연|\bnot\s+smok|\bno\b)",
+            status_text,
+            re.IGNORECASE,
+        ):
+            needs_review = True
+        if state == "former smoker" and not (
+            any(
+                str(atom.get("raw_value") or "").strip()
+                for atom in _atomic_values(smoking.get("quit_years"))
+            )
+            or re.search(r"(?:끊|금연|피우다가|used\s+to\s+smoke|former)", status_text, re.IGNORECASE)
+        ):
+            needs_review = True
+        if state == "never smoker" and not re.search(
+            r"(?:한\s*번도|전혀|평생|피운\s*적\s*없|\bnever\b)",
+            status_text,
+            re.IGNORECASE,
+        ):
+            needs_review = True
+
+        pack_years = smoking.get("pack_years")
+        displayed_pack_years = re.search(
+            r"(?<!\d)(\d+(?:\.\d+)?)\s*PY\b",
+            smoking_text or text,
+            re.IGNORECASE,
+        )
+        if isinstance(pack_years, (int, float)) and not isinstance(pack_years, bool):
+            if not displayed_pack_years or not math.isclose(
+                float(displayed_pack_years.group(1)),
+                float(pack_years),
+                rel_tol=0,
+                abs_tol=0.001,
+            ):
+                needs_review = True
+        elif displayed_pack_years:
+            needs_review = True
+
+    return {
+        "value": text,
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence,
+    }
+
+
 def _chief_draft_field(
     source: Any,
     api3_segments: list[dict[str, Any]],
@@ -1037,6 +1673,29 @@ def _chief_draft_field(
             seen_values.add(identity)
             values.append(normalized)
 
+    def annotation_supports_atom(
+        annotation: dict[str, Any],
+        raw_value: str,
+    ) -> bool:
+        atom_identity = " ".join(raw_value.split()).casefold()
+        annotation_identities = [
+            str((annotation.get("source_span") or {}).get("text") or ""),
+            *[
+                str(term)
+                for term in annotation.get("search_terms_en", [])
+                if isinstance(term, str)
+            ],
+        ]
+        return any(
+            identity
+            and (
+                identity in atom_identity
+                or atom_identity in identity
+            )
+            for value in annotation_identities
+            if (identity := " ".join(value.split()).casefold())
+        )
+
     for atom in atoms:
         raw_value = str(atom.get("raw_value") or "").strip()
         if not raw_value:
@@ -1054,10 +1713,7 @@ def _chief_draft_field(
                 source_text = str(
                     (annotation.get("source_span") or {}).get("text") or ""
                 ).strip()
-                if source_text and not (
-                    source_text.casefold() in raw_value.casefold()
-                    or raw_value.casefold() in source_text.casefold()
-                ):
+                if not annotation_supports_atom(annotation, raw_value):
                     continue
                 candidates = filter_candidates_for_field(
                     "chief_complaint",
@@ -1197,6 +1853,149 @@ def _ros_summary_field(
     record: dict[str, Any],
     api3_segments: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source = record.get("review_of_systems")
+    if isinstance(source, dict) and "text" in source:
+        text = str(source.get("text") or "").strip()
+        items = [
+            item
+            for item in _as_list(source.get("items"))
+            if isinstance(item, dict)
+        ]
+        if not text and not items:
+            return {"value": "", "status": "empty", "evidence": []}
+
+        evidence_values: list[dict[str, Any]] = []
+        needs_review = not text or not items
+        assertions: list[str] = []
+        supported_texts_by_item: list[list[str]] = []
+        segments_by_id = {
+            str(segment.get("id")): segment
+            for segment in api3_segments
+            if isinstance(segment, dict) and segment.get("id") is not None
+        }
+        for item in items:
+            assertion = str(item.get("assertion") or "").strip().upper()
+            symptom_atoms = [
+                atom
+                for atom in _atomic_values(item.get("symptom"))
+                if str(atom.get("raw_value") or "").strip()
+            ]
+            if assertion not in {"PRESENT", "DENIED", "UNCERTAIN"}:
+                needs_review = True
+            assertions.append(assertion)
+            supported_texts: list[str] = []
+            if not symptom_atoms:
+                needs_review = True
+                supported_texts_by_item.append(supported_texts)
+                continue
+            for atom in symptom_atoms:
+                evidence = _evidence_with_segment_id(
+                    atom.get("evidence"), api3_segments
+                )
+                if evidence is not None and evidence not in evidence_values:
+                    evidence_values.append(evidence)
+                raw_value = str(atom.get("raw_value") or "").strip()
+                if raw_value:
+                    supported_texts.append(raw_value)
+                segment = (
+                    segments_by_id.get(str(evidence.get("segment_id")))
+                    if evidence is not None
+                    else None
+                )
+                if segment is not None:
+                    translated_text = str(
+                        segment.get("translated_text_en") or ""
+                    ).strip()
+                    if translated_text:
+                        supported_texts.append(translated_text)
+                    for annotation in segment.get("annotations", []):
+                        if not isinstance(annotation, dict):
+                            continue
+                        source_text = str(
+                            (annotation.get("source_span") or {}).get("text")
+                            or ""
+                        ).strip()
+                        if source_text and not (
+                            source_text.casefold() in raw_value.casefold()
+                            or raw_value.casefold() in source_text.casefold()
+                        ):
+                            continue
+                        supported_texts.extend(
+                            str(term).strip()
+                            for term in annotation.get("search_terms_en", [])
+                            if str(term).strip()
+                        )
+                        supported_texts.extend(
+                            str(candidate.get("canonical_en") or "").strip()
+                            for candidate in annotation.get("candidates", [])
+                            if isinstance(candidate, dict)
+                            and str(candidate.get("canonical_en") or "").strip()
+                        )
+                inferred_assertion = {
+                    "positive": "PRESENT",
+                    "negative": "DENIED",
+                    "uncertain": "UNCERTAIN",
+                }[_ros_assertion(atom)]
+                if assertion != inferred_assertion:
+                    needs_review = True
+                if atom.get("status") in {
+                    "needs_confirmation",
+                    "asked_but_unanswered",
+                }:
+                    needs_review = True
+            if assertion == "UNCERTAIN":
+                needs_review = True
+            supported_texts_by_item.append(supported_texts)
+
+        entries = [entry.strip() for entry in text.split(",") if entry.strip()]
+        if len(entries) != len(items):
+            needs_review = True
+        expected_symbols = {
+            "PRESENT": "+",
+            "DENIED": "-",
+            "UNCERTAIN": "?",
+        }
+        seen_labels: set[str] = set()
+        for entry, assertion, supported_texts in zip(
+            entries, assertions, supported_texts_by_item
+        ):
+            match = re.fullmatch(r".+\(([+?]|-)\)", entry)
+            if (
+                match is None
+                or expected_symbols.get(assertion) != match.group(1)
+            ):
+                needs_review = True
+            label = re.sub(r"\(([+?]|-)\)$", "", entry).strip()
+            label_identity = " ".join(label.split()).casefold()
+            if label_identity in seen_labels:
+                needs_review = True
+            seen_labels.add(label_identity)
+            normalized_support = [
+                " ".join(value.split()).casefold()
+                for value in supported_texts
+                if value.strip()
+            ]
+            if re.search(r"[ㄱ-ㅎㅏ-ㅣ가-힣]", label) or not any(
+                label_identity in value or value in label_identity
+                for value in normalized_support
+            ):
+                needs_review = True
+            if re.search(
+                r"(?:\d+(?:\.\d+)?\s*(?:일|주|개월|년|시간|분)"
+                r"(?:\s*(?:전|동안|째|부터))?|"
+                r"\bfor\s+\d+|\bsince\b|\bNRS\b|"
+                r"\b(?:severe|mild|moderate|yellow|green|bloody|purulent)\b|"
+                r"심(?:한|하게)|경증|중등도)",
+                label,
+                re.IGNORECASE,
+            ):
+                needs_review = True
+        return {
+            "value": text,
+            "status": "needs_review" if needs_review else "filled",
+            "evidence": evidence_values,
+        }
+
     segments = {
         str(segment.get("id")): segment
         for segment in api3_segments
@@ -1248,22 +2047,703 @@ def _ros_summary_field(
     }
 
 
+_PHYSICAL_EXAM_SYSTEMS = frozenset(
+    {
+        "General",
+        "HEENT",
+        "Chest",
+        "Abdomen",
+        "Back / Spine",
+        "Extremities / Musculoskeletal",
+        "Neurology",
+        "Other",
+    }
+)
+_PHYSICAL_EXAM_CONTEXT_RE = re.compile(
+    r"(?:청진|촉진|타진|시진|진찰|검사상|관찰|확인|소견|"
+    r"눌러|누를|압통|반발통|호흡음|폐소리|심음|수포음|천명|"
+    r"동공|반사|의식|근력|마비|감각|부종|청색증|변형|가동\s*범위|"
+    r"cva\s*tenderness|gcs|alert|lethargic|ill-looking|"
+    r"auscultat|palpat|percuss|inspect|exam(?:ination)?|observ|"
+    r"tenderness|rebound|breath\s*sounds?|rales?|wheez|murmur|"
+    r"pupil|reflex|motor\s*grade|hemiparesis|pitting\s*edema)",
+    re.IGNORECASE,
+)
+_VITAL_ONLY_RE = re.compile(
+    r"(?:\bBP\b|\bHR\b|\bRR\b|\bBT\b|SpO[₂2]|혈압|맥박|"
+    r"호흡수|체온|산소포화도)\s*[:=]?\s*\d",
+    re.IGNORECASE,
+)
+
+
+def _physical_exam_has_objective_context(
+    segment: dict[str, Any],
+    previous_segment: dict[str, Any] | None,
+) -> bool:
+    current = " ".join(
+        str(segment.get(key) or "")
+        for key in ("raw_text", "corrected_text", "translated_text_en")
+    )
+    previous = " ".join(
+        str(previous_segment.get(key) or "")
+        for key in ("raw_text", "corrected_text", "translated_text_en")
+    ) if previous_segment is not None else ""
+    if _VITAL_ONLY_RE.search(current) and not _PHYSICAL_EXAM_CONTEXT_RE.search(
+        current
+    ):
+        return False
+    return bool(
+        _PHYSICAL_EXAM_CONTEXT_RE.search(current)
+        or _PHYSICAL_EXAM_CONTEXT_RE.search(previous)
+    )
+
+
+def _physical_exam_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not (isinstance(source, dict) and "text" in source):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+            empty_when_missing=True,
+        )
+
+    text = str(source.get("text") or "").strip()
+    findings = [
+        finding
+        for finding in _as_list(source.get("findings"))
+        if isinstance(finding, dict)
+    ]
+    if not text and not findings:
+        return {"value": "", "status": "empty", "evidence": []}
+
+    segments_by_id = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    positions = {
+        str(segment.get("id")): index
+        for index, segment in enumerate(api3_segments)
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    evidence_values: list[dict[str, Any]] = []
+    validation_reasons: list[str] = []
+    if not text or not findings:
+        validation_reasons.append("text_and_findings_must_coexist")
+
+    systems_in_text = {
+        line.split(":", 1)[0].strip()
+        for line in text.splitlines()
+        if ":" in line
+    }
+    if text and not systems_in_text:
+        validation_reasons.append("system_prefix_missing")
+
+    for finding in findings:
+        system = str(finding.get("system") or "").strip()
+        assertion = str(finding.get("assertion") or "").strip().upper()
+        finding_atoms = [
+            atom
+            for atom in _atomic_values(finding.get("finding"))
+            if str(atom.get("raw_value") or "").strip()
+        ]
+        if system not in _PHYSICAL_EXAM_SYSTEMS:
+            validation_reasons.append("unsupported_system")
+        if system and system not in systems_in_text:
+            validation_reasons.append("system_not_rendered")
+        if assertion not in {"PRESENT", "ABSENT", "UNCERTAIN"}:
+            validation_reasons.append("unsupported_assertion")
+        if not finding_atoms:
+            validation_reasons.append("finding_without_evidence")
+            continue
+        for atom in finding_atoms:
+            evidence = _evidence_with_segment_id(
+                atom.get("evidence"), api3_segments
+            )
+            if evidence is not None and evidence not in evidence_values:
+                evidence_values.append(evidence)
+            segment_id = str(evidence.get("segment_id")) if evidence else ""
+            segment = segments_by_id.get(segment_id)
+            position = positions.get(segment_id)
+            previous_segment = (
+                api3_segments[position - 1]
+                if isinstance(position, int) and position > 0
+                else None
+            )
+            if segment is None or not _physical_exam_has_objective_context(
+                segment, previous_segment
+            ):
+                validation_reasons.append("objective_exam_context_missing")
+
+            inferred_assertion = {
+                "positive": "PRESENT",
+                "negative": "ABSENT",
+                "uncertain": "UNCERTAIN",
+            }[_ros_assertion(atom)]
+            if assertion != inferred_assertion:
+                validation_reasons.append("assertion_mismatch")
+            if assertion == "UNCERTAIN" or atom.get("status") in {
+                "needs_confirmation",
+                "asked_but_unanswered",
+            }:
+                validation_reasons.append("uncertain_finding")
+
+    unique_reasons = list(dict.fromkeys(validation_reasons))
+    return {
+        "value": text,
+        "status": "needs_review" if unique_reasons else "filled",
+        "evidence": evidence_values,
+        **({"_validation_reasons": unique_reasons} if unique_reasons else {}),
+    }
+
+
+_TREATMENT_PLAN_CATEGORIES = frozenset(
+    {
+        "Diagnostic Workup",
+        "Medication / Procedure",
+        "Consultation",
+        "Disposition / Safety-netting",
+    }
+)
+_TREATMENT_PLAN_STATUS_ASSERTION = {
+    "PLANNED": "PRESENT",
+    "ORDERED": "PRESENT",
+    "COMPLETED": "PRESENT",
+    "CANCELED": "DENIED",
+    "REFUSED": "DENIED",
+    "CONDITIONAL": "UNCERTAIN",
+}
+_TREATMENT_PLAN_CONTEXT_RE = re.compile(
+    r"(?:하겠습니다|진행|시행|촬영|검사(?:할|하|를)|투여|처방|"
+    r"금식\s*유지|협진|의뢰|입원|퇴원|전원|관찰|재평가|"
+    r"결정(?:할|하)|보내드|적용|봉합|소독|예약|거부|취소|"
+    r"will\b|plan(?:ned)?\b|order(?:ed)?\b|perform|administer|"
+    r"prescri|consult|admission|admit|discharg|transfer|observ|"
+    r"re-?evaluat|follow-?up|completed|cancell|refus|pending)",
+    re.IGNORECASE,
+)
+def _impression_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not (isinstance(source, dict) and "text" in source):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+            empty_when_missing=True,
+        )
+
+    text = str(source.get("text") or "").strip()
+    items = [
+        item
+        for item in _as_list(source.get("items"))
+        if isinstance(item, dict)
+    ]
+    if not text and not items:
+        return {"value": "", "status": "empty", "evidence": []}
+
+    evidence: list[dict[str, Any]] = []
+    needs_review = not text or not items
+    allowed_certainties = {"CONFIRMED", "SUSPECTED", "RULE_OUT", "EXCLUDED"}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < len(items):
+        needs_review = True
+
+    for index, item in enumerate(items):
+        certainty = str(item.get("certainty") or "").strip().upper()
+        diagnosis_atoms = [
+            atom
+            for atom in _atomic_values(item.get("diagnosis"))
+            if str(atom.get("raw_value") or "").strip()
+        ]
+        if certainty not in allowed_certainties or not diagnosis_atoms:
+            needs_review = True
+            continue
+        if certainty in {"SUSPECTED", "RULE_OUT"}:
+            needs_review = True
+        for atom in diagnosis_atoms:
+            normalized = _evidence_with_segment_id(
+                atom.get("evidence"), api3_segments
+            )
+            if normalized is not None and normalized not in evidence:
+                evidence.append(normalized)
+            expected_status = (
+                "needs_confirmation"
+                if certainty in {"SUSPECTED", "RULE_OUT"}
+                else "confirmed"
+            )
+            if atom.get("status") != expected_status:
+                needs_review = True
+        if index < len(lines):
+            has_rule_out_prefix = bool(
+                re.match(r"^R/O(?:\s+|$)", lines[index], re.IGNORECASE)
+            )
+            if certainty in {"SUSPECTED", "RULE_OUT"} and not has_rule_out_prefix:
+                needs_review = True
+            if certainty == "CONFIRMED" and has_rule_out_prefix:
+                needs_review = True
+
+    return {
+        "value": text,
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence,
+    }
+
+
+_OUTCOME_LABELS = {
+    "Discharge": "귀가",
+    "Admission": "입원",
+    "Transfer": "전원",
+    "Death": "사망",
+    "Other": "기타",
+}
+
+
+def _outcome_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not (isinstance(source, dict) and "information_status" in source):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+            empty_when_missing=True,
+        )
+
+    information_status = str(source.get("information_status") or "").strip()
+    category = str(source.get("category") or "").strip()
+    text = str(source.get("text") or "").strip()
+    decision_atoms = [
+        atom
+        for atom in _atomic_values(source.get("decision"))
+        if str(atom.get("raw_value") or "").strip()
+    ]
+    detail_atoms = [
+        atom
+        for atom in _atomic_values(source.get("detail"))
+        if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in [*decision_atoms, *detail_atoms]:
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    if information_status == "NOT_ASSESSED" and not decision_atoms:
+        return {"value": "", "status": "empty", "evidence": []}
+    if information_status == "UNCERTAIN":
+        return {
+            "value": "진료 진행 중",
+            "status": "needs_review",
+            "evidence": evidence,
+        }
+
+    expected_text = _OUTCOME_LABELS.get(category)
+    needs_review = (
+        information_status != "PRESENT"
+        or expected_text is None
+        or not decision_atoms
+        or any(atom.get("status") != "confirmed" for atom in decision_atoms)
+        or (bool(text) and text != expected_text)
+    )
+    decision_text = " ".join(
+        str(atom.get("raw_value") or "") for atom in decision_atoms
+    )
+    conditional = bool(
+        re.search(
+            r"(?:수도\s*있|가능성|고려|결과.{0,12}(?:보고|따라)|"
+            r"경과.{0,12}(?:보고|따라)|\bmay\b|\bmight\b|\bconsider|"
+            r"\bdepending\b|\bif\b)",
+            decision_text,
+            re.IGNORECASE,
+        )
+    )
+    if conditional:
+        return {
+            "value": "진료 진행 중",
+            "status": "needs_review",
+            "evidence": evidence,
+        }
+    if category == "Death" and not re.search(
+        r"(?:사망.{0,8}(?:확인|선고)|(?:확인|선고).{0,8}사망|"
+        r"pronounc(?:e|ed).{0,8}dead|confirmed.{0,8}death|\bexpired\b)",
+        decision_text,
+        re.IGNORECASE,
+    ):
+        return {
+            "value": "진료 진행 중",
+            "status": "needs_review",
+            "evidence": evidence,
+        }
+    if category == "Other" and not detail_atoms:
+        needs_review = True
+
+    return {
+        "value": expected_text or text,
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence,
+    }
+
+
+_PLAN_TOKEN_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "after",
+        "before",
+        "for",
+        "of",
+        "on",
+        "the",
+        "to",
+        "will",
+        "we",
+        "perform",
+        "administer",
+        "planned",
+        "ordered",
+        "completed",
+    }
+)
+
+
+def _plan_tokens(value: Any) -> set[str]:
+    text = str(value or "").casefold()
+    text = re.sub(r"\bblood\s+tests?\b|\blaboratory\s+tests?\b|\blab\b", " bloodtest ", text)
+    text = re.sub(r"\bgeneral\s+surgery\b|\bgs\b", " gs ", text)
+    text = re.sub(r"\bx[ -]?ray\b", " xray ", text)
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text):
+        if token in _PLAN_TOKEN_STOPWORDS:
+            continue
+        normalized = token[:-1] if len(token) > 4 and token.endswith("s") else token
+        if len(normalized) > 1:
+            tokens.add(normalized)
+    return tokens
+
+
+def _plan_display_action_supported(
+    action_text: str,
+    supported_texts: list[str],
+) -> bool:
+    action_tokens = _plan_tokens(action_text)
+    if not action_tokens:
+        return False
+    for supported in supported_texts:
+        support_tokens = _plan_tokens(supported)
+        if not support_tokens:
+            continue
+        coverage = len(action_tokens & support_tokens) / len(action_tokens)
+        if coverage >= 0.6:
+            return True
+    return False
+
+
+def _treatment_plan_draft_field(
+    source: Any,
+    api3_segments: list[dict[str, Any]],
+    *,
+    candidate_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not (isinstance(source, dict) and "text" in source):
+        return _draft_field(
+            source,
+            api3_segments,
+            candidate_decisions=candidate_decisions,
+            empty_when_missing=True,
+        )
+
+    text = str(source.get("text") or "").strip()
+    items = [
+        item
+        for item in _as_list(source.get("items"))
+        if isinstance(item, dict)
+    ]
+    if not text and not items:
+        return {"value": "", "status": "empty", "evidence": []}
+
+    segments_by_id = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    evidence_values: list[dict[str, Any]] = []
+    support_by_category: dict[str, list[str]] = {}
+    validation_reasons: list[str] = []
+    needs_review = not text or not items
+    if needs_review:
+        validation_reasons.append("text_and_items_must_coexist")
+
+    rendered_categories: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            validation_reasons.append("category_prefix_missing")
+            continue
+        category, content = line.split(":", 1)
+        rendered_categories[category.strip()] = content.strip()
+
+    for item in items:
+        category = str(item.get("category") or "").strip()
+        assertion = str(item.get("assertion") or "").strip().upper()
+        plan_status = str(item.get("plan_status") or "").strip().upper()
+        action_atoms = [
+            atom
+            for atom in _atomic_values(item.get("action"))
+            if str(atom.get("raw_value") or "").strip()
+        ]
+        if category not in _TREATMENT_PLAN_CATEGORIES:
+            validation_reasons.append("unsupported_category")
+        if category and category not in rendered_categories:
+            validation_reasons.append("category_not_rendered")
+        if _TREATMENT_PLAN_STATUS_ASSERTION.get(plan_status) != assertion:
+            validation_reasons.append("plan_status_assertion_mismatch")
+        if not action_atoms:
+            validation_reasons.append("plan_without_evidence")
+            continue
+        for atom in action_atoms:
+            evidence = _evidence_with_segment_id(
+                atom.get("evidence"), api3_segments
+            )
+            if evidence is not None and evidence not in evidence_values:
+                evidence_values.append(evidence)
+            segment = (
+                segments_by_id.get(str(evidence.get("segment_id")))
+                if evidence is not None
+                else None
+            )
+            raw_value = str(atom.get("raw_value") or "").strip()
+            supports = support_by_category.setdefault(category, [])
+            if raw_value:
+                supports.append(raw_value)
+            if segment is not None:
+                supports.extend(
+                    str(segment.get(key) or "").strip()
+                    for key in (
+                        "raw_text",
+                        "corrected_text",
+                        "translated_text_en",
+                    )
+                    if str(segment.get(key) or "").strip()
+                )
+            context = " ".join(supports)
+            if segment is None or not _TREATMENT_PLAN_CONTEXT_RE.search(context):
+                validation_reasons.append("clinician_plan_context_missing")
+
+            if (
+                atom.get("status") in {
+                    "needs_confirmation",
+                    "asked_but_unanswered",
+                }
+                and assertion != "UNCERTAIN"
+            ):
+                validation_reasons.append("assertion_mismatch")
+            if plan_status == "CONDITIONAL" or assertion == "UNCERTAIN":
+                needs_review = True
+
+    for category, content in rendered_categories.items():
+        if category not in _TREATMENT_PLAN_CATEGORIES:
+            validation_reasons.append("unsupported_rendered_category")
+            continue
+        actions = [
+            action.strip()
+            for action in content.split(",")
+            if action.strip()
+        ]
+        supports = support_by_category.get(category, [])
+        if not actions or any(
+            not _plan_display_action_supported(action, supports)
+            for action in actions
+        ):
+            validation_reasons.append("unsupported_display_action")
+
+    unique_reasons = list(dict.fromkeys(validation_reasons))
+    needs_review = needs_review or bool(unique_reasons)
+    return {
+        "value": text,
+        "status": "needs_review" if needs_review else "filled",
+        "evidence": evidence_values,
+        **({"_validation_reasons": unique_reasons} if unique_reasons else {}),
+    }
+
+
+def _is_laterality_only(value: str) -> bool:
+    normalized = re.sub(r"[\s.,;:()]+", " ", value.casefold()).strip()
+    korean = re.sub(r"\s+", "", normalized)
+    korean = re.sub(r"(?:에서|으로|에게|이|가|은|는|을|를|에)$", "", korean)
+    if korean in {"오른쪽", "우측", "왼쪽", "좌측", "양쪽", "양측"}:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:right|left)(?:[- ]sided| side)?|bilateral(?:ly)?|both sides?|rt\.?|lt\.?",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _is_english_location_value(value: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", value)) and not bool(
+        re.search(r"[ㄱ-ㅎㅏ-ㅣ가-힣]", value)
+    )
+
+
 def _nrs_draft_field(
     pain_assessment: Any,
     api3_segments: list[dict[str, Any]],
 ) -> dict[str, Any]:
     nrs = pain_assessment.get("nrs") if isinstance(pain_assessment, dict) else None
-    field = _draft_field(nrs, api3_segments)
-    if not field["value"] or field["value"] in {"미확인", "확인 필요"}:
-        return field
-    match = re.search(r"(?<!\d)(10(?:\.0+)?|[0-9](?:\.\d+)?)(?!\d)", field["value"])
-    if match:
-        score = match.group(1).removesuffix(".0")
-        field["value"] = f"NRS {score}/10"
-    else:
-        field["status"] = "needs_review"
-        field["value"] = f"NRS 확인 필요: {field['value']}"
-    return field
+    location = (
+        pain_assessment.get("location")
+        if isinstance(pain_assessment, dict)
+        else None
+    )
+    presence = (
+        pain_assessment.get("presence")
+        if isinstance(pain_assessment, dict)
+        else None
+    )
+    nrs_atoms = list(_atomic_values(nrs))
+    location_atoms = list(_atomic_values(location))
+    presence_atoms = [
+        atom
+        for atom in _atomic_values(presence)
+        if str(atom.get("raw_value") or "").strip()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for atom in (*nrs_atoms, *location_atoms, *presence_atoms):
+        normalized = _evidence_with_segment_id(atom.get("evidence"), api3_segments)
+        if normalized is not None and normalized not in evidence:
+            evidence.append(normalized)
+
+    score = ""
+    for atom in nrs_atoms:
+        raw_value = str(atom.get("raw_value") or "").strip()
+        match = re.search(
+            r"(?<!\d)(10(?:\.0+)?|[0-9](?:\.\d+)?)(?!\d)",
+            raw_value,
+        )
+        if match:
+            score = match.group(1).removesuffix(".0")
+            break
+
+    location_values: list[str] = []
+    seen_locations: set[str] = set()
+    segments = {
+        str(segment.get("id")): segment
+        for segment in api3_segments
+        if isinstance(segment, dict) and segment.get("id") is not None
+    }
+    for atom in location_atoms:
+        raw_value = str(atom.get("raw_value") or "").strip()
+        if not raw_value or _is_laterality_only(raw_value):
+            continue
+        normalized_evidence = _evidence_with_segment_id(
+            atom.get("evidence"), api3_segments
+        )
+        segment = (
+            segments.get(str(normalized_evidence.get("segment_id")))
+            if normalized_evidence
+            else None
+        )
+        display_value = ""
+        if segment is not None:
+            for annotation in segment.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
+                source_text = str(
+                    (annotation.get("source_span") or {}).get("text") or ""
+                ).strip()
+                if source_text and not (
+                    source_text.casefold() in raw_value.casefold()
+                    or raw_value.casefold() in source_text.casefold()
+                ):
+                    continue
+                candidates = filter_candidates_for_field(
+                    "pain_assessment",
+                    annotation.get("candidates", []),
+                    annotation_term_type=annotation.get("term_type"),
+                )
+                is_anatomy = annotation.get("term_type") == "anatomy" or any(
+                    candidate.get("collection") == "anatomy_terms"
+                    for candidate in candidates
+                )
+                if not is_anatomy:
+                    continue
+                display_value = next(
+                    (
+                        str(term).strip()
+                        for term in annotation.get("search_terms_en", [])
+                        if str(term).strip()
+                    ),
+                    "",
+                )
+                if display_value and (
+                    not _is_english_location_value(display_value)
+                    or _is_laterality_only(display_value)
+                ):
+                    display_value = ""
+                if not display_value:
+                    display_value = next(
+                        (
+                            str(candidate.get("canonical_en") or "").strip()
+                            for candidate in candidates
+                            if str(candidate.get("canonical_en") or "").strip()
+                        ),
+                        "",
+                    )
+                if display_value and (
+                    not _is_english_location_value(display_value)
+                    or _is_laterality_only(display_value)
+                ):
+                    display_value = ""
+                if display_value:
+                    break
+        if not display_value and _is_english_location_value(raw_value):
+            display_value = raw_value
+        if not display_value:
+            continue
+        display_value = display_value[:1].upper() + display_value[1:]
+        identity = display_value.casefold()
+        if identity not in seen_locations:
+            seen_locations.add(identity)
+            location_values.append(display_value)
+
+    presence_text = " ".join(
+        str(atom.get("raw_value") or "").strip() for atom in presence_atoms
+    )
+    pain_denied = bool(
+        re.search(
+            r"(?:통증(?:은|이)?\s*(?:없|없음)|안\s*아파|아프지\s*않|"
+            r"\bno\s+pain\b|\bden(?:y|ies|ied)\s+pain\b|\bnot\s+in\s+pain\b)",
+            presence_text,
+            re.IGNORECASE,
+        )
+    )
+    if pain_denied and not score and not location_values:
+        return {"value": "통증 없음", "status": "filled", "evidence": evidence}
+    if not score and not location_values and not presence_atoms:
+        return {"value": "", "status": "empty", "evidence": []}
+    return {
+        "value": f"NRS {score or '-'} / {', '.join(location_values) or '-'}",
+        "status": (
+            "needs_review"
+            if any(atom.get("status") == "needs_confirmation" for atom in presence_atoms)
+            else "filled"
+        ),
+        "evidence": evidence,
+    }
 
 
 def _candidate_field(
@@ -1855,6 +3335,60 @@ def build_draft(
                     api3_segments,
                     candidate_decisions=candidate_decisions,
                 )
+            elif field_id == "history":
+                fields[field_id] = _hpi_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "past-history":
+                fields[field_id] = _past_history_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "medication":
+                fields[field_id] = _medications_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "allergy":
+                fields[field_id] = _allergy_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "social":
+                fields[field_id] = _social_history_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "physical":
+                fields[field_id] = _physical_exam_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "treatment-plan":
+                fields[field_id] = _treatment_plan_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "impression":
+                fields[field_id] = _impression_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
+            elif field_id == "outcome":
+                fields[field_id] = _outcome_draft_field(
+                    record.get(source_key),
+                    api3_segments,
+                    candidate_decisions=candidate_decisions,
+                )
             else:
                 fields[field_id] = _draft_field(
                     record.get(source_key),
@@ -1884,6 +3418,50 @@ def build_draft(
         candidate_decisions,
         record,
     )
+    physical_validation_reasons = fields["physical"].pop(
+        "_validation_reasons", []
+    )
+    if physical_validation_reasons:
+        review_items.append(
+            {
+                "id": "physical-examination:validation",
+                "type": "physical_examination_validation",
+                "field_id": "physical",
+                "segment_id": (
+                    fields["physical"].get("evidence", [{}])[0].get("segment_id")
+                    if fields["physical"].get("evidence")
+                    else None
+                ),
+                "source": fields["physical"].get("value", ""),
+                "evidence": fields["physical"].get("value", ""),
+                "candidates": [],
+                "validation_reasons": physical_validation_reasons,
+                "needs_review": True,
+            }
+        )
+    treatment_plan_validation_reasons = fields["treatment-plan"].pop(
+        "_validation_reasons", []
+    )
+    if treatment_plan_validation_reasons:
+        review_items.append(
+            {
+                "id": "treatment-plan:validation",
+                "type": "treatment_plan_validation",
+                "field_id": "treatment-plan",
+                "segment_id": (
+                    fields["treatment-plan"].get("evidence", [{}])[0].get(
+                        "segment_id"
+                    )
+                    if fields["treatment-plan"].get("evidence")
+                    else None
+                ),
+                "source": fields["treatment-plan"].get("value", ""),
+                "evidence": fields["treatment-plan"].get("value", ""),
+                "candidates": [],
+                "validation_reasons": treatment_plan_validation_reasons,
+                "needs_review": True,
+            }
+        )
     for item in review_items:
         field = fields[item["field_id"]]
         field["status"] = "needs_review"
@@ -2293,22 +3871,42 @@ def run_clinical_workflow(
         )
         return expanded, round((time.perf_counter() - started) * 1000, 3)
 
-    def run_record_stage() -> tuple[dict[str, Any], float]:
+    def run_record_stage(
+        record_payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], float]:
         started = time.perf_counter()
-        extracted = staged_extract_record(whisper_payload)
+        extracted = staged_extract_record(record_payload)
         return extracted, round((time.perf_counter() - started) * 1000, 3)
 
-    # Translation and conversation-grounded field extraction use the same
-    # immutable STT input and separate model clients, so only these two stages
-    # are parallelized. Candidate adjudication still waits for retrieval.
+    query_expansion, measured_translation_ms = run_translation_stage()
     if staged_extraction:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            translation_future = executor.submit(run_translation_stage)
-            record_future = executor.submit(run_record_stage)
-            query_expansion, measured_translation_ms = translation_future.result()
-            extracted_record_stage, clinical_record_stage_ms = record_future.result()
-    else:
-        query_expansion, measured_translation_ms = run_translation_stage()
+        translations = {
+            str(item.get("segment_id")): str(
+                item.get("translated_text_en") or ""
+            ).strip()
+            for item in query_expansion.get("translated_segments", [])
+            if isinstance(item, dict)
+            and item.get("segment_id") is not None
+            and str(item.get("translated_text_en") or "").strip()
+        }
+        record_payload = {
+            **whisper_payload,
+            "segments": [
+                {
+                    **segment,
+                    **(
+                        {"translated_text_en": translations[str(segment.get("id"))]}
+                        if str(segment.get("id")) in translations
+                        else {}
+                    ),
+                }
+                for segment in whisper_payload.get("segments", [])
+                if isinstance(segment, dict)
+            ],
+        }
+        extracted_record_stage, clinical_record_stage_ms = run_record_stage(
+            record_payload
+        )
     query_expansion_telemetry = query_expansion.pop("_telemetry", None)
     if not isinstance(query_expansion_telemetry, dict):
         query_expansion_telemetry = {}
@@ -2522,6 +4120,7 @@ def run_clinical_workflow(
                 api2_document,
                 api3_document,
                 preserve_unsupported=preserve_unsupported,
+                translated_segments=query_expansion.get("translated_segments"),
             )
         else:
             raise ValueError("clinical extractor returned an invalid contract")

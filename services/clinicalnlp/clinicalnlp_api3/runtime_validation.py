@@ -852,9 +852,20 @@ def validate_clinical_workflow(
             )
 
     plan = _draft_field(document, "treatment_plan")
+    draft = document.get("draft") if isinstance(document.get("draft"), dict) else {}
+    treatment_plan_validation_review = any(
+        isinstance(item, dict)
+        and item.get("type") == "treatment_plan_validation"
+        and item.get("field_id") == "treatment_plan"
+        and item.get("needs_review") is True
+        for item in draft.get("review_items", [])
+    )
     if (
         plan.get("information_status") in {"PRESENT", "UNCERTAIN"}
-        and _field_has_unsupported_atoms(document, "treatment_plan")
+        and (
+            treatment_plan_validation_review
+            or _field_has_unsupported_atoms(document, "treatment_plan")
+        )
     ):
         issues.append(
             _issue(
@@ -872,9 +883,19 @@ def validate_clinical_workflow(
     issues.extend(_vital_issues(document))
 
     physical = _draft_field(document, "physical_examination")
+    physical_validation_review = any(
+        isinstance(item, dict)
+        and item.get("type") == "physical_examination_validation"
+        and item.get("field_id") == "physical_examination"
+        and item.get("needs_review") is True
+        for item in draft.get("review_items", [])
+    )
     if (
         physical.get("information_status") == "PRESENT"
-        and _field_has_unsupported_atoms(document, "physical_examination")
+        and (
+            physical_validation_review
+            or _field_has_unsupported_atoms(document, "physical_examination")
+        )
     ):
         issues.append(
             _issue(

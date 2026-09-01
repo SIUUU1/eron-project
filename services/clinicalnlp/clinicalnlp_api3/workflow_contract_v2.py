@@ -40,6 +40,7 @@ LEGACY_TO_CANONICAL_FIELD_ID = {
     "physical": "physical_examination",
     "treatment-plan": "treatment_plan",
     "impression": "impression",
+    "outcome": "outcome",
 }
 
 CANONICAL_FIELD_IDS = (
@@ -316,8 +317,6 @@ def to_clinical_workflow_v2(
         )
         for legacy_id, canonical_id in LEGACY_TO_CANONICAL_FIELD_ID.items()
     }
-    canonical_fields["outcome"] = _v2_field("outcome", None)
-
     review_items = copy.deepcopy(legacy_draft.get("review_items") or [])
     for item in review_items:
         if isinstance(item, dict) and isinstance(item.get("field_id"), str):

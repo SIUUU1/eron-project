@@ -16,6 +16,7 @@ CANONICAL_FIELD_ORDER = (
     "physical_examination",
     "impression",
     "treatment_plan",
+    "outcome",
 )
 
 CANONICAL_TO_DRAFT_FIELD = {
@@ -30,6 +31,7 @@ CANONICAL_TO_DRAFT_FIELD = {
     "physical_examination": "physical",
     "impression": "impression",
     "treatment_plan": "treatment-plan",
+    "outcome": "outcome",
 }
 DRAFT_TO_CANONICAL_FIELD = {
     draft: canonical for canonical, draft in CANONICAL_TO_DRAFT_FIELD.items()
@@ -78,46 +80,70 @@ FIELD_POLICIES = {
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "pain_assessment": FieldPolicy(
-        "Only explicitly stated pain assessment content; NRS requires an explicit score.",
+        "Only explicit pain presence, denial, NRS score, and anatomical pain site; "
+        "missing elements are never inferred.",
         frozenset({SYMPTOM, ANATOMY, VITAL}),
     ),
     "history_of_present_illness": FieldPolicy(
-        "Onset, course, change, and associated symptoms of the current problem.",
+        "Only explicit OLDCARTS facts, associated symptoms, pre-hospital care, "
+        "and arrival or transfer details of the current problem; unmentioned "
+        "elements are never inferred or converted to negative findings.",
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "past_history": FieldPolicy(
-        "Previously diagnosed conditions and completed historical operations or "
-        "procedures.",
+        "Explicit pre-existing diseases, completed surgeries or transplants, and "
+        "clinically relevant previous admissions; medication, allergy, and social "
+        "history are excluded.",
         frozenset({DISEASE, PROCEDURE}),
     ),
     "medications": FieldPolicy(
-        "Medication currently taken or explicitly reported as administered.",
+        "Every explicitly stated ongoing current medication; one-time pre-hospital "
+        "administration and newly ordered emergency treatment are excluded.",
         frozenset({DRUG}),
     ),
     "drug_allergy": FieldPolicy(
-        "Explicit allergen or drug allergy and its reported reaction.",
+        "Explicit drug, contrast-media, latex, food, or other allergy and its "
+        "reported reaction; adverse effects and intolerance are not inferred as allergy.",
         frozenset({ALLERGY, DRUG, SYMPTOM}),
     ),
     "social_history": FieldPolicy(
-        "Explicit smoking and alcohol history; terminology candidates are not generated here.",
+        "Independent explicit smoking and alcohol history with reported quantity, "
+        "duration, cessation, frequency, beverage, and amount preserved; risk labels "
+        "are never inferred and terminology candidates are not generated here.",
         frozenset(),
     ),
     "review_of_systems": FieldPolicy(
-        "Patient-reported positive, negative, or uncertain answers to symptom review.",
+        "Patient- or guardian-reported positive, negative, or uncertain symptoms "
+        "from chief complaint, HPI, and targeted review; HPI modifiers and observed "
+        "findings are excluded.",
         frozenset({SYMPTOM, ANATOMY}),
     ),
     "physical_examination": FieldPolicy(
-        "Clinician-observed or measured examination findings, never inferred from symptoms.",
+        "Explicit clinician-obtained inspection, auscultation, percussion, palpation, "
+        "neurologic, or other direct examination findings by body system; patient-reported "
+        "symptoms, unexamined normal findings, vital-only measurements, and diagnostic "
+        "interpretations are excluded.",
         frozenset({SYMPTOM, ANATOMY, VITAL, DEVICE}),
     ),
     "impression": FieldPolicy(
-        "Explicitly stated diagnosis, suspected diagnosis, or differential with "
-        "certainty preserved.",
+        "Clinician-explicit established, suspected, rule-out, or differential "
+        "diagnoses with certainty and every alternative preserved; symptoms, "
+        "findings, measurements, patient self-diagnoses, and retrieval candidates "
+        "alone never create an impression or a final KCD code.",
         frozenset({DISEASE, SYMPTOM}),
     ),
     "treatment_plan": FieldPolicy(
-        "Explicitly stated tests, medications, procedures, devices, or orders.",
+        "Explicit clinician decisions, orders, completed current-visit actions, "
+        "conditional plans, cancellations, or refusals for diagnostic workup, "
+        "medication/procedure, consultation, and disposition/safety-netting; "
+        "patient requests and unstated order-set details are excluded.",
         frozenset({PROCEDURE, DRUG, DEVICE}),
+    ),
+    "outcome": FieldPolicy(
+        "Only an explicit final clinician disposition of Discharge, Admission, "
+        "Transfer, Death, or Other; conditional plans, patient wishes, clinical "
+        "severity, diagnoses, and test results alone never establish an outcome.",
+        frozenset(),
     ),
 }
 

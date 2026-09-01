@@ -35,7 +35,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 3072
 MAX_CANDIDATES_PER_ANNOTATION = 5
 MAX_MODEL_CANDIDATES_PER_ANNOTATION = 3
 MAX_MODEL_CANDIDATE_ANNOTATIONS = 16
-CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2"
+CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.11"
 CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
 
@@ -252,6 +252,9 @@ class LlamaServerClinicalExtractor:
             }
             if corrected_text != raw_text:
                 compact["corrected_text"] = corrected_text
+            translated_text = segment.get("translated_text_en")
+            if isinstance(translated_text, str) and translated_text.strip():
+                compact["translated_text_en"] = translated_text.strip()
             segments.append(compact)
         return {"segments": segments}
 
@@ -432,9 +435,19 @@ class LlamaServerClinicalExtractor:
             "physical_examination",
             "impression",
             "treatment_plan",
+            "outcome",
         ):
             grounded: list[dict[str, Any]] = []
             values = model_record.get(field_name, [])
+            if field_name in {
+                "review_of_systems",
+                "physical_examination",
+                "impression",
+                "treatment_plan",
+                "outcome",
+            }:
+                if field_name not in model_record or isinstance(values, dict):
+                    continue
             if not isinstance(values, list):
                 values = []
             for value in values:

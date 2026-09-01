@@ -45,6 +45,24 @@ def _atom(raw_value, segment_id="seg_0001", status="confirmed"):
 
 
 class FieldRoutingPolicyTests(unittest.TestCase):
+    def test_impression_policy_requires_an_explicit_clinician_assessment(self):
+        from clinicalnlp_api3.field_routing_policy import FIELD_POLICIES
+
+        description = FIELD_POLICIES["impression"].definition
+
+        self.assertIn("Clinician-explicit", description)
+        self.assertIn("patient self-diagnoses", description)
+        self.assertIn("never create an impression", description)
+
+    def test_outcome_policy_requires_a_final_clinician_disposition(self):
+        from clinicalnlp_api3.field_routing_policy import FIELD_POLICIES
+
+        definition = FIELD_POLICIES["outcome"].definition
+
+        self.assertIn("explicit final clinician disposition", definition)
+        self.assertIn("conditional plans", definition)
+        self.assertEqual(FIELD_POLICIES["outcome"].allowed_term_types, frozenset())
+
     def test_field_collection_hints_are_derived_from_grounded_record_fields(self):
         record = {
             "medications": [_atom("암로디핀 복용 중")],

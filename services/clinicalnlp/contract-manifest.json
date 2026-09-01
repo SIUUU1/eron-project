@@ -11,8 +11,8 @@
     {
       "path": "prompts/clinical_record_extraction_v2.txt",
       "kind": "prompt",
-      "version": "clinical-record-extraction-v2",
-      "sha256": "f923466f32062c0b42f4bf6adb265a2a18ea829698718cd3784cf1f4de2739ef"
+      "version": "clinical-record-extraction-v2.11",
+      "sha256": "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
     },
     {
       "path": "prompts/candidate_adjudication_v1.txt",

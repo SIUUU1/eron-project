@@ -8,6 +8,28 @@ SERVICE_ROOT = Path(__file__).parents[1]
 
 
 class ClinicalContractBundleTests(unittest.TestCase):
+    def test_impression_prompt_preserves_certainty_and_blocks_model_diagnosis(self):
+        prompt = (
+            SERVICE_ROOT / "prompts" / "clinical_record_extraction_v2.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("clinician's current assessment", prompt)
+        self.assertIn("`R/O ` display prefix", prompt)
+        self.assertIn("Preserve every explicitly stated differential", prompt)
+        self.assertIn("self-diagnosis", prompt)
+        self.assertIn("Never invent a KCD code", prompt)
+
+    def test_outcome_prompt_separates_final_disposition_from_plan(self):
+        prompt = (
+            SERVICE_ROOT / "prompts" / "clinical_record_extraction_v2.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("final, current-encounter disposition decision", prompt)
+        self.assertIn("Discharge, Admission, Transfer, Death, or Other", prompt)
+        self.assertIn("Never turn a considered, planned, possible, or conditional", prompt)
+        self.assertIn("Death requires an explicit clinician confirmation", prompt)
+        self.assertIn("Never use NONE for outcome", prompt)
+
     def test_workflow_schema_preserves_the_public_draft_interface(self):
         schema_path = (
             SERVICE_ROOT / "contracts" / "clinical-workflow-v2.schema.json"
@@ -48,7 +70,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "f923466f32062c0b42f4bf6adb265a2a18ea829698718cd3784cf1f4de2739ef"
+                "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
             ),
             "candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
@@ -76,7 +98,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "f923466f32062c0b42f4bf6adb265a2a18ea829698718cd3784cf1f4de2739ef"
+                "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
             ),
             "prompts/candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
