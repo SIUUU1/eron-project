@@ -1,0 +1,487 @@
+{
+  "version": "2.0.0",
+  "created": "2026-08-31 16:13:09",
+  "seed": 42,
+  "target": "y_deterioration",
+  "task": "ED 내원 성인(18세 이상) 환자를 ED 퇴실 + 2h 까지 감시하며, ED 도착 +1h 부터 1시간마다 재예측하여 각 시점 t 의 (t, t+3h] 구간의 악화(호흡부전 처치·승압제·CPR·사망 OR 생리학적 악화 onset) 발생 확률을 반환",
+  "cohort_note": "코호트 선정에 사후 변수를 쓰지 않는다 — disposition·hadm_id 미사용.",
+  "training": {
+    "mode": "production_refit",
+    "period": "2008-2019",
+    "uses_all_available_development_data": true,
+    "direct_unseen_test_available": false,
+    "performance_reference": "pristine_temporal_evaluation_B",
+    "n_rows": 3567366,
+    "n_stays": 422930,
+    "n_subjects": 204885,
+    "boosting_rounds": {
+      "42": 1006,
+      "7": 784,
+      "123": 636
+    },
+    "boosting_rounds_source": "B pristine VALID early stopping (TEST 이전 확정)",
+    "early_stopping": "사용 안 함 (LOCK 된 rounds 고정)"
+  },
+  "oof": {
+    "n_folds": 5,
+    "split_unit": "subject_id",
+    "split_seed": 42,
+    "tfidf_svd": "fold train 에서만 cross-fit",
+    "ensemble": "3-seed predict_proba 산술평균",
+    "used_for": [
+      "platt_calibration",
+      "operating_threshold",
+      "risk_band"
+    ],
+    "folds": [
+      {
+        "fold": 0,
+        "subjects": 40977,
+        "stays": 84963,
+        "rows": 716047,
+        "positive_stays": 1898,
+        "prevalence_stay": 0.022339135859138683,
+        "tfidf_vocab": 2407
+      },
+      {
+        "fold": 1,
+        "subjects": 40977,
+        "stays": 84291,
+        "rows": 710443,
+        "positive_stays": 1929,
+        "prevalence_stay": 0.022885005516603198,
+        "tfidf_vocab": 2442
+      },
+      {
+        "fold": 2,
+        "subjects": 40977,
+        "stays": 84906,
+        "rows": 716705,
+        "positive_stays": 1938,
+        "prevalence_stay": 0.022825242032365203,
+        "tfidf_vocab": 2434
+      },
+      {
+        "fold": 3,
+        "subjects": 40977,
+        "stays": 84071,
+        "rows": 710826,
+        "positive_stays": 1900,
+        "prevalence_stay": 0.022599945284342997,
+        "tfidf_vocab": 2415
+      },
+      {
+        "fold": 4,
+        "subjects": 40977,
+        "stays": 84699,
+        "rows": 713345,
+        "positive_stays": 1985,
+        "prevalence_stay": 0.02343593194724849,
+        "tfidf_vocab": 2431
+      }
+    ]
+  },
+  "model": {
+    "kind": "LightGBM seed-ensemble",
+    "pkl": "model_lgbm.pkl",
+    "native_per_seed": [
+      "model_lgbm_seed42.txt",
+      "model_lgbm_seed7.txt",
+      "model_lgbm_seed123.txt"
+    ],
+    "n_models": 3,
+    "seeds": [
+      42,
+      7,
+      123
+    ],
+    "boosting_rounds": {
+      "42": 1006,
+      "7": 784,
+      "123": 636
+    },
+    "params": {
+      "num_leaves": 127,
+      "learning_rate": 0.02,
+      "min_child_samples": 50,
+      "subsample": 1.0,
+      "colsample_bytree": 0.6,
+      "reg_lambda": 1.0,
+      "min_split_gain": 0.1
+    },
+    "scale_pos_weight": 1.0,
+    "spw_mode": "none",
+    "aggregation": "mean of predict_proba"
+  },
+  "calibrator": {
+    "kind": "platt",
+    "pkl": "calibrator_platt.pkl",
+    "fitted_on": "OOF raw ensemble probability (2008-2019 전체)",
+    "slope": 0.9523176125858158,
+    "intercept": 0.04656947919114737
+  },
+  "text_transformer": {
+    "pkl": "text_transformer.pkl",
+    "ngram_range": [
+      1,
+      2
+    ],
+    "min_df": 20,
+    "max_features": 20000,
+    "sublinear_tf": true,
+    "strip_accents": "unicode",
+    "n_svd": 50,
+    "fitted_on": "2008-2019 전체"
+  },
+  "features": [
+    "lab_ph_dt",
+    "triage_acuity",
+    "triage_heartrate",
+    "sbp_min",
+    "lab_pco2_dt",
+    "triage_shock_index",
+    "lab_base_excess_dt",
+    "triage_sbp",
+    "heart_rate_n",
+    "lab_po2_last",
+    "lab_lactate_dt",
+    "triage_resprate",
+    "resp_rate_n",
+    "resp_rate_max",
+    "triage_pain",
+    "sbp_n",
+    "cc_svd_017",
+    "abnormal_vital_count",
+    "lab_lactate_last",
+    "lab_lymphocytes_last",
+    "dbp_n",
+    "lab_wbc_last",
+    "shock_index",
+    "hours_from_ed",
+    "heart_rate_last",
+    "lab_ph_last",
+    "lab_neutrophils_last",
+    "spo2_mean",
+    "triage_temperature",
+    "triage_o2sat",
+    "lab_albumin_last",
+    "age",
+    "lab_pt_last",
+    "lab_platelet_last",
+    "lab_bun_last",
+    "lab_rbc_last",
+    "triage_dbp",
+    "cc_svd_018",
+    "resp_rate_mean",
+    "lab_ptt_last",
+    "heart_rate_max",
+    "lab_rdw_last",
+    "dbp_min",
+    "lab_glucose_last",
+    "lab_hematocrit_last",
+    "heart_rate_slope",
+    "heart_rate_dt",
+    "lab_pco2_last",
+    "cc_svd_033",
+    "temperature_last",
+    "resp_rate_dt",
+    "sbp_mean",
+    "heart_rate_min",
+    "temperature_mean",
+    "sbp_max",
+    "lab_hemoglobin_last",
+    "heart_rate_mean",
+    "cc_svd_044",
+    "cc_svd_001",
+    "cc_svd_020",
+    "lab_creatinine_last",
+    "cc_svd_003",
+    "temperature_min",
+    "lab_calcium_total_last",
+    "cc_svd_048",
+    "cc_svd_035",
+    "dbp_max",
+    "spo2_slope",
+    "lab_mcv_last",
+    "lab_bicarbonate_last",
+    "lab_potassium_last",
+    "lab_alp_last",
+    "cc_svd_021",
+    "cc_svd_027",
+    "lab_ast_last",
+    "lab_chloride_last",
+    "lab_alt_last",
+    "cc_svd_042",
+    "cc_svd_023",
+    "cc_svd_037",
+    "dbp_mean",
+    "lab_po2_dt",
+    "temperature_max",
+    "lab_inr_dt",
+    "cc_svd_049",
+    "cc_svd_038",
+    "resp_rate_last",
+    "lab_phosphate_last",
+    "spo2_last",
+    "abnormal_vital_persistence",
+    "cc_svd_000",
+    "sbp_slope",
+    "cc_svd_026",
+    "cc_svd_030",
+    "lab_ldh_last",
+    "lab_ptt_dt",
+    "cc_svd_034",
+    "cc_svd_010",
+    "lab_base_excess_last",
+    "cc_svd_007"
+  ],
+  "n_features": 100,
+  "feature_set": "lite",
+  "feature_hash": "0cef7dd901790770dceef1b8a70094f3b6bcde3833792b746243d1c03b0b220a",
+  "operating_points": {
+    "recall_70": {
+      "threshold": 0.13337066382822102,
+      "recall": 0.7,
+      "precision": 0.5240903095662969,
+      "f1": 0.5994054749545232,
+      "alarm_rate": 0.030475492398269216
+    },
+    "recall_80": {
+      "threshold": 0.06298008978679076,
+      "recall": 0.8,
+      "precision": 0.3863477129416475,
+      "f1": 0.5210583153347733,
+      "alarm_rate": 0.047246589270091975
+    },
+    "recall_85": {
+      "threshold": 0.03583776666268974,
+      "recall": 0.8500518134715026,
+      "precision": 0.3056031592280754,
+      "f1": 0.44957798969637186,
+      "alarm_rate": 0.06346676755018561
+    },
+    "recall_90": {
+      "threshold": 0.015062884071650493,
+      "recall": 0.9,
+      "precision": 0.21046892039258452,
+      "f1": 0.3411568300108023,
+      "alarm_rate": 0.09756933771546118
+    },
+    "recall_95": {
+      "threshold": 0.004219270491962076,
+      "recall": 0.9500518134715026,
+      "precision": 0.11418465332353564,
+      "f1": 0.2038669794643155,
+      "alarm_rate": 0.18984465514387724
+    }
+  },
+  "default_operating_point": "recall_85",
+  "risk_bands": {
+    "thresholds": {
+      "amber": 0.03583776666268974,
+      "red": 0.13337066382822102
+    },
+    "derived_from": {
+      "amber": "recall_85",
+      "red": "recall_70"
+    },
+    "computed_on": "OOF calibrated probability (2008-2019 전체)",
+    "bands": [
+      {
+        "key": "red",
+        "label": "매우 악화",
+        "lower": 0.13337066382822102,
+        "upper": 1.0,
+        "n_stay": 12889,
+        "share": 0.030475492398269216,
+        "observed_event_rate": 0.5240903095662969,
+        "one_in": 1.9080680977054032
+      },
+      {
+        "key": "amber",
+        "label": "악화",
+        "lower": 0.03583776666268974,
+        "upper": 0.13337066382822102,
+        "n_stay": 13953,
+        "share": 0.03299127515191639,
+        "observed_event_rate": 0.10377696552712679,
+        "one_in": 9.636049723756907
+      },
+      {
+        "key": "green",
+        "label": "저위험",
+        "lower": 0.0,
+        "upper": 0.03583776666268974,
+        "n_stay": 396088,
+        "share": 0.9365332324498143,
+        "observed_event_rate": 0.003653228575468078,
+        "one_in": 273.73047684865236
+      }
+    ],
+    "green_npv": 0.9963467714245319,
+    "missed_in_green": {
+      "n": 1447,
+      "share_of_all_positive": 0.1499481865284974
+    }
+  },
+  "eval_unit": "stay",
+  "performance_reference": {
+    "source": "B pristine temporal evaluation",
+    "protocol": "TRAIN 2008-2013 → VALID 2014-2016 → TEST 2017-2019 (1회)",
+    "note": "동일 고정 사양의 temporal holdout 성능이다. 이 C artifact 자체를 직접 측정한 값이 아니다.",
+    "pr_auc": 0.6643924690406519,
+    "pr_auc_ci95": [
+      0.6427047809975982,
+      0.6854116274110758
+    ],
+    "roc_auc": 0.9636282539964643,
+    "roc_auc_ci95": [
+      0.9593545721015435,
+      0.9675761975117205
+    ],
+    "recall": 0.8277576853526221,
+    "precision": 0.3740551583248212,
+    "f1": 0.5152666385253974
+  },
+  "cohort": {
+    "horizon_mode": "ed_outtime",
+    "ed_outtime_offset_h": 2,
+    "horizon_h": 5,
+    "disposition": null,
+    "min_age": 18,
+    "require_hadm_id": false,
+    "require_admittime_ge_intime": true,
+    "exclude_dead_on_arrival": true,
+    "min_obs_len_h": 1.0
+  },
+  "grid": {
+    "step_h": 1,
+    "start_offset_h": 1,
+    "label_window_h": 3,
+    "truncate_at_first_event": true
+  },
+  "lab_itemids": {
+    "lactate": 50813,
+    "ph": 50820,
+    "pco2": 50818,
+    "po2": 50821,
+    "base_excess": 50802,
+    "free_calcium": 50808,
+    "creatinine": 50912,
+    "bun": 51006,
+    "sodium": 50983,
+    "potassium": 50971,
+    "chloride": 50902,
+    "bicarbonate": 50882,
+    "anion_gap": 50868,
+    "glucose": 50931,
+    "calcium_total": 50893,
+    "magnesium": 50960,
+    "phosphate": 50970,
+    "egfr": 50920,
+    "albumin": 50862,
+    "wbc": 51301,
+    "hematocrit": 51221,
+    "hemoglobin": 51222,
+    "platelet": 51265,
+    "rdw": 51277,
+    "mcv": 51250,
+    "rbc": 51279,
+    "neutrophils": 51256,
+    "lymphocytes": 51244,
+    "bands": 51144,
+    "inr": 51237,
+    "pt": 51274,
+    "ptt": 51275,
+    "alt": 50861,
+    "ast": 50878,
+    "alp": 50863,
+    "bilirubin_total": 50885,
+    "troponin_t": 51003,
+    "ntprobnp": 50963,
+    "ck": 50910,
+    "ldh": 50954,
+    "crp": 50889
+  },
+  "vital_itemids": {
+    "heart_rate": [
+      220045
+    ],
+    "resp_rate": [
+      220210,
+      224690
+    ],
+    "spo2": [
+      220277
+    ],
+    "sbp": [
+      220179,
+      220050
+    ],
+    "dbp": [
+      220180,
+      220051
+    ],
+    "mbp": [
+      220181,
+      220052
+    ],
+    "temperature_f": [
+      223761
+    ],
+    "temperature_c": [
+      223762
+    ],
+    "gcs_eye": [
+      220739
+    ],
+    "gcs_verbal": [
+      223900
+    ],
+    "gcs_motor": [
+      223901
+    ]
+  },
+  "valid_range": {
+    "heart_rate": [
+      10,
+      300
+    ],
+    "resp_rate": [
+      1,
+      90
+    ],
+    "spo2": [
+      30,
+      100
+    ],
+    "sbp": [
+      30,
+      300
+    ],
+    "dbp": [
+      10,
+      220
+    ],
+    "mbp": [
+      15,
+      250
+    ],
+    "temperature": [
+      25,
+      45
+    ],
+    "gcs_eye": [
+      1,
+      4
+    ],
+    "gcs_verbal": [
+      1,
+      5
+    ],
+    "gcs_motor": [
+      1,
+      6
+    ]
+  }
+}

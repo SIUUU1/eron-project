@@ -1,0 +1,13 @@
+# services/riskmodel/requirements.txt
+fastapi
+uvicorn[standard]
+
+# ⚠ 아래 버전은 아티팩트를 만든 환경과 일치시킬 것.
+#   calibrator_platt.pkl 은 scikit-learn LogisticRegression 을 담고 있어
+#   메이저 버전이 다르면 언피클이 깨진다.
+lightgbm==4.5.0
+scikit-learn==1.6.0
+numpy==2.1.3
+polars==1.17.1
+joblib==1.4.2
+pyyaml==6.0.2
