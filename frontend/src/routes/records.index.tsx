@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AlertCircle } from "lucide-react";
 import { useState } from "react";
 
-import { dischargeLabel, formatDateTime, sexLabel, toPercent, toRiskLevel } from "@/api/display";
+import { dischargeLabel, formatDateTime, sexLabel, toPercent, toRiskBand } from "@/api/display";
 import { edStayKeys, getEdStays } from "@/api/ed-stays";
 import type { EdStayListItem } from "@/api/types";
 import { PatientListTable, type PatientRow } from "@/components/patient-list-table";
@@ -49,8 +49,9 @@ function toRow(item: EdStayListItem): PatientRow {
     discharge: dischargeLabel(item.discharge_type),
     ktas: item.acuity,
     chiefComplaint: item.chief_complaint ?? "-",
-    risk: toRiskLevel(item.risk_level),
+    risk: toRiskBand(item.risk_band),
     probability: toPercent(item.risk_probability),
+    reviewed: item.reviewed,
     recordStatus:
       item.record_status === "SIGNED"
         ? "인증 완료"

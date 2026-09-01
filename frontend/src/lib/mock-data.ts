@@ -1,34 +1,6 @@
+// ⚠ 화면 배지는 모델 3구간(api/display.ts 의 bandMeta)을 쓴다.
+// 아래 4단계는 mock 픽스처 정렬에만 남아 있다.
 export type RiskLevel = "stable" | "watch" | "rising" | "critical";
-
-export const riskMeta: Record<
-  RiskLevel,
-  { label: string; dot: string; badge: string; text: string }
-> = {
-  stable: {
-    label: "안정",
-    dot: "bg-risk-stable",
-    badge: "bg-risk-stable-soft text-risk-stable border-risk-stable/30",
-    text: "text-risk-stable",
-  },
-  watch: {
-    label: "관찰 필요",
-    dot: "bg-risk-watch",
-    badge: "bg-risk-watch-soft text-risk-watch border-risk-watch/40",
-    text: "text-risk-watch",
-  },
-  rising: {
-    label: "위험 증가",
-    dot: "bg-risk-rising",
-    badge: "bg-risk-rising-soft text-risk-rising border-risk-rising/40",
-    text: "text-risk-rising",
-  },
-  critical: {
-    label: "즉시 재평가 필요",
-    dot: "bg-risk-critical",
-    badge: "bg-risk-critical-soft text-risk-critical border-risk-critical/40",
-    text: "text-risk-critical",
-  },
-};
 
 export const riskOrder: Record<RiskLevel, number> = {
   critical: 0,
@@ -102,13 +74,7 @@ export const patients: Patient[] = [
       { time: "12:00", hr: 112, sbp: 98, dbp: 62, spo2: 93, bt: 37.6, probability: 76 },
       { time: "현재", hr: 118, sbp: 88, dbp: 56, spo2: 91, bt: 37.8, probability: 87 },
     ],
-    riskFactors: [
-      "혈압 지속 감소",
-      "심박수 증가",
-      "산소포화도 감소",
-      "고령 (72세)",
-      "흉통 지속",
-    ],
+    riskFactors: ["혈압 지속 감소", "심박수 증가", "산소포화도 감소", "고령 (72세)", "흉통 지속"],
     recommendations: [
       "의료진 즉시 재평가",
       "심전도 및 심근효소검사 결과 확인",
@@ -220,7 +186,7 @@ export const summary = {
 
 /* ---------------- 병상 현황판 ---------------- */
 
-export type BedStatus = "critical" | "moderate" | "low" | "empty";
+export type BedStatus = "critical" | "moderate" | "low" | "pending" | "empty";
 
 export interface Bed {
   id: string;
@@ -234,12 +200,12 @@ export interface Bed {
 
 export const bedStatusMeta: Record<BedStatus, { label: string; card: string; text: string }> = {
   critical: {
-    label: "고위험",
+    label: "재평가 필요",
     card: "bg-risk-critical-soft border-risk-critical/35",
     text: "text-risk-critical",
   },
   moderate: {
-    label: "중등도",
+    label: "관찰 필요",
     card: "bg-risk-watch-soft border-risk-watch/45",
     text: "text-risk-watch",
   },
@@ -248,6 +214,8 @@ export const bedStatusMeta: Record<BedStatus, { label: string; card: string; tex
     card: "bg-risk-stable-soft border-risk-stable/35",
     text: "text-risk-stable",
   },
+  // 환자는 있지만 아직 첫 예측 전 — 흰색. 위험도 카운트에는 들어가지 않는다.
+  pending: { label: "예측 대기", card: "bg-card border-border", text: "text-muted-foreground" },
   empty: { label: "빈 병상", card: "bg-muted border-border", text: "text-muted-foreground" },
 };
 
@@ -479,26 +447,24 @@ export const outcomeOptions = ["귀가", "입원", "전원", "사망", "기타"]
 
 export type CheckStatus = "complete" | "review" | "missing";
 
-export const checkStatusMeta: Record<
-  CheckStatus,
-  { label: string; badge: string; text: string }
-> = {
-  complete: {
-    label: "작성 완료",
-    badge: "bg-risk-stable-soft text-risk-stable border-risk-stable/35",
-    text: "text-risk-stable",
-  },
-  review: {
-    label: "확인 필요",
-    badge: "bg-risk-rising-soft text-risk-rising border-risk-rising/40",
-    text: "text-risk-rising",
-  },
-  missing: {
-    label: "누락",
-    badge: "bg-risk-critical-soft text-risk-critical border-risk-critical/40",
-    text: "text-risk-critical",
-  },
-};
+export const checkStatusMeta: Record<CheckStatus, { label: string; badge: string; text: string }> =
+  {
+    complete: {
+      label: "작성 완료",
+      badge: "bg-risk-stable-soft text-risk-stable border-risk-stable/35",
+      text: "text-risk-stable",
+    },
+    review: {
+      label: "확인 필요",
+      badge: "bg-risk-rising-soft text-risk-rising border-risk-rising/40",
+      text: "text-risk-rising",
+    },
+    missing: {
+      label: "누락",
+      badge: "bg-risk-critical-soft text-risk-critical border-risk-critical/40",
+      text: "text-risk-critical",
+    },
+  };
 
 export const followUpQuestions: { question: string; field: RecordFieldKey }[] = [
   { question: "약이나 주사를 맞은 뒤 알레르기 반응이 있었던 적이 있나요?", field: "allergy" },

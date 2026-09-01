@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { riskMeta, type RiskLevel } from "@/lib/mock-data";
+import { bandMeta } from "@/api/display";
+import type { RiskBandApi } from "@/api/types";
 
 const ktasStyle: Record<number, string> = {
   1: "bg-risk-critical text-primary-foreground",
@@ -32,10 +33,12 @@ export interface PatientRow {
   discharge: string;
   ktas: number | null;
   chiefComplaint: string;
-  /** 예측이 없으면 null — 임의 등급을 만들지 않는다. */
-  risk: RiskLevel | null;
+  /** 모델 3구간(green/amber/red). 예측이 없으면 null — 임의 등급을 만들지 않는다. */
+  risk: RiskBandApi | null;
   /** 0~100. 예측이 없으면 null. */
   probability: number | null;
+  /** 현재 최신 예측을 의료진이 재검토 완료했는가. 다음 예측이 생기면 풀린다. */
+  reviewed: boolean;
   /** 미작성, 임시저장 또는 인증 완료 상태. */
   recordStatus: string | null;
 }
@@ -97,9 +100,9 @@ export function PatientListTable({
             <TableCell>{p.chiefComplaint}</TableCell>
             <TableCell>
               {p.risk ? (
-                <Badge variant="outline" className={riskMeta[p.risk].badge}>
-                  <span className={`mr-1 size-1.5 rounded-full ${riskMeta[p.risk].dot}`} />
-                  {riskMeta[p.risk].label}
+                <Badge variant="outline" className={bandMeta[p.risk].badge}>
+                  <span className={`mr-1 size-1.5 rounded-full ${bandMeta[p.risk].dot}`} />
+                  {bandMeta[p.risk].label}
                 </Badge>
               ) : (
                 <Badge variant="outline" className="text-muted-foreground">
@@ -114,15 +117,24 @@ export function PatientListTable({
                 <div className="flex items-center gap-2">
                   <div className="h-1.5 w-16 overflow-hidden rounded-full bg-secondary">
                     <div
-                      className={`h-full rounded-full ${p.risk ? riskMeta[p.risk].dot : "bg-muted-foreground"}`}
+                      className={`h-full rounded-full ${p.risk ? bandMeta[p.risk].dot : "bg-muted-foreground"}`}
                       style={{ width: `${p.probability}%` }}
                     />
                   </div>
                   <span
-                    className={`tabular text-sm font-bold ${p.risk ? riskMeta[p.risk].text : ""}`}
+                    className={`tabular text-sm font-bold ${p.risk ? bandMeta[p.risk].text : ""}`}
                   >
                     {p.probability}%
                   </span>
+                  {/* 확인 표시는 '지금 화면에 보이는 그 예측'에 대한 것이다 */}
+                  {p.reviewed ? (
+                    <span
+                      className="flex items-center gap-0.5 text-xs font-medium text-risk-stable"
+                      title="의료진 재검토 완료"
+                    >
+                      <Check className="size-3.5" /> 확인
+                    </span>
+                  ) : null}
                 </div>
               )}
             </TableCell>

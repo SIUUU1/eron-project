@@ -51,6 +51,22 @@ export function resetDemoClock() {
 
 export const demoClockKeys = { clock: ["ed", "demo", "clock"] as const };
 
+/**
+ * 시계 이동 단위.
+ * 15분은 예측 스케줄러의 실행 슬롯(00/15/30/45)과 같은 폭이라,
+ * +15분 한 번이 "예측 슬롯 하나 진행" 과 맞아떨어진다.
+ */
+export const DEMO_STEP_HOURS = { hour: 1, quarter: 0.25 } as const;
+
+/** 경과 시간 표기 — +45m · +1h 15m. 시(hour)로만 반올림하면 15분 시연이 +0h 로 보인다. */
+export function elapsedLabel(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds / 60));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h === 0) return `+${m}m`;
+  return m === 0 ? `+${h}h` : `+${h}h ${m}m`;
+}
+
 /** 배속 순환: 실시간 → 1초=1분 → 1초=1시간 → 정지 → 실시간 */
 export const SPEED_CYCLE = [1, 60, 3600, 0] as const;
 

@@ -1,21 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   Bell,
+  Check,
+  ChevronLeft,
+  ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Gauge,
   RotateCcw,
   UserRound,
-  Users,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { dashboardKeys, getDashboardSummary } from "@/api/dashboard";
+import { dashboardKeys, getAlerts } from "@/api/dashboard";
+import { formatDateTime } from "@/api/display";
 import {
   advanceDemoClock,
+  DEMO_STEP_HOURS,
   demoClockKeys,
+  elapsedLabel,
   getDemoClock,
   resetDemoClock,
   setDemoSpeed,
@@ -23,7 +28,9 @@ import {
   SPEED_CYCLE,
   type DemoClock,
 } from "@/api/demo-clock";
+import { runPredictions } from "@/api/ed-stays";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { currentUser } from "@/lib/mock-data";
 
 function format(d: Date) {
@@ -58,10 +65,16 @@ function useDisplayClock(clock: DemoClock | undefined, fetchedAt: number | undef
 export function AppHeader() {
   const queryClient = useQueryClient();
 
-  const { data: summary } = useQuery({
-    queryKey: dashboardKeys.summary,
-    queryFn: ({ signal }) => getDashboardSummary(signal),
+  // 🔔 종 아이콘: 아직 재검토하지 않은 🔴 재평가 필요 환자 수.
+  // 대시보드 경고 카드와 **같은 엔드포인트**를 쓰므로 두 화면의 상태가 어긋나지 않는다.
+  const alertsQuery = useQuery({
+    // 종 목록은 예측 시점별로 누적된 알림을 그대로 보여준다(카드와 달리 최신 1건이 아니다).
+    queryKey: dashboardKeys.alerts("red", false),
+    queryFn: ({ signal }) => getAlerts(20, "red", false, signal),
+    refetchInterval: 30_000,
   });
+  const unread = alertsQuery.data?.unread_count ?? 0;
+  const alerts = alertsQuery.data?.items ?? [];
 
   const clockQuery = useQuery({
     queryKey: demoClockKeys.clock,
@@ -71,13 +84,37 @@ export function AppHeader() {
   const clock = clockQuery.data;
   const now = useDisplayClock(clock, clockQuery.dataUpdatedAt || undefined);
 
-  // 시계를 움직이면 화면 전체가 새 시각 기준으로 다시 그려져야 한다
+  // 시계를 움직이면 화면 전체가 새 시각 기준으로 다시 그려져야 한다.
+  // 시계 이동 → (앞으로 갈 때만) 재예측 → 무효화 까지 한 mutation 안에서 순차로 끝낸다.
+  // 그래야 버튼이 그동안 비활성으로 남아 요청이 겹치지 않는다.
   const mutate = useMutation({
     mutationFn: (run: () => Promise<DemoClock>) => run(),
     onSuccess: () => void queryClient.invalidateQueries(),
     onError: (e: Error) =>
       toast.error("데모 시계를 바꾸지 못했습니다.", { description: e.message }),
   });
+
+  /**
+   * 시계를 옮긴다. 앞으로 갈 때만 예측 갱신을 한 번 돌린다.
+   *
+   * ⚠ 되감기(hours < 0)는 재계산하지 않는다. 되감은 구간의 예측은 이미 저장돼 있고,
+   *   화면은 demo_now 기준으로 보이는 범위만 줄이면 된다.
+   * ⚠ 어떤 환자를 계산할지는 백엔드가 정한다(due · 15분 슬롯). 프론트는 판단하지 않는다.
+   */
+  const step = (hours: number) =>
+    mutate.mutate(async () => {
+      const next = await advanceDemoClock(hours);
+      if (hours > 0) {
+        try {
+          await runPredictions();
+        } catch {
+          // 예측 서비스가 꺼져 있어도 시계 이동은 성공한 것이다.
+          // 스케줄러가 다음 주기에 같은 일을 하므로 화면만 알린다.
+          toast.warning("예측 갱신은 다음 주기에 반영됩니다.");
+        }
+      }
+      return next;
+    });
 
   const nextSpeed = () => {
     const i = SPEED_CYCLE.indexOf((clock?.speed ?? 1) as (typeof SPEED_CYCLE)[number]);
@@ -92,7 +129,7 @@ export function AppHeader() {
           {clock?.is_shifted && (
             <span className="rounded bg-risk-rising-soft px-1.5 py-0.5 text-[10px] font-bold text-risk-rising">
               데모 {speedLabel(clock.speed)}
-              {clock.elapsed_seconds > 60 ? ` · +${Math.round(clock.elapsed_seconds / 3600)}h` : ""}
+              {clock.elapsed_seconds > 60 ? ` · ${elapsedLabel(clock.elapsed_seconds)}` : ""}
             </span>
           )}
         </div>
@@ -102,19 +139,37 @@ export function AppHeader() {
           <Button
             size="sm"
             variant="outline"
-            className="h-7 px-2 text-xs"
-            // 시나리오 시작점보다 이전으로는 되감지 않는다
+            className="h-7 whitespace-nowrap px-2 text-xs"
+            // 시나리오 시작점보다 이전으로는 되감지 않는다(백엔드가 시작점에서 멈춘다)
             disabled={mutate.isPending || !clock?.can_rewind}
-            onClick={() => mutate.mutate(() => advanceDemoClock(-1))}
+            onClick={() => step(-DEMO_STEP_HOURS.hour)}
           >
             <ChevronsLeft className="size-3.5" /> -1시간
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="h-7 px-2 text-xs"
+            className="h-7 whitespace-nowrap px-2 text-xs"
+            disabled={mutate.isPending || !clock?.can_rewind}
+            onClick={() => step(-DEMO_STEP_HOURS.quarter)}
+          >
+            <ChevronLeft className="size-3.5" /> -15분
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 whitespace-nowrap px-2 text-xs"
             disabled={mutate.isPending}
-            onClick={() => mutate.mutate(() => advanceDemoClock(1))}
+            onClick={() => step(DEMO_STEP_HOURS.quarter)}
+          >
+            <ChevronRight className="size-3.5" /> +15분
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 whitespace-nowrap px-2 text-xs"
+            disabled={mutate.isPending}
+            onClick={() => step(DEMO_STEP_HOURS.hour)}
           >
             <ChevronsRight className="size-3.5" /> +1시간
           </Button>
@@ -140,34 +195,79 @@ export function AppHeader() {
             <RotateCcw className="size-3.5" />
           </Button>
         </div>
-
-        <div className="flex items-center gap-2 rounded-md bg-secondary px-3 py-1.5 text-sm">
-          <Users className="size-4 text-primary" />
-          <span className="text-muted-foreground">현재 환자</span>
-          <span className="tabular font-bold text-foreground">
-            {summary ? `${summary.total}명` : "…"}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 rounded-md bg-risk-critical-soft px-3 py-1.5 text-sm">
-          <AlertTriangle className="size-4 text-risk-critical" />
-          <span className="text-risk-critical/80">위험 환자</span>
-          <span className="tabular font-bold text-risk-critical">
-            {summary ? `${summary.critical + summary.rising}명` : "…"}
-          </span>
-        </div>
       </div>
 
       <div className="flex items-center gap-4">
-        <button
-          type="button"
-          className="relative rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          aria-label="알림"
-        >
-          <Bell className="size-5" />
-          <span className="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-risk-critical text-[10px] font-bold text-primary-foreground">
-            {summary?.ai_alerts_today ?? 0}
-          </span>
-        </button>
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="relative rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              aria-label={`재검토 필요 알림 ${unread}건`}
+            >
+              <Bell className="size-5" />
+              {unread > 0 && (
+                <span className="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-risk-critical text-[10px] font-bold text-primary-foreground">
+                  {unread}
+                </span>
+              )}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-96 p-0">
+            <div className="flex items-center justify-between border-b px-4 py-2.5">
+              <p className="text-sm font-semibold">재검토 필요 알림</p>
+              <span className="text-xs text-muted-foreground">미확인 {unread}건</span>
+            </div>
+            {/* 알림이 많아도 헤더 팝오버가 길어지지 않게 목록에만 스크롤을 준다.
+                적을 때는 스크롤바가 보이지 않는다(max-height + auto). */}
+            <div className="max-h-80 overflow-y-auto">
+              {alerts.length === 0 ? (
+                <p className="px-4 py-8 text-center text-xs leading-relaxed text-muted-foreground">
+                  현재 재검토가 필요한 환자가 없습니다.
+                </p>
+              ) : (
+                <ul className="divide-y">
+                  {alerts.map((a) => (
+                    <li key={a.id} className="px-4 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <Link
+                          to="/monitoring/$patientId"
+                          params={{ patientId: a.stay_id }}
+                          className="text-sm font-semibold hover:underline"
+                        >
+                          {a.display_name ?? `ED-${a.stay_id}`}
+                          <span className="tabular ml-1 text-xs font-normal text-muted-foreground">
+                            ({a.stay_id})
+                          </span>
+                        </Link>
+                        {a.acknowledged_at ? (
+                          <span className="flex shrink-0 items-center gap-1 text-[11px] text-risk-stable">
+                            <Check className="size-3.5" /> 확인
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                        {a.message}
+                      </p>
+                      <div className="mt-1 flex items-center justify-between text-xs">
+                        <span className="tabular font-semibold text-risk-critical">
+                          악화 확률{" "}
+                          {a.risk_probability === null
+                            ? "-"
+                            : `${(a.risk_probability * 100).toFixed(1)}%`}
+                        </span>
+                        {/* 발생 시각은 데모 시간축이다(서버 now() 아님) */}
+                        <span className="tabular text-muted-foreground">
+                          {formatDateTime(a.alert_time)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
         <div className="flex items-center gap-2 border-l border-border pl-4">
           <div className="flex size-8 items-center justify-center rounded-full bg-navy text-navy-foreground">
             <UserRound className="size-4" />

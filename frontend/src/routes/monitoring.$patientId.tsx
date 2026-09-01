@@ -1,13 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertCircle,
   ArrowLeft,
-  BellRing,
   Brain,
   CheckCircle2,
   ClipboardCheck,
-  Info,
   Monitor,
   PhoneCall,
   ShieldAlert,
@@ -25,8 +23,10 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
+import { acknowledgeAlert } from "@/api/dashboard";
 import { edStayKeys, getEdStay, getEdStayPredictions, getEdStayVitals } from "@/api/ed-stays";
 import {
+  bandMeta,
   formatDateTime,
   formatTime,
   num,
@@ -35,13 +35,14 @@ import {
   toPercent,
   transportLabel,
 } from "@/api/display";
+import type { ReasonType } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { currentUser, riskMeta } from "@/lib/mock-data";
+import { currentUser } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/monitoring/$patientId")({
   head: ({ params }) => {
@@ -64,18 +65,25 @@ const BASE_SERIES = [
   { key: "spo2", name: "SpO₂ (%)", color: "var(--chart-6)", axis: "left" as const },
   { key: "bt", name: "체온 (℃)", color: "var(--chart-5)", axis: "right" as const },
 ];
-const PROB_SERIES = {
-  key: "probability",
-  name: "AI 악화 확률 (%)",
-  color: "var(--chart-1)",
-  axis: "right" as const,
+/** reason_title 이 없을 때만 쓰는 대체 라벨. 문구는 "원인"이 아니라 "신호" 로 쓴다. */
+const REASON_TYPE_LABEL: Record<ReasonType, string> = {
+  risk_increase_clinical_worsening_signal: "직전 예측 대비 임상적 악화 신호",
+  risk_increase_without_confirmed_clinical_worsening_signal: "확인된 임상적 악화 신호 없음",
+  current_risk_signal: "현재 위험도 기여",
 };
+
+/** 확률 변화(0~1) → 표시용 %p. */
+function deltaPoint(delta: number): string {
+  const sign = delta >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(delta * 100).toFixed(1)}%p`;
+}
 
 function PatientMonitoringPage() {
   const { patientId } = Route.useParams();
+  const queryClient = useQueryClient();
   const [reassessedAt, setReassessedAt] = useState<string | null>(null);
-  const [ackAt, setAckAt] = useState<string | null>(null);
   const [patientViewOpen, setPatientViewOpen] = useState(false);
+  const [probTrendOpen, setProbTrendOpen] = useState(false);
 
   const detailQ = useQuery({
     queryKey: edStayKeys.detail(patientId),
@@ -92,6 +100,23 @@ function PatientMonitoringPage() {
 
   const stamp = () =>
     new Date().toLocaleString("ko-KR", { dateStyle: "medium", timeStyle: "short" });
+
+  /**
+   * 재검토 완료. **어느 예측에 대한 확인인지는 서버가 정한다**(현재 최신 예측).
+   * 성공하면 종 카운트·환자 목록·경고 목록이 같은 서버 상태를 다시 읽도록 무효화한다.
+   */
+  const acknowledge = useMutation({
+    mutationFn: () => acknowledgeAlert(patientId, `${currentUser.dept} ${currentUser.name}`),
+    onSuccess: (result) => {
+      setReassessedAt(stamp());
+      void queryClient.invalidateQueries();
+      toast.success(`재검토 필요 알림 ${result.acknowledged}건을 확인 처리했습니다.`, {
+        description: `${currentUser.dept} ${currentUser.name} · 남은 미확인 ${result.unread_count}건`,
+      });
+    },
+    onError: (e: Error) =>
+      toast.error("의료진 재검토를 기록하지 못했습니다.", { description: e.message }),
+  });
 
   if (detailQ.isPending) {
     return (
@@ -129,7 +154,8 @@ function PatientMonitoringPage() {
 
   const patient = detailQ.data;
   const displayName = patient.display_name ?? `ED-${patient.stay_id}`;
-  const risk = patient.risk_level;
+  // 화면 배지는 모델 3구간(재평가 필요/관찰 필요/저위험)으로 통일한다.
+  const band = patient.risk_band;
   const probability = toPercent(patient.risk_probability);
 
   const latest = vitalsQ.data?.latest;
@@ -165,26 +191,39 @@ function PatientMonitoringPage() {
 
   const predictions = predQ.data?.predictions ?? [];
   const hasPrediction = predictions.length > 0;
-  const series = hasPrediction ? [PROB_SERIES, ...BASE_SERIES] : BASE_SERIES;
 
-  const probByTime = new Map(
-    predictions.map((p) => [formatTime(p.prediction_time), Math.round(p.risk_probability * 100)]),
-  );
-  const trend = (vitalsQ.data?.vitals ?? []).map((p) => {
-    const time = formatTime(p.measured_at);
-    return {
-      time,
-      hr: p.heart_rate,
-      sbp: p.sbp,
-      dbp: p.dbp,
-      spo2: p.spo2,
-      bt: p.temperature_c,
-      probability: probByTime.get(time) ?? null,
-    };
-  });
+  // "AI 악화 예측 확률" 타일을 누르면 보여줄 예측 확률 추이.
+  // 예측 시점(ED 도착 +1h 부터 1시간 간격)이 그대로 x축이 된다.
+  const probTrend = predictions.map((p) => ({
+    time: formatTime(p.prediction_time),
+    pct: Math.round(p.risk_probability * 1000) / 10,
+  }));
+  const probMax = Math.max(10, ...probTrend.map((p) => p.pct));
+  // 위험 확률은 AI 분석 카드에서만 보여준다. 이 표/그래프는 활력징후 추이 전용이다.
+  const series = BASE_SERIES;
 
-  const riskFactors = predQ.data?.latest.risk_factors ?? [];
-  const recommendations = predQ.data?.latest.recommendations ?? [];
+  const trend = (vitalsQ.data?.vitals ?? []).map((p) => ({
+    time: formatTime(p.measured_at),
+    hr: p.heart_rate,
+    sbp: p.sbp,
+    dbp: p.dbp,
+    spo2: p.spo2,
+    bt: p.temperature_c,
+  }));
+
+  // 최신 예측 시점의 기여 신호. 모델이 만든 문장을 그대로 쓴다(프론트에서 만들지 않는다).
+  const latestPrediction = predQ.data?.latest;
+  const riskFactors = latestPrediction?.risk_factors ?? [];
+  const reasonType = latestPrediction?.reason_type ?? null;
+  // 제목은 모델이 만든 reason_title 을 우선한다(프론트에서 문구를 만들지 않는다).
+  const reasonLabel =
+    latestPrediction?.reason_title ?? (reasonType ? REASON_TYPE_LABEL[reasonType] : null);
+  const reasonNotice = latestPrediction?.reason_notice ?? null;
+  const riskDelta = latestPrediction?.risk_delta ?? null;
+  // 위험은 올랐지만 임상 방향 gate 를 통과한 악화 변화가 없는 상태.
+  // 신호 목록이 비는 것이 정상이므로 "모델이 제공하지 않음" 으로 표시하면 안 된다.
+  const noConfirmedWorsening =
+    latestPrediction?.reason_type === "risk_increase_without_confirmed_clinical_worsening_signal";
 
   return (
     <div className="space-y-5">
@@ -209,7 +248,7 @@ function PatientMonitoringPage() {
       {/* 환자 핵심 정보 */}
       <Card className="overflow-hidden">
         <div className="flex items-stretch">
-          <div className={`w-1.5 ${risk ? riskMeta[risk].dot : "bg-border"}`} />
+          <div className={`w-1.5 ${band ? bandMeta[band].dot : "bg-border"}`} />
           <CardContent className="flex flex-1 items-center gap-8 py-5">
             <div>
               <p className="text-xs text-muted-foreground">{patient.stay_id}</p>
@@ -252,9 +291,9 @@ function PatientMonitoringPage() {
               <div>
                 <dt className="text-xs text-muted-foreground">현재 상태</dt>
                 <dd>
-                  {risk ? (
-                    <Badge variant="outline" className={riskMeta[risk].badge}>
-                      {riskMeta[risk].label}
+                  {band ? (
+                    <Badge variant="outline" className={bandMeta[band].badge}>
+                      {bandMeta[band].label}
                     </Badge>
                   ) : (
                     <Badge variant="outline" className="text-muted-foreground">
@@ -264,12 +303,20 @@ function PatientMonitoringPage() {
                 </dd>
               </div>
             </dl>
-            <div className="ml-auto rounded-lg bg-navy px-6 py-3 text-center text-navy-foreground">
+            <button
+              type="button"
+              onClick={() => setProbTrendOpen(true)}
+              disabled={!hasPrediction}
+              className="ml-auto rounded-lg bg-navy px-6 py-3 text-center text-navy-foreground transition-colors hover:bg-navy/85 disabled:cursor-default disabled:hover:bg-navy"
+            >
               <p className="text-xs opacity-75">AI 악화 예측 확률</p>
               <p className="tabular text-3xl font-bold">
                 {probability === null ? "–" : `${probability}%`}
               </p>
-            </div>
+              <p className="text-[11px] opacity-70">
+                {hasPrediction ? "클릭하면 예측 추이" : "예측 대기"}
+              </p>
+            </button>
           </CardContent>
         </div>
       </Card>
@@ -364,7 +411,7 @@ function PatientMonitoringPage() {
                             dataKey={s.key}
                             name={s.name}
                             stroke={s.color}
-                            strokeWidth={s.key === "probability" ? 3 : 2}
+                            strokeWidth={2}
                             dot={{ r: 3 }}
                             activeDot={{ r: 5 }}
                             isAnimationActive={false}
@@ -389,34 +436,20 @@ function PatientMonitoringPage() {
                       </thead>
                       <tbody className="divide-y">
                         {series.map((s) => (
-                          <tr
-                            key={s.key}
-                            className={s.key === "probability" ? "bg-risk-critical-soft" : ""}
-                          >
+                          <tr key={s.key}>
                             <td className="px-3 py-2">
                               <span className="flex items-center gap-2">
                                 <span
                                   className="h-0.5 w-4 rounded"
                                   style={{ backgroundColor: s.color }}
                                 />
-                                <span
-                                  className={
-                                    s.key === "probability" ? "font-bold text-risk-critical" : ""
-                                  }
-                                >
-                                  {s.name}
-                                </span>
+                                {s.name}
                               </span>
                             </td>
                             {trend.map((t, i) => {
                               const value = t[s.key as keyof typeof t];
                               return (
-                                <td
-                                  key={i}
-                                  className={`tabular px-3 py-2 text-center ${
-                                    s.key === "probability" ? "font-bold text-risk-critical" : ""
-                                  }`}
-                                >
+                                <td key={i} className="tabular px-3 py-2 text-center">
                                   {value === null || value === undefined ? "-" : String(value)}
                                 </td>
                               );
@@ -434,7 +467,7 @@ function PatientMonitoringPage() {
 
         {/* AI 분석 */}
         <div className="space-y-4">
-          <Card className={risk ? "border-risk-critical/30" : ""}>
+          <Card className={band === "red" ? "border-risk-critical/30" : ""}>
             <CardHeader className="border-b py-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Brain className="size-4 text-primary" /> AI 분석
@@ -456,106 +489,180 @@ function PatientMonitoringPage() {
               ) : (
                 <>
                   <div
-                    className={`rounded-md border px-4 py-3 text-center ${riskMeta[risk!].badge}`}
+                    className={`rounded-md border px-4 py-3 text-center ${bandMeta[band!].badge}`}
                   >
                     <p className="text-xs opacity-80">위험도</p>
-                    <p className="text-lg font-bold">{riskMeta[risk!].label}</p>
+                    <p className="text-lg font-bold">{bandMeta[band!].label}</p>
+                    {riskDelta !== null ? (
+                      <p className="tabular text-xs opacity-80">
+                        직전 예측 대비 {deltaPoint(riskDelta)}
+                      </p>
+                    ) : null}
                   </div>
 
                   <div>
                     <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
-                      <ShieldAlert className="size-4 text-risk-rising" /> 주요 위험요인
+                      <ShieldAlert className="size-4 text-risk-rising" /> 주요 위험 신호
+                      {reasonLabel ? (
+                        <Badge
+                          variant="outline"
+                          className="ml-auto text-[11px] font-normal text-muted-foreground"
+                        >
+                          {reasonLabel}
+                        </Badge>
+                      ) : null}
                     </p>
                     {riskFactors.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">모델이 제공하지 않았습니다.</p>
+                      <div className="rounded-md border bg-secondary/40 px-3 py-2.5">
+                        <p className="text-xs font-medium">
+                          {noConfirmedWorsening
+                            ? "직전 예측 대비 확인된 임상적 악화 신호가 없습니다."
+                            : "표시할 신호가 없습니다."}
+                        </p>
+                        {noConfirmedWorsening ? (
+                          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                            악화 확률은 올랐지만, 값이 실제로 나빠진 지표가 확인되지 않았습니다.
+                            개선·중립·방향 미정 변화는 악화 근거로 쓰지 않습니다.
+                          </p>
+                        ) : null}
+                      </div>
                     ) : (
-                      <ul className="space-y-1.5">
-                        {riskFactors.map((f) => (
-                          <li
-                            key={f}
-                            className="flex items-start gap-2 text-sm text-muted-foreground"
-                          >
-                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-risk-rising" />
-                            {f}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <p className="mb-2 text-sm font-semibold">AI 권고</p>
-                    {recommendations.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">모델이 제공하지 않았습니다.</p>
-                    ) : (
-                      <ul className="space-y-1.5">
-                        {recommendations.map((r) => (
-                          <li
-                            key={r}
-                            className="flex items-start gap-2 text-sm text-muted-foreground"
-                          >
-                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary" />
-                            {r}
-                          </li>
-                        ))}
-                      </ul>
+                      <>
+                        <ul className="space-y-1.5">
+                          {riskFactors.map((f) => (
+                            <li
+                              key={f}
+                              className="flex items-start gap-2 text-sm text-muted-foreground"
+                            >
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-risk-rising" />
+                              {f}
+                            </li>
+                          ))}
+                        </ul>
+                        {reasonNotice ? (
+                          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                            {reasonNotice}
+                          </p>
+                        ) : null}
+                      </>
                     )}
                   </div>
                 </>
               )}
 
-              <p className="flex gap-1.5 rounded-md bg-secondary px-3 py-2 text-xs text-muted-foreground">
-                <Info className="mt-0.5 size-3.5 shrink-0" />
-                AI의 권고사항은 확정적인 처방이 아니라 참고용 의사결정 지원 정보입니다.
-              </p>
-
+              {/* 🔑 버튼 활성 조건은 '현재 데모 시각까지 도래한 미확인 재검토 필요 알림'이다.
+                  화면 상태가 아니라 서버가 계산한 alert_unread 를 그대로 쓴다. */}
               <div className="grid gap-2">
                 <Button
-                  onClick={() => {
-                    const t = stamp();
-                    setReassessedAt(t);
-                    toast.success("의료진 재평가 완료로 기록되었습니다.", {
-                      description: `${currentUser.dept} ${currentUser.name} · ${t}`,
-                    });
-                  }}
+                  disabled={acknowledge.isPending || patient.alert_unread === 0}
+                  onClick={() => acknowledge.mutate()}
                 >
-                  <CheckCircle2 className="size-4" /> 의료진 재평가 완료
+                  <CheckCircle2 className="size-4" />
+                  {patient.alert_unread > 0 ? "의료진 재검토" : "의료진 재검토 완료"}
                 </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    const t = stamp();
-                    setAckAt(t);
-                    toast.success("AI 경고를 확인 처리했습니다.", {
-                      description: `${currentUser.dept} ${currentUser.name} · ${t}`,
-                    });
-                  }}
-                >
-                  <BellRing className="size-4" /> AI 경고 확인
-                </Button>
+                {patient.alert_unread > 0 ? (
+                  <p className="text-center text-xs text-muted-foreground">
+                    미확인 재검토 필요 알림 {patient.alert_unread}건
+                  </p>
+                ) : null}
               </div>
 
-              {(reassessedAt || ackAt) && (
+              {patient.reviewed && (
                 <div className="space-y-1 rounded-md border bg-risk-stable-soft px-3 py-2 text-xs text-risk-stable">
-                  {reassessedAt && (
-                    <p>
-                      재평가 완료 · {currentUser.dept} {currentUser.name} · {reassessedAt}
-                    </p>
-                  )}
-                  {ackAt && (
-                    <p>
-                      경고 확인 · {currentUser.dept} {currentUser.name} · {ackAt}
-                    </p>
-                  )}
-                  <p className="font-semibold">알림 상태: 확인 처리됨</p>
+                  <p>
+                    의료진 재검토 완료 · {currentUser.dept} {currentUser.name}
+                    {reassessedAt ? ` · ${reassessedAt}` : ""}
+                  </p>
+                  {/* 확인은 '그 시점 알림'에 대한 것이다. 다음 예측이 red 면 다시 활성화된다. */}
+                  <p className="font-semibold">
+                    재검토 필요 알림 {patient.alert_total}건 확인됨 — 다음 예측에서 다시 재검토
+                    필요가 나오면 버튼이 다시 활성화됩니다.
+                  </p>
                 </div>
               )}
             </CardContent>
           </Card>
         </div>
       </div>
+
+      {/* AI 악화 예측 확률 추이 */}
+      <Dialog open={probTrendOpen} onOpenChange={setProbTrendOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              AI 악화 예측 확률 추이
+              {band ? (
+                <Badge variant="outline" className={bandMeta[band].badge}>
+                  {bandMeta[band].label}
+                </Badge>
+              ) : null}
+            </DialogTitle>
+          </DialogHeader>
+
+          {probTrend.length === 0 ? (
+            <p className="py-16 text-center text-sm text-muted-foreground">
+              표시할 예측이 없습니다.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={probTrend} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis
+                      dataKey="time"
+                      tick={{ fontSize: 12 }}
+                      stroke="var(--muted-foreground)"
+                    />
+                    <YAxis
+                      domain={[0, Math.ceil(probMax * 1.2)]}
+                      unit="%"
+                      tick={{ fontSize: 11 }}
+                      stroke="var(--muted-foreground)"
+                    />
+                    <Tooltip
+                      formatter={(v: number) => [`${v}%`, "악화 확률"]}
+                      contentStyle={{
+                        borderRadius: 8,
+                        border: "1px solid var(--border)",
+                        fontSize: 12,
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="pct"
+                      name="AI 악화 확률 (%)"
+                      stroke="var(--chart-1)"
+                      strokeWidth={3}
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 5 }}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 text-center">
+                {[
+                  ["첫 예측", probTrend[0]?.pct],
+                  ["최고", probMax],
+                  ["최근", probTrend[probTrend.length - 1]?.pct],
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="rounded-md border bg-secondary/40 px-3 py-2">
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="tabular text-lg font-bold">{value ?? "-"}%</p>
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                각 시점의 값은 그 시각 기준 3시간 내 악화 확률(보정 확률)입니다. 예측은 ED 도착
+                +1시간부터 1시간 간격으로 생성되며, 의료진 의사결정 지원 정보입니다.
+              </p>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* 환자용 상태 안내 화면 */}
       <Dialog open={patientViewOpen} onOpenChange={setPatientViewOpen}>

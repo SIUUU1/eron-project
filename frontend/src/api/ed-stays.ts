@@ -1,5 +1,11 @@
-import { apiGet, buildQuery } from "@/api/client";
-import type { EdStayDetail, EdStayPage, PredictionsResponse, VitalsResponse } from "@/api/types";
+import { apiGet, apiPost, buildQuery } from "@/api/client";
+import type {
+  EdStayDetail,
+  EdStayPage,
+  PredictionRunResult,
+  PredictionsResponse,
+  VitalsResponse,
+} from "@/api/types";
 
 export interface EdStayQuery {
   page?: number;
@@ -33,6 +39,17 @@ export function getEdStayVitals(stayId: string, signal?: AbortSignal) {
 
 export function getEdStayPredictions(stayId: string, signal?: AbortSignal) {
   return apiGet<PredictionsResponse>(`/api/ed/stays/${stayId}/predictions`, signal);
+}
+
+/**
+ * 예측 갱신을 즉시 한 번 돌린다.
+ *
+ * ⚠ 어떤 환자를 계산할지는 **백엔드가 정한다**(next_prediction_at · due · 15분 슬롯).
+ *   프론트는 "지금 시각이니 이 환자들" 같은 판단을 하지 않는다.
+ *   데모 시계를 앞으로 옮긴 직후에만 쓰며, 평소에는 스케줄러가 같은 일을 한다.
+ */
+export function runPredictions(signal?: AbortSignal) {
+  return apiPost<undefined, PredictionRunResult>("/api/ed/predictions/run", undefined, signal);
 }
 
 export const edStayKeys = {

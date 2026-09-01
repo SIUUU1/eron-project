@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AlertCircle, Info } from "lucide-react";
 import { useState } from "react";
 
-import { dischargeLabel, formatDateTime, sexLabel, toPercent, toRiskLevel } from "@/api/display";
+import { dischargeLabel, formatDateTime, sexLabel, toPercent, toRiskBand } from "@/api/display";
 import { edStayKeys, getEdStays } from "@/api/ed-stays";
 import type { EdStayListItem } from "@/api/types";
 import { PatientListTable, type PatientRow } from "@/components/patient-list-table";
@@ -50,8 +50,9 @@ function toRow(item: EdStayListItem): PatientRow {
     discharge: dischargeLabel(item.discharge_type),
     ktas: item.acuity,
     chiefComplaint: item.chief_complaint ?? "-",
-    risk: toRiskLevel(item.risk_level),
+    risk: toRiskBand(item.risk_band),
     probability: toPercent(item.risk_probability),
+    reviewed: item.reviewed,
     recordStatus:
       item.record_status === "SIGNED"
         ? "인증 완료"
@@ -94,8 +95,7 @@ function MonitoringListPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">환자 모니터링</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          KTAS 등급이 고르게 보이도록 정렬되며, 각 등급 안에서는 최근 내원 순입니다. 환자를 선택하면
-          상세 모니터링 화면으로 이동합니다.
+          응급실 재실 환자의 현재 위험도와 AI 악화 예측 확률을 확인합니다.
         </p>
       </div>
 

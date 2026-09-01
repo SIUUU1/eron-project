@@ -5,8 +5,8 @@
  * UI 디자인은 바꾸지 않는다 — 기존 mock 이 쓰던 표기와 같은 형태로 맞춘다.
  */
 
-import type { DischargeType, RiskLevelApi } from "@/api/types";
-import type { BedStatus, RiskLevel } from "@/lib/mock-data";
+import type { DischargeType, RiskBandApi } from "@/api/types";
+import type { BedStatus } from "@/lib/mock-data";
 
 const DISCHARGE: Record<DischargeType, string> = {
   icu: "ICU",
@@ -58,8 +58,36 @@ export function routeLabel(value: string | null): string {
   return ROUTE[value] ?? value;
 }
 
-/** 위험도가 없으면(예측 미연동) null 을 돌려준다. 임의로 등급을 만들지 않는다. */
-export function toRiskLevel(value: RiskLevelApi | null): RiskLevel | null {
+/**
+ * 환자 목록의 '현재 위험도' 3단계 — 모델 risk_bands 그대로다.
+ * 경계값은 backend(bundle.json)가 정하고, 프론트는 라벨과 색만 붙인다.
+ */
+export const bandMeta: Record<
+  RiskBandApi,
+  { label: string; dot: string; badge: string; text: string }
+> = {
+  green: {
+    label: "저위험",
+    dot: "bg-risk-stable",
+    badge: "bg-risk-stable-soft text-risk-stable border-risk-stable/30",
+    text: "text-risk-stable",
+  },
+  amber: {
+    label: "관찰 필요",
+    dot: "bg-risk-watch",
+    badge: "bg-risk-watch-soft text-risk-watch border-risk-watch/40",
+    text: "text-risk-watch",
+  },
+  red: {
+    label: "재평가 필요",
+    dot: "bg-risk-critical",
+    badge: "bg-risk-critical-soft text-risk-critical border-risk-critical/40",
+    text: "text-risk-critical",
+  },
+};
+
+/** 예측이 없으면 null — 임의 구간을 만들지 않는다. */
+export function toRiskBand(value: RiskBandApi | null): RiskBandApi | null {
   return value;
 }
 
