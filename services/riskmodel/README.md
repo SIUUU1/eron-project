@@ -64,6 +64,22 @@ B 는 배포 모델이 아니며, 사양의 시간적 일반화 성능을 재기
 필요한 아티팩트 5개: `bundle.json` · `model_lgbm.pkl`(34MB) · `calibrator_platt.pkl` ·
 `feature_spec.json` · `text_transformer.pkl`
 
+이 중 `.pkl` 3개는 저장소에 커밋하지 않는다(`.gitignore`). 모델 담당자에게 따로 받아
+`artifacts/` 에 넣은 뒤, LOCK 된 그 전달본이 맞는지 대조한다.
+
+```bash
+cd artifacts && shasum -a 256 -c CHECKSUMS.txt
+```
+
+⚠ **하나라도 `FAILED` 가 나오면 그 전달본을 쓰지 마라.** 버전이 다른 artifact 를 섞으면
+  예측값이 조용히 달라진다.
+
+`artifacts/CHECKSUMS.txt` 는 새 전달본을 LOCK 할 때만 갱신한다.
+
+```bash
+cd artifacts && shasum -a 256 *.json *.pkl > CHECKSUMS.txt
+```
+
 ## 설치
 
 ```bash
