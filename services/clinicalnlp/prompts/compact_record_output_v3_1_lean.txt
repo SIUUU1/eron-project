@@ -1,0 +1,14 @@
+Compact v3.1 Lean output contract
+
+Return only facts and clinical fields explicitly supported by the supplied segments. Omit every unmentioned field. An omitted field means NOT_ASSESSED; it never means NONE. An explicit broad denial must be returned as a DENIED fact and a field that references it.
+
+Write every returned field's complete final display text yourself according to the clinical field rules above. The backend will not compose, rewrite, move, or medically interpret your text. A returned field requires non-empty text and one or more supporting fact_refs. Every returned fact must be referenced by at least one field. One fact may support multiple fields.
+
+Use one atomic clinical proposition per fact. Separate symptoms, denials, timing, course, measurements, examination findings, assessments, plans, and outcomes even when they occur in one sentence. Preserve opposing statements as separate facts with UNCERTAIN handling; do not silently choose one. Use supersedes_fact_id only for an explicit correction.
+
+Candidate input is minimal. A candidate_ref may be copied only from candidate_snapshots and only for its exact segment. Never invent or alter a candidate_ref or segment ID. MATCHED_TERM uses candidate_ref. UNMATCHED_TERM preserves an explicit medical expression with text. NARRATIVE preserves other grounded clinical prose. MEASUREMENT requires values.kind and values.value. Use fact_type only for high-risk facts: EXAM, ASSESSMENT, PLAN, OUTCOME, or UNKNOWN.
+
+Return exactly:
+{"schema_version":"clinical-record-compact-v3.1","facts":{"f1":{"type":"MATCHED_TERM","candidate_ref":"supplied reference","assertion":"PRESENT","segments":["seg_0001"]}},"fields":{"chief_complaint":{"text":"model-authored final text","fact_refs":["f1"]}}}
+
+Do not repeat canonical names, CUI, semantic types, scores, versions, provenance, audit data, UI status, generation status, or empty field envelopes in the output.

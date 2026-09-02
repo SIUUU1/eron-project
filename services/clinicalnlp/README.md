@@ -46,11 +46,22 @@ review items reuse those evidence assignments and expose only semantic types
 allowed by the target field. Candidates are never automatically confirmed and
 RAW evidence is never rewritten.
 
-Local Compact v3 rollout is controlled by `CLINICALNLP_COMPACT_V3_MODE`:
-`off` keeps the established v2 path, `compare` dual-runs Compact v3 for
-evaluation, and `primary` uses one Compact v3 draft generation after retrieval
-while preserving the existing UI response contract. Keep `off` until local
-regression and latency checks are accepted.
+Local Compact rollout is controlled by `CLINICALNLP_COMPACT_V3_MODE`.
+`legacy` is the default and preserves the established Compact v3 generator.
+`lean_shadow` keeps that result authoritative while Compact v3.1 Lean runs only
+for local comparison. `lean_primary` uses the sparse Lean contract while
+preserving the public `clinical-workflow-v2` and existing UI response. The older
+`off`, `compare`, and `primary` values remain available during rollout. Do not
+use `lean_shadow` in production because it intentionally adds a second clinical
+generation call.
+
+Lean uses one model call for ordinary inputs. Predicted or actual oversized
+inputs use bounded segment chunks for atomic Fact extraction followed by one
+field-writing call. A failed chunk preserves successful facts, reports the
+failed segment IDs as `partial`, and never converts that range to
+`NOT_ASSESSED`. The model receives only candidate reference, segment, surface,
+canonical term, semantic types, and source; full immutable candidate snapshots
+remain in backend memory for deterministic validation.
 
 `GET /health` returns HTTP 200 only when required configuration and active
 PostgreSQL releases are ready. Missing optional UMLS assets use the bounded

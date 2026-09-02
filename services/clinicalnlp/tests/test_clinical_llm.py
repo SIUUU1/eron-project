@@ -4,6 +4,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from clinicalnlp_api3.clinical_llm import (
+    ClinicalLlmLengthLimit,
     InvalidClinicalLlmOutput,
     OllamaCloudClinicalLlmClient,
 )
@@ -41,13 +42,23 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
                         "payload": json.loads(self.rfile.read(length)),
                     }
                 )
-                content = responses[len(captured) - 1]
+                response_item = responses[len(captured) - 1]
+                content = (
+                    response_item.get("content", "")
+                    if isinstance(response_item, dict)
+                    else response_item
+                )
+                done_reason = (
+                    response_item.get("done_reason", "stop")
+                    if isinstance(response_item, dict)
+                    else "stop"
+                )
                 body = json.dumps(
                     {
                         "model": "gemma4:31b",
                         "message": {"role": "assistant", "content": content},
                         "done": True,
-                        "done_reason": "stop",
+                        "done_reason": done_reason,
                         "prompt_eval_count": 12,
                         "eval_count": 5,
                     }
@@ -123,6 +134,32 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         repair_messages = captured[1]["payload"]["messages"]
         self.assertIn("Repair", repair_messages[0]["content"])
         self.assertIn("unexpected", repair_messages[1]["content"])
+
+    def test_length_result_skips_same_size_repair_and_regeneration(self):
+        server, thread, captured = self._serve([
+            {"content": '{"ok":', "done_reason": "length"}
+        ])
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            with self.assertRaises(ClinicalLlmLengthLimit):
+                client.generate_json(
+                    system_prompt="Return JSON.",
+                    user_payload={"synthetic": True},
+                    response_format=_OK_RESPONSE_FORMAT,
+                    output_label="test output",
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(client.last_diagnostics()["repair_count"], 0)
+        self.assertEqual(client.last_diagnostics()["regeneration_count"], 0)
 
     def test_regenerates_once_from_original_context_when_repair_is_invalid(self):
         server, thread, captured = self._serve(

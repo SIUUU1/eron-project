@@ -46,7 +46,10 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
 
         self.assertEqual(settings.port, 8765)
         self.assertFalse(settings.compact_v3_compare)
-        self.assertEqual(settings.compact_v3_mode, "off")
+        self.assertEqual(settings.compact_v3_mode, "legacy")
+        self.assertEqual(settings.ollama_timeout_seconds, 240.0)
+        self.assertEqual(settings.request_timeout_seconds, 620.0)
+        self.assertEqual(settings.clinical_max_tokens, 8192)
         self.assertEqual(
             settings.database_url,
             "postgresql+psycopg://user:secret@postgres/eron",
@@ -237,10 +240,22 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.compact_v3_mode, "primary")
         self.assertFalse(settings.compact_v3_compare)
 
+    def test_lean_primary_mode_is_accepted(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
+                "CLINICALNLP_COMPACT_V3_MODE": "lean_primary",
+            }
+        )
+
+        self.assertEqual(settings.compact_v3_mode, "lean_primary")
+        self.assertFalse(settings.compact_v3_compare)
+
     def test_invalid_compact_mode_is_rejected(self):
         with self.assertRaisesRegex(
             ConfigurationError,
-            "CLINICALNLP_COMPACT_V3_MODE must be off, compare, or primary",
+            "CLINICALNLP_COMPACT_V3_MODE must be off, compare, primary, legacy",
         ):
             ServiceSettings.from_mapping(
                 {

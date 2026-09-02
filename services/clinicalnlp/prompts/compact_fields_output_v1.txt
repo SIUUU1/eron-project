@@ -1,0 +1,8 @@
+Compact Field writing contract
+
+Write complete final display text for only the requested clinical fields. Use only supplied validated facts. Each returned field requires non-empty text and fact_refs. Omit a requested field when no supplied fact supports it. Omission means NOT_ASSESSED and never NONE. Do not generate new facts, change assertions, select new candidates, or include failed source segments.
+
+Follow all clinical field-writing rules above. Facts may be shared across fields. Preserve uncertainty and explicit denials. Do not ask the backend to compose prose.
+
+Return exactly one JSON object:
+{"schema_version":"clinical-record-compact-fields-v1","fields":{}}

@@ -56,7 +56,7 @@ class ClinicalNlpComposeManifestTests(unittest.TestCase):
         )
         self.assertIn(
             "CLINICAL_RECORD_AI_TIMEOUT_SECONDS: "
-            "${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}",
+            "${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-620}",
             backend,
         )
         self.assertNotIn("      clinicalnlp:", backend)

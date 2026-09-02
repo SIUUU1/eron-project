@@ -39,7 +39,7 @@ class Settings:
 
     # 응급기록 초안 생성용 내부 ClinicalNLP 서비스.
     record_ai_url: str | None = None
-    clinical_record_ai_timeout_seconds: float = 180.0
+    clinical_record_ai_timeout_seconds: float = 620.0
 
     # 음성 파일을 Whisper JSON으로 변환하는 내부 비동기 STT 서비스.
     stt_url: str | None = None
@@ -71,7 +71,7 @@ def load_settings() -> Settings:
         record_ai_url=os.getenv("RECORD_AI_URL") or None,
         clinical_record_ai_timeout_seconds=_float_env(
             "CLINICAL_RECORD_AI_TIMEOUT_SECONDS",
-            180.0,
+            620.0,
         ),
         stt_url=os.getenv("STT_URL") or None,
         stt_timeout_seconds=_float_env("STT_TIMEOUT_SECONDS", 300.0),

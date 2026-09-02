@@ -1,5 +1,9 @@
 # Clinical Record Compact v3
 
+This contract is retained as the `legacy` rollback path. The sparse generation
+and bounded long-input design is specified in
+`clinical-record-compact-v3.1-lean.md`.
+
 Status: internal foundation with validation hardening; not connected to the
 production workflow or public UI response yet.
 
@@ -324,10 +328,11 @@ code would cross the responsibility seam.
 
 ## Local rollout modes
 
-`CLINICALNLP_COMPACT_V3_MODE` accepts `off`, `compare`, or `primary` and defaults
-to `off`. `compare` adds one Compact v3 model call after terminology retrieval;
-the existing v2 draft remains authoritative and comparison failure is isolated
-inside `compact_v3_comparison`.
+The retained rollout values are `off`, `compare`, and `primary`. `off` keeps the
+older v2 path, `compare` adds one Compact v3 call while v2 remains authoritative,
+and `primary` makes this legacy Compact record authoritative. The service-level
+default is now the explicit alias `legacy`, which has the same behavior as
+`primary`. Lean rollout values are documented separately.
 
 `primary` skips the legacy clinical extraction, candidate-adjudication, and
 normalization model calls. It runs translation and terminology retrieval first,

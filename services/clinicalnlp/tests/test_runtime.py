@@ -211,6 +211,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             retriever=_EmptyRetriever(),
             clinical_extractor=extractor,
             query_expander=_SyntheticQueryExpander(),
+            compact_v3_mode="off",
         )
         payload = {
             "language": "ko",
@@ -344,8 +345,70 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             "$.compact_v3_primary.record",
         )
 
+    def test_lean_primary_projects_sparse_fields_without_legacy_generation_status(self):
+        class LeanExtractor(_SyntheticClinicalExtractor):
+            def generate_compact_record_lean(self, payload, candidate_snapshots):
+                return {
+                    "prompt_version": "clinical-record-compact-v3.1-lean-v1",
+                    "record": {
+                        "schema_version": "clinical-record-compact-v3.1",
+                        "facts": {"f1": {
+                            "type": "NARRATIVE",
+                            "text": "배가 아파요",
+                            "assertion": "PRESENT",
+                            "segments": ["seg_0001"],
+                        }},
+                        "fields": {"chief_complaint": {
+                            "text": "Abdominal pain",
+                            "fact_refs": ["f1"],
+                        }},
+                    },
+                    "validation": {
+                        "schema_version": "clinical-record-compact-v3.1-validation-v1",
+                        "status": "PASS",
+                        "processing_status": "completed",
+                        "issues": [],
+                        "field_statuses": {"chief_complaint": "PASS"},
+                    },
+                    "generation": {
+                        "contract_version": "clinical-record-compact-v3.1",
+                        "generation_route": "single",
+                        "llm_call_count": 1,
+                    },
+                }
+
+        extractor = LeanExtractor()
+        runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=extractor,
+            query_expander=_SyntheticQueryExpander(),
+            compact_v3_mode="lean_primary",
+        )
+
+        result = runtime.generate_draft({
+            "language": "ko",
+            "segments": [{
+                "id": "seg_0001",
+                "start": 0.0,
+                "end": 2.0,
+                "text": "배가 아파요",
+            }],
+        })
+
+        self.assertEqual(result["processing_status"], "completed")
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["value"],
+            "Abdominal pain",
+        )
+        self.assertEqual(
+            result["draft"]["fields"]["past_history"]["information_status"],
+            "NOT_ASSESSED",
+        )
+        self.assertEqual(result["telemetry"]["contract_version"], "clinical-record-compact-v3.1")
+        self.assertNotIn("candidate_snapshots", result["compact_v3_primary"])
+
     def test_invalid_compact_mode_is_rejected_before_generation(self):
-        with self.assertRaisesRegex(ValueError, "off, compare, or primary"):
+        with self.assertRaisesRegex(ValueError, "off, compare, primary, legacy"):
             create_clinical_runtime(
                 retriever=_EmptyRetriever(),
                 clinical_extractor=_SyntheticClinicalExtractor(),

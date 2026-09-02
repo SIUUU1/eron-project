@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import copy
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import json
 import os
 from pathlib import Path
+import threading
+import time
 from typing import Any
 from urllib.request import Request, urlopen
 
-from .clinical_llm import ClinicalLlmClient, OllamaCloudClinicalLlmClient
+from .clinical_llm import (
+    ClinicalLlmClient,
+    ClinicalLlmLengthLimit,
+    InvalidClinicalLlmOutput,
+    OllamaCloudClinicalLlmClient,
+)
 from .clinical_record_pipeline import (
     extract_clinical_record,
     select_clinical_record_candidate,
@@ -25,6 +35,21 @@ from .compact_record_v3 import (
     compact_record_response_format,
     validate_compact_record,
 )
+from .compact_record_lean import (
+    FIELD_GROUPS,
+    MAX_CHUNKS,
+    MAX_LOGICAL_LLM_CALLS,
+    MAX_SEGMENTS_PER_CHUNK,
+    MAX_SPLIT_DEPTH,
+    PROMPT_VERSION as LEAN_PROMPT_VERSION,
+    SCHEMA_VERSION as LEAN_SCHEMA_VERSION,
+    fact_chunk_response_format,
+    field_response_format,
+    lean_record_response_format,
+    merge_chunk_facts,
+    minimal_candidate_projection,
+    validate_lean_record,
+)
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -38,7 +63,12 @@ DEFAULT_DRAFT_NORMALIZATION_PROMPT = (
 DEFAULT_COMPACT_OUTPUT_PROMPT = (
     PROJECT_ROOT / "prompts" / "compact_record_output_v3.txt"
 )
-DEFAULT_MAX_OUTPUT_TOKENS = 3072
+DEFAULT_LEAN_OUTPUT_PROMPT = (
+    PROJECT_ROOT / "prompts" / "compact_record_output_v3_1_lean.txt"
+)
+DEFAULT_LEAN_FACT_PROMPT = PROJECT_ROOT / "prompts" / "compact_fact_output_v1.txt"
+DEFAULT_LEAN_FIELDS_PROMPT = PROJECT_ROOT / "prompts" / "compact_fields_output_v1.txt"
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
 MAX_CANDIDATES_PER_ANNOTATION = 5
 MAX_MODEL_CANDIDATES_PER_ANNOTATION = 3
 MAX_MODEL_CANDIDATE_ANNOTATIONS = 16
@@ -46,6 +76,82 @@ CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.12"
 CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
 COMPACT_PROMPT_VERSION = "clinical-record-compact-v3.2"
+LEAN_REQUEST_DEADLINE_SECONDS = 620.0
+
+
+class _LeanCallBudget:
+    def __init__(self, maximum: int):
+        self.maximum = maximum
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def reserve(self) -> int:
+        with self._lock:
+            if self.used >= self.maximum:
+                raise RuntimeError("Compact v3.1 Lean logical call budget exhausted")
+            self.used += 1
+            return self.used
+
+
+class _LeanTelemetry:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._thread = threading.local()
+        self.values: dict[str, Any] = {
+            "contract_version": LEAN_SCHEMA_VERSION,
+            "generation_route": "single",
+            "fact_chunk_count": 0,
+            "field_group_call_count": 0,
+            "llm_call_count": 0,
+            "provider_call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "length_fallback_count": 0,
+            "repair_count": 0,
+            "regeneration_count": 0,
+            "network_retry_count": 0,
+            "failed_segment_count": 0,
+        }
+
+    def add_call(self, diagnostics: dict[str, Any] | None = None) -> None:
+        diagnostics = diagnostics or {}
+        self._thread.last_call = copy.deepcopy(diagnostics)
+        with self._lock:
+            provider_calls = diagnostics.get("provider_call_count")
+            self.values["llm_call_count"] += (
+                provider_calls
+                if isinstance(provider_calls, int)
+                and not isinstance(provider_calls, bool)
+                and provider_calls > 0
+                else 1
+            )
+            for key in (
+                "provider_call_count",
+                "input_tokens",
+                "output_tokens",
+                "repair_count",
+                "regeneration_count",
+                "network_retry_count",
+            ):
+                value = diagnostics.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    self.values[key] += value
+
+    def increment(self, key: str, amount: int = 1) -> None:
+        with self._lock:
+            self.values[key] = int(self.values.get(key, 0)) + amount
+
+    def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            self.values[key] = value
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self.values)
+
+    def last_call(self) -> dict[str, Any]:
+        value = getattr(self._thread, "last_call", None)
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
 
 
 def _json_candidates(
@@ -86,6 +192,9 @@ class LlamaServerClinicalExtractor:
         candidate_prompt_path: Path | None = None,
         draft_normalization_prompt_path: Path | None = None,
         compact_output_prompt_path: Path | None = None,
+        lean_output_prompt_path: Path | None = None,
+        lean_fact_prompt_path: Path | None = None,
+        lean_fields_prompt_path: Path | None = None,
         llm_client: ClinicalLlmClient | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -106,6 +215,15 @@ class LlamaServerClinicalExtractor:
         )
         self.compact_output_prompt_path = Path(
             compact_output_prompt_path or DEFAULT_COMPACT_OUTPUT_PROMPT
+        )
+        self.lean_output_prompt_path = Path(
+            lean_output_prompt_path or DEFAULT_LEAN_OUTPUT_PROMPT
+        )
+        self.lean_fact_prompt_path = Path(
+            lean_fact_prompt_path or DEFAULT_LEAN_FACT_PROMPT
+        )
+        self.lean_fields_prompt_path = Path(
+            lean_fields_prompt_path or DEFAULT_LEAN_FIELDS_PROMPT
         )
 
     @classmethod
@@ -142,7 +260,7 @@ class LlamaServerClinicalExtractor:
             os.environ.get(
                 "OLLAMA_TIMEOUT" if cloud else "CLINICALNLP_API2_GEMMA_TIMEOUT",
                 (
-                    "600"
+                    "240"
                     if cloud
                     else os.environ.get("CLINICALNLP_API3_GEMMA_TIMEOUT", "600")
                 ),
@@ -390,6 +508,485 @@ class LlamaServerClinicalExtractor:
                 segment_ids=segment_ids,
                 candidate_snapshots=candidate_snapshots,
             ),
+        }
+
+    @staticmethod
+    def _estimated_tokens(value: Any) -> int:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return max(1, (len(serialized) + 3) // 4)
+
+    def _lean_call(
+        self,
+        *,
+        prompt: str,
+        payload: dict[str, Any],
+        response_format: dict[str, Any],
+        required_key: str,
+        required_type: type,
+        output_label: str,
+        budget: _LeanCallBudget,
+        telemetry: _LeanTelemetry,
+        deadline: float,
+    ) -> dict[str, Any]:
+        if deadline - time.monotonic() < min(
+            float(self.timeout),
+            LEAN_REQUEST_DEADLINE_SECONDS,
+        ):
+            raise TimeoutError("Compact v3.1 Lean request deadline is insufficient")
+        diagnostics: dict[str, Any] = {}
+        try:
+            if self.llm_client is not None:
+                if isinstance(self.llm_client, OllamaCloudClinicalLlmClient):
+                    return self.llm_client.generate_json(
+                        system_prompt=prompt,
+                        user_payload=payload,
+                        response_format=response_format,
+                        output_label=output_label,
+                        call_reserver=budget.reserve,
+                    )
+                budget.reserve()
+                return self.llm_client.generate_json(
+                    system_prompt=prompt,
+                    user_payload=payload,
+                    response_format=response_format,
+                    output_label=output_label,
+                )
+            budget.reserve()
+            try:
+                return self._generate_chunk(
+                    prompt,
+                    payload,
+                    response_format=response_format,
+                    required_key=required_key,
+                    required_type=required_type,
+                    output_label=output_label,
+                )[0]
+            except ValueError as error:
+                if "finish_reason=length" in str(error):
+                    raise ClinicalLlmLengthLimit(str(error)) from error
+                raise
+        finally:
+            reader = getattr(self.llm_client, "last_diagnostics", None)
+            if callable(reader):
+                value = reader()
+                diagnostics = value if isinstance(value, dict) else {}
+            telemetry.add_call(diagnostics)
+
+    @staticmethod
+    def _lean_segment_chunks(
+        segments: list[dict[str, Any]],
+        snapshots: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        chunks: list[dict[str, Any]] = []
+        current: list[dict[str, Any]] = []
+        for segment in segments:
+            proposal = [*current, segment]
+            proposal_ids = [
+                str(item.get("id"))
+                for item in proposal
+                if isinstance(item.get("id"), str)
+            ]
+            payload = {
+                "segments": proposal,
+                "candidate_snapshots": minimal_candidate_projection(
+                    snapshots,
+                    segment_ids=proposal_ids,
+                ),
+            }
+            oversized = (
+                len(proposal) > MAX_SEGMENTS_PER_CHUNK
+                or LlamaServerClinicalExtractor._estimated_tokens(payload) > 3500
+            )
+            if current and oversized:
+                chunks.append({"owned_segments": current})
+                current = [segment]
+            else:
+                current = proposal
+        if current:
+            chunks.append({"owned_segments": current})
+
+        overflow_ids: list[str] = []
+        if len(chunks) > MAX_CHUNKS:
+            for chunk in chunks[MAX_CHUNKS:]:
+                overflow_ids.extend(
+                    str(item.get("id"))
+                    for item in chunk["owned_segments"]
+                    if isinstance(item.get("id"), str)
+                )
+            chunks = chunks[:MAX_CHUNKS]
+        for index, chunk in enumerate(chunks):
+            owned = chunk["owned_segments"]
+            context: list[dict[str, Any]] = []
+            if index and chunks[index - 1]["owned_segments"]:
+                overlap = copy.deepcopy(chunks[index - 1]["owned_segments"][-1])
+                overlap["context_only"] = True
+                context.append(overlap)
+            chunk["segments"] = context + [
+                {**copy.deepcopy(item), "context_only": False} for item in owned
+            ]
+        return chunks, overflow_ids
+
+    def _extract_lean_fact_chunk(
+        self,
+        *,
+        extraction_rules: str,
+        chunk_prompt: str,
+        owned_segments: list[dict[str, Any]],
+        context_segment: dict[str, Any] | None,
+        candidate_snapshots: dict[str, dict[str, Any]],
+        budget: _LeanCallBudget,
+        telemetry: _LeanTelemetry,
+        deadline: float,
+        depth: int = 0,
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        owned_ids = [
+            str(segment.get("id"))
+            for segment in owned_segments
+            if isinstance(segment.get("id"), str)
+        ]
+        model_segments: list[dict[str, Any]] = []
+        if context_segment is not None:
+            overlap = copy.deepcopy(context_segment)
+            overlap["context_only"] = True
+            model_segments.append(overlap)
+        model_segments.extend(
+            {**copy.deepcopy(segment), "context_only": False}
+            for segment in owned_segments
+        )
+        payload = {
+            "owned_segment_ids": owned_ids,
+            "segments": model_segments,
+            "candidate_snapshots": minimal_candidate_projection(
+                candidate_snapshots,
+                segment_ids=owned_ids,
+            ),
+        }
+        started = time.perf_counter()
+        try:
+            generated = self._lean_call(
+                prompt=f"{extraction_rules}\n\n{chunk_prompt}",
+                payload=payload,
+                response_format=fact_chunk_response_format(),
+                required_key="facts",
+                required_type=dict,
+                output_label="Compact v3.1 fact chunk",
+                budget=budget,
+                telemetry=telemetry,
+                deadline=deadline,
+            )
+            facts = generated.get("facts")
+            facts = facts if isinstance(facts, dict) else {}
+            for fact in facts.values():
+                fact_segments = fact.get("segments") if isinstance(fact, dict) else []
+                if any(str(segment_id) not in owned_ids for segment_id in fact_segments):
+                    raise InvalidClinicalLlmOutput(
+                        "fact chunk used a context-only or unknown source segment"
+                    )
+            digest = hashlib.sha256(
+                json.dumps(generated, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            call_diagnostics = telemetry.last_call()
+            audit = [{
+                "segment_ids": owned_ids,
+                "status": "completed",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "output_sha256": digest,
+                "validation_codes": [],
+                "provider_call_count": call_diagnostics.get("provider_call_count", 1),
+                "input_tokens": call_diagnostics.get("input_tokens", 0),
+                "output_tokens": call_diagnostics.get("output_tokens", 0),
+                "done_reason": call_diagnostics.get("done_reason"),
+            }]
+            return [facts], [], audit
+        except ClinicalLlmLengthLimit as error:
+            telemetry.increment("length_fallback_count")
+            if len(owned_segments) <= 1 or depth >= MAX_SPLIT_DEPTH:
+                call_diagnostics = telemetry.last_call()
+                return [], owned_ids, [{
+                    "segment_ids": owned_ids,
+                    "status": "failed",
+                    "error_code": "ChunkTooLarge",
+                    "validation_codes": ["ChunkTooLarge"],
+                    "detail": str(error),
+                    "provider_call_count": call_diagnostics.get("provider_call_count", 1),
+                    "input_tokens": call_diagnostics.get("input_tokens", 0),
+                    "output_tokens": call_diagnostics.get("output_tokens", 0),
+                    "done_reason": call_diagnostics.get("done_reason", "length"),
+                }]
+            middle = len(owned_segments) // 2
+            left = owned_segments[:middle]
+            right = owned_segments[middle:]
+            left_facts, left_failed, left_audit = self._extract_lean_fact_chunk(
+                extraction_rules=extraction_rules,
+                chunk_prompt=chunk_prompt,
+                owned_segments=left,
+                context_segment=context_segment,
+                candidate_snapshots=candidate_snapshots,
+                budget=budget,
+                telemetry=telemetry,
+                deadline=deadline,
+                depth=depth + 1,
+            )
+            right_context = left[-1] if left else context_segment
+            right_facts, right_failed, right_audit = self._extract_lean_fact_chunk(
+                extraction_rules=extraction_rules,
+                chunk_prompt=chunk_prompt,
+                owned_segments=right,
+                context_segment=right_context,
+                candidate_snapshots=candidate_snapshots,
+                budget=budget,
+                telemetry=telemetry,
+                deadline=deadline,
+                depth=depth + 1,
+            )
+            return (
+                left_facts + right_facts,
+                left_failed + right_failed,
+                left_audit + right_audit,
+            )
+        except Exception as error:
+            call_diagnostics = telemetry.last_call()
+            return [], owned_ids, [{
+                "segment_ids": owned_ids,
+                "status": "failed",
+                "error_code": type(error).__name__,
+                "validation_codes": [type(error).__name__],
+                "detail": str(error),
+                "provider_call_count": call_diagnostics.get("provider_call_count", 1),
+                "input_tokens": call_diagnostics.get("input_tokens", 0),
+                "output_tokens": call_diagnostics.get("output_tokens", 0),
+                "done_reason": call_diagnostics.get("done_reason"),
+            }]
+
+    def _generate_lean_fields(
+        self,
+        *,
+        extraction_rules: str,
+        fields_prompt: str,
+        segments: list[dict[str, Any]],
+        facts: dict[str, Any],
+        candidate_snapshots: dict[str, dict[str, Any]],
+        failed_segment_ids: list[str],
+        budget: _LeanCallBudget,
+        telemetry: _LeanTelemetry,
+        deadline: float,
+    ) -> tuple[dict[str, Any], list[str]]:
+        supported_segment_ids = {
+            str(segment_id)
+            for fact in facts.values()
+            if isinstance(fact, dict)
+            for segment_id in fact.get("segments", [])
+        }
+        supported_segments = [
+            segment
+            for segment in segments
+            if str(segment.get("id") or "") in supported_segment_ids
+        ]
+        base_payload = {
+            "segments": supported_segments,
+            "facts": facts,
+            "candidate_snapshots": minimal_candidate_projection(
+                candidate_snapshots,
+                segment_ids=supported_segment_ids,
+            ),
+            "failed_segment_ids": failed_segment_ids,
+        }
+        prompt = f"{extraction_rules}\n\n{fields_prompt}"
+        try:
+            generated = self._lean_call(
+                prompt=prompt,
+                payload={**base_payload, "requested_fields": list(FIELD_GROUPS[0] + FIELD_GROUPS[1] + FIELD_GROUPS[2])},
+                response_format=field_response_format(),
+                required_key="fields",
+                required_type=dict,
+                output_label="Compact v3.1 fields",
+                budget=budget,
+                telemetry=telemetry,
+                deadline=deadline,
+            )
+            fields = generated.get("fields")
+            return (fields if isinstance(fields, dict) else {}), []
+        except ClinicalLlmLengthLimit:
+            telemetry.increment("length_fallback_count")
+        except Exception:
+            return {}, list(FIELD_GROUPS[0] + FIELD_GROUPS[1] + FIELD_GROUPS[2])
+
+        fields: dict[str, Any] = {}
+        failed_fields: list[str] = []
+        for group in FIELD_GROUPS:
+            try:
+                telemetry.increment("field_group_call_count")
+                generated = self._lean_call(
+                    prompt=prompt,
+                    payload={**base_payload, "requested_fields": list(group)},
+                    response_format=field_response_format(group),
+                    required_key="fields",
+                    required_type=dict,
+                    output_label="Compact v3.1 field group",
+                    budget=budget,
+                    telemetry=telemetry,
+                    deadline=deadline,
+                )
+                group_fields = generated.get("fields")
+                if isinstance(group_fields, dict):
+                    fields.update(group_fields)
+            except Exception:
+                failed_fields.extend(group)
+        return fields, failed_fields
+
+    def generate_compact_record_lean(
+        self,
+        payload: dict[str, Any],
+        candidate_snapshots: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Generate sparse Compact v3.1 output with a bounded long-input path."""
+
+        started = time.perf_counter()
+        deadline = time.monotonic() + LEAN_REQUEST_DEADLINE_SECONDS
+        budget = _LeanCallBudget(MAX_LOGICAL_LLM_CALLS)
+        telemetry = _LeanTelemetry()
+        base_prompt = self.prompt_path.read_text(encoding="utf-8")
+        extraction_rules = base_prompt.split("Value V is", 1)[0].rstrip()
+        lean_prompt = self.lean_output_prompt_path.read_text(encoding="utf-8")
+        fact_prompt = self.lean_fact_prompt_path.read_text(encoding="utf-8")
+        fields_prompt = self.lean_fields_prompt_path.read_text(encoding="utf-8")
+        model_payload = self._model_payload(payload)
+        segments = model_payload.get("segments")
+        segments = segments if isinstance(segments, list) else []
+        segment_ids = [
+            str(segment.get("id"))
+            for segment in segments
+            if isinstance(segment, dict) and isinstance(segment.get("id"), str)
+        ]
+        minimal_candidates = minimal_candidate_projection(candidate_snapshots)
+        single_payload = {
+            "segments": segments,
+            "candidate_snapshots": minimal_candidates,
+        }
+        estimated_facts = min(
+            96,
+            max(len(segments) * 3, len(minimal_candidates), 1),
+        )
+        estimated_output_tokens = 300 + estimated_facts * 45 + 12 * 110
+        single_route = (
+            len(segments) <= MAX_SEGMENTS_PER_CHUNK
+            and self._estimated_tokens(single_payload) <= 3500
+            and estimated_output_tokens <= 4096
+        )
+        if single_route:
+            try:
+                generated = self._lean_call(
+                    prompt=f"{extraction_rules}\n\n{lean_prompt}",
+                    payload=single_payload,
+                    response_format=lean_record_response_format(),
+                    required_key="fields",
+                    required_type=dict,
+                    output_label="Compact v3.1 Lean clinical record",
+                    budget=budget,
+                    telemetry=telemetry,
+                    deadline=deadline,
+                )
+                validation = validate_lean_record(
+                    generated,
+                    segment_ids=segment_ids,
+                    candidate_snapshots=candidate_snapshots,
+                )
+                telemetry.set("elapsed_ms", round((time.perf_counter() - started) * 1000, 3))
+                return {
+                    "prompt_version": LEAN_PROMPT_VERSION,
+                    "record": generated,
+                    "validation": validation,
+                    "generation": telemetry.snapshot(),
+                    "audit": {"chunks": [], "fact_id_map": []},
+                }
+            except ClinicalLlmLengthLimit:
+                telemetry.increment("length_fallback_count")
+
+        telemetry.set("generation_route", "chunked")
+        chunks, overflow_ids = self._lean_segment_chunks(
+            [segment for segment in segments if isinstance(segment, dict)],
+            candidate_snapshots,
+        )
+        telemetry.set("fact_chunk_count", len(chunks))
+        failed_segment_ids = list(overflow_ids)
+        chunk_audit: list[dict[str, Any]] = []
+        ordered_fact_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
+            for index, chunk in enumerate(chunks, start=1):
+                context = None
+                if index > 1 and chunks[index - 2]["owned_segments"]:
+                    context = chunks[index - 2]["owned_segments"][-1]
+                future = executor.submit(
+                    self._extract_lean_fact_chunk,
+                    extraction_rules=extraction_rules,
+                    chunk_prompt=fact_prompt,
+                    owned_segments=chunk["owned_segments"],
+                    context_segment=context,
+                    candidate_snapshots=candidate_snapshots,
+                    budget=budget,
+                    telemetry=telemetry,
+                    deadline=deadline,
+                )
+                futures[future] = index
+            for future in as_completed(futures):
+                index = futures[future]
+                fact_groups, failed_ids, audit_entries = future.result()
+                ordered_fact_groups[index].extend(fact_groups)
+                failed_segment_ids.extend(failed_ids)
+                for entry in audit_entries:
+                    chunk_audit.append({"chunk_id": f"chunk_{index:02d}", **entry})
+
+        flattened: list[tuple[int, Mapping[str, Any]]] = []
+        chunk_number = 0
+        for index in sorted(ordered_fact_groups):
+            for facts in ordered_fact_groups[index]:
+                chunk_number += 1
+                flattened.append((chunk_number, facts))
+        merged_facts, fact_id_map = merge_chunk_facts(flattened)
+        successful_chunk_count = len(flattened)
+        fields, failed_field_ids = self._generate_lean_fields(
+            extraction_rules=extraction_rules,
+            fields_prompt=fields_prompt,
+            segments=[segment for segment in segments if isinstance(segment, dict)],
+            facts=merged_facts,
+            candidate_snapshots=candidate_snapshots,
+            failed_segment_ids=failed_segment_ids,
+            budget=budget,
+            telemetry=telemetry,
+            deadline=deadline,
+        )
+        technical_status = (
+            "failed"
+            if segments and not successful_chunk_count
+            else "partial"
+            if failed_segment_ids or failed_field_ids
+            else "completed"
+        )
+        record = {
+            "schema_version": LEAN_SCHEMA_VERSION,
+            "facts": merged_facts,
+            "fields": fields,
+        }
+        validation = validate_lean_record(
+            record,
+            segment_ids=segment_ids,
+            candidate_snapshots=candidate_snapshots,
+            failed_segment_ids=failed_segment_ids,
+            impacted_field_ids=failed_field_ids,
+            technical_status=technical_status,
+        )
+        telemetry.set("failed_segment_count", len(set(failed_segment_ids)))
+        telemetry.set("elapsed_ms", round((time.perf_counter() - started) * 1000, 3))
+        return {
+            "prompt_version": LEAN_PROMPT_VERSION,
+            "record": record,
+            "validation": validation,
+            "generation": telemetry.snapshot(),
+            "audit": {
+                "chunks": sorted(chunk_audit, key=lambda item: (item["chunk_id"], str(item.get("segment_ids")))),
+                "fact_id_map": fact_id_map,
+            },
         }
 
     def compare_compact_record(

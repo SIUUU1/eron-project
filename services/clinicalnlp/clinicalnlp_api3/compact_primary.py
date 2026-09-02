@@ -28,10 +28,16 @@ def _field_information_status(
     field_validation_status: str,
 ) -> str:
     generation_status = field.get("generation_status")
-    if generation_status == "NOT_MENTIONED":
-        return "NOT_ASSESSED"
+    if generation_status is None:
+        generation_status = (
+            "GENERATED"
+            if str(field.get("text") or "").strip() and field.get("fact_refs")
+            else "NOT_MENTIONED"
+        )
     if generation_status == "FAILED" or field_validation_status != "PASS":
         return "UNCERTAIN"
+    if generation_status == "NOT_MENTIONED":
+        return "NOT_ASSESSED"
     assertions = {
         str(facts[ref].get("assertion"))
         for ref in field.get("fact_refs", [])
@@ -135,7 +141,14 @@ def project_compact_primary_draft(
         legacy_id = CANONICAL_TO_LEGACY_FIELD_ID[canonical_id]
         field = compact_fields.get(canonical_id)
         field = field if isinstance(field, Mapping) else {}
-        generation_status = str(field.get("generation_status") or "FAILED")
+        generation_status_value = field.get("generation_status")
+        generation_status = (
+            str(generation_status_value)
+            if generation_status_value is not None
+            else "GENERATED"
+            if str(field.get("text") or "").strip() and field.get("fact_refs")
+            else "NOT_MENTIONED"
+        )
         field_validation_status = str(
             field_statuses.get(canonical_id) or default_field_status
         )
@@ -190,7 +203,9 @@ def project_compact_primary_draft(
                     ),
                     "evidence": "",
                     "candidates": [],
-                    "validation_reasons": [str(issue.get("code") or "")],
+                    "validation_reasons": [
+                        str(issue.get("issue_code") or issue.get("code") or "")
+                    ],
                     "compact_issue": copy.deepcopy(dict(issue)),
                     "needs_review": True,
                 }

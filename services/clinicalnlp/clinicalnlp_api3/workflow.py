@@ -3890,9 +3890,26 @@ def run_clinical_workflow(
     from .query_expansion import run_query_expansion
 
     compact_v3_mode = str(compact_v3_mode or "off").strip().casefold()
-    if compact_v3_mode not in {"off", "compare", "primary"}:
-        raise ValueError("compact_v3_mode must be off, compare, or primary")
-    compact_v3_primary = compact_v3_mode == "primary"
+    allowed_compact_modes = {
+        "off",
+        "compare",
+        "primary",
+        "legacy",
+        "lean_shadow",
+        "lean_primary",
+    }
+    if compact_v3_mode not in allowed_compact_modes:
+        raise ValueError(
+            "compact_v3_mode must be off, compare, primary, legacy, "
+            "lean_shadow, or lean_primary"
+        )
+    compact_v3_primary = compact_v3_mode in {
+        "primary",
+        "legacy",
+        "lean_shadow",
+        "lean_primary",
+    }
+    lean_primary = compact_v3_mode == "lean_primary"
 
     def telemetry_number(value: object, default: float = 0.0) -> float:
         if (
@@ -4152,17 +4169,21 @@ def run_clinical_workflow(
         if compact_v3_primary:
             generate_compact = getattr(
                 clinical_extractor,
-                "generate_compact_record",
+                (
+                    "generate_compact_record_lean"
+                    if lean_primary
+                    else "generate_compact_record"
+                ),
                 None,
             )
-            if not callable(generate_compact):
+            if not callable(generate_compact) and not lean_primary:
                 generate_compact = getattr(
                     clinical_extractor,
                     "compare_compact_record",
                     None,
                 )
             if not callable(generate_compact):
-                raise RuntimeError("Compact v3 primary generation is unavailable")
+                raise RuntimeError("Compact primary generation is unavailable")
             metadata = (
                 api3_document.get("metadata")
                 if isinstance(api3_document.get("metadata"), dict)
@@ -4180,6 +4201,10 @@ def run_clinical_workflow(
             )
             if not isinstance(compact_primary_result, dict):
                 raise ValueError("Compact v3 generator returned an invalid contract")
+            compact_generation = compact_primary_result.get("generation")
+            if isinstance(compact_generation, dict):
+                for key, value in compact_generation.items():
+                    telemetry[key] = value
             compact_record = compact_primary_result.get("record")
             compact_validation = compact_primary_result.get("validation")
             if not isinstance(compact_record, dict) or not isinstance(
@@ -4307,9 +4332,17 @@ def run_clinical_workflow(
             translated_segments,
         )
     compact_comparison: dict[str, Any] | None = None
-    if compact_v3_mode == "compare":
+    if compact_v3_mode in {"compare", "lean_shadow"}:
         started = time.perf_counter()
-        compare = getattr(clinical_extractor, "compare_compact_record", None)
+        compare = getattr(
+            clinical_extractor,
+            (
+                "generate_compact_record_lean"
+                if compact_v3_mode == "lean_shadow"
+                else "compare_compact_record"
+            ),
+            None,
+        )
         try:
             if not callable(compare) or api2_payload is None:
                 raise RuntimeError("Compact v3 comparison is unavailable")
@@ -4368,8 +4401,10 @@ def run_clinical_workflow(
                 )
                 v3_mentioned = (
                     isinstance(compact_field, dict)
-                    and compact_field.get("generation_status") == "GENERATED"
                     and bool(str(v3_text or "").strip())
+                    and bool(compact_field.get("fact_refs"))
+                    and compact_field.get("generation_status")
+                    in {None, "GENERATED"}
                 )
                 normalized_v2 = _comparison_text(
                     v2_text,
@@ -4420,13 +4455,16 @@ def run_clinical_workflow(
                 "prompt_version": compact_result.get("prompt_version"),
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
                 "candidate_snapshot_count": len(snapshots),
-                "candidate_snapshots": list(snapshots.values()),
                 "record": compact_record,
                 "validation": compact_result.get("validation"),
                 "fields": field_comparison,
                 "mismatch_field_ids": mismatch_field_ids,
                 "evidence_mismatch_field_ids": evidence_mismatch_field_ids,
             }
+            if compact_v3_mode == "compare":
+                compact_comparison["candidate_snapshots"] = list(snapshots.values())
+            if isinstance(compact_result.get("generation"), dict):
+                compact_comparison["generation"] = compact_result["generation"]
         except Exception as error:
             compact_comparison = {
                 "schema_version": "clinical-record-compact-comparison-v1",
@@ -4442,14 +4480,25 @@ def run_clinical_workflow(
     if compact_primary_result is not None:
         compact_primary_output = {
             "schema_version": "clinical-record-compact-primary-v1",
-            "status": "completed",
+            "status": str(
+                (compact_primary_result.get("validation") or {}).get(
+                    "processing_status", "completed"
+                )
+            ),
             "prompt_version": compact_primary_result.get("prompt_version"),
             "elapsed_ms": telemetry.get("clinical_extraction_ms", 0.0),
             "candidate_snapshot_count": len(compact_primary_snapshots),
-            "candidate_snapshots": list(compact_primary_snapshots.values()),
             "record": compact_primary_result.get("record"),
             "validation": compact_primary_result.get("validation"),
         }
+        if not lean_primary:
+            compact_primary_output["candidate_snapshots"] = list(
+                compact_primary_snapshots.values()
+            )
+        if isinstance(compact_primary_result.get("generation"), dict):
+            compact_primary_output["generation"] = compact_primary_result["generation"]
+        if isinstance(compact_primary_result.get("audit"), dict):
+            compact_primary_output["generation_audit"] = compact_primary_result["audit"]
         audit["references"]["compact_record_path"] = "$.compact_v3_primary.record"
         audit["versions"]["compact_prompt"] = compact_primary_result.get(
             "prompt_version"

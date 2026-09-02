@@ -50,8 +50,18 @@ def create_clinical_runtime(
     mode = str(compact_v3_mode or "off").strip().casefold()
     if compact_v3_compare is not None and mode == "off":
         mode = "compare" if compact_v3_compare else "off"
-    if mode not in {"off", "compare", "primary"}:
-        raise ValueError("compact_v3_mode must be off, compare, or primary")
+    if mode not in {
+        "off",
+        "compare",
+        "primary",
+        "legacy",
+        "lean_shadow",
+        "lean_primary",
+    }:
+        raise ValueError(
+            "compact_v3_mode must be off, compare, primary, legacy, "
+            "lean_shadow, or lean_primary"
+        )
     return ClinicalDraftRuntime(
         retriever=retriever,
         clinical_extractor=clinical_extractor,

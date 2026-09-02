@@ -51,15 +51,23 @@ def _compact_v3_mode(values: Mapping[str, str]) -> str:
     explicit = str(values.get("CLINICALNLP_COMPACT_V3_MODE", "") or "").strip()
     if explicit:
         mode = explicit.casefold()
-        if mode not in {"off", "compare", "primary"}:
+        if mode not in {
+            "off",
+            "compare",
+            "primary",
+            "legacy",
+            "lean_shadow",
+            "lean_primary",
+        }:
             raise ConfigurationError(
-                "CLINICALNLP_COMPACT_V3_MODE must be off, compare, or primary"
+                "CLINICALNLP_COMPACT_V3_MODE must be off, compare, primary, "
+                "legacy, lean_shadow, or lean_primary"
             )
         return mode
     return (
         "compare"
         if _boolean(values, "CLINICALNLP_COMPACT_V3_COMPARE", False)
-        else "off"
+        else "legacy"
     )
 
 
@@ -89,7 +97,7 @@ class ServiceSettings:
     def compact_v3_compare(self) -> bool:
         """Compatibility accessor for retained comparison-mode checks."""
 
-        return self.compact_v3_mode == "compare"
+        return self.compact_v3_mode in {"compare", "lean_shadow"}
 
     @classmethod
     def from_environment(cls) -> "ServiceSettings":
@@ -146,20 +154,20 @@ class ServiceSettings:
             ollama_api_key=api_key,
             ollama_base_url=base_url,
             ollama_model=model,
-            ollama_timeout_seconds=_positive_float(values, "OLLAMA_TIMEOUT", 170),
+            ollama_timeout_seconds=_positive_float(values, "OLLAMA_TIMEOUT", 240),
             host=values.get("CLINICALNLP_HTTP_HOST", "0.0.0.0").strip()
             or "0.0.0.0",
             port=port,
             request_timeout_seconds=_positive_float(
                 values,
                 "CLINICALNLP_HTTP_TIMEOUT",
-                180,
+                620,
             ),
             context_size=_positive_int(values, "CLINICALNLP_API3_CONTEXT", 8192),
             clinical_max_tokens=_positive_int(
                 values,
                 "CLINICALNLP_GEMMA_MAX_TOKENS",
-                3072,
+                8192,
             ),
             query_max_tokens=_positive_int(
                 values,
@@ -340,11 +348,11 @@ def _listener(values: Mapping[str, str]) -> tuple[str, int, float]:
     if port < 0 or port > 65535:
         port = 8765
     try:
-        timeout = float(values.get("CLINICALNLP_HTTP_TIMEOUT", "180"))
+        timeout = float(values.get("CLINICALNLP_HTTP_TIMEOUT", "620"))
     except (TypeError, ValueError):
-        timeout = 180.0
+        timeout = 620.0
     if timeout <= 0:
-        timeout = 180.0
+        timeout = 620.0
     return host, port, timeout
 
 

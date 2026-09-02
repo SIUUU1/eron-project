@@ -139,6 +139,15 @@ class ClinicalContractBundleTests(unittest.TestCase):
             "compact_record_output_v3.txt": (
                 "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
             ),
+            "compact_record_output_v3_1_lean.txt": (
+                "1c2ec2cf75fe8fdf47380a76b8e44b1d3fef45118db1bf45de64147962bee02b"
+            ),
+            "compact_fact_output_v1.txt": (
+                "bc2b4f35441cd885a3e2d1225652a7d7796222fa4072408aca6c91c7c8d15704"
+            ),
+            "compact_fields_output_v1.txt": (
+                "a79336dd368f53727d9545c3e50226a0c6928d2b8040c07493b72067407531ea"
+            ),
         }
 
         actual_hashes = {
@@ -169,6 +178,15 @@ class ClinicalContractBundleTests(unittest.TestCase):
             ),
             "prompts/compact_record_output_v3.txt": (
                 "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
+            ),
+            "prompts/compact_record_output_v3_1_lean.txt": (
+                "1c2ec2cf75fe8fdf47380a76b8e44b1d3fef45118db1bf45de64147962bee02b"
+            ),
+            "prompts/compact_fact_output_v1.txt": (
+                "bc2b4f35441cd885a3e2d1225652a7d7796222fa4072408aca6c91c7c8d15704"
+            ),
+            "prompts/compact_fields_output_v1.txt": (
+                "a79336dd368f53727d9545c3e50226a0c6928d2b8040c07493b72067407531ea"
             ),
         }
 

@@ -110,13 +110,13 @@ def _summary(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run one local v2 versus Compact v3 ClinicalNLP comparison."
+        description="Run one local legacy/Lean Compact ClinicalNLP evaluation."
     )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument(
         "--mode",
-        choices=("compare", "primary"),
-        default="compare",
+        choices=("compare", "primary", "legacy", "lean_shadow", "lean_primary"),
+        default="lean_shadow",
     )
     parser.add_argument("--include-field-text", action="store_true")
     args = parser.parse_args()

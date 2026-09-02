@@ -3,7 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
-from typing import Any
+import random
+import threading
+import time
+from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -11,11 +15,16 @@ class InvalidClinicalLlmOutput(ValueError):
     """The provider response did not satisfy the requested JSON contract."""
 
 
+class ClinicalLlmLengthLimit(InvalidClinicalLlmOutput):
+    """The provider stopped because the configured output limit was reached."""
+
+
 @dataclass(frozen=True)
 class _ChatResult:
     content: str
     done_reason: str | None
     eval_count: int | None
+    prompt_eval_count: int | None
 
 
 def _json_objects(content: str) -> list[dict[str, Any]]:
@@ -223,7 +232,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         *,
         model_name: str,
         api_key: str,
-        max_output_tokens: int = 3072,
+        max_output_tokens: int = 8192,
         timeout: float = 600,
     ):
         if not api_key.strip():
@@ -233,8 +242,30 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         self.api_key = api_key
         self.max_output_tokens = max_output_tokens
         self.timeout = timeout
+        self._diagnostics = threading.local()
 
-    def _chat(self, messages: list[dict[str, str]]) -> _ChatResult:
+    def _reset_diagnostics(self) -> None:
+        self._diagnostics.value = {
+            "provider_call_count": 0,
+            "network_retry_count": 0,
+            "repair_count": 0,
+            "regeneration_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "done_reason": None,
+        }
+
+    def _diag(self) -> dict[str, Any]:
+        value = getattr(self._diagnostics, "value", None)
+        if not isinstance(value, dict):
+            self._reset_diagnostics()
+            value = self._diagnostics.value
+        return value
+
+    def last_diagnostics(self) -> dict[str, Any]:
+        return dict(self._diag())
+
+    def _chat_once(self, messages: list[dict[str, str]]) -> _ChatResult:
         body = json.dumps(
             {
                 "model": self.model_name,
@@ -265,11 +296,44 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             raise InvalidClinicalLlmOutput("Ollama Cloud returned no text content")
         done_reason = result.get("done_reason")
         eval_count = result.get("eval_count")
+        prompt_eval_count = result.get("prompt_eval_count")
         return _ChatResult(
             content=content,
             done_reason=done_reason if isinstance(done_reason, str) else None,
             eval_count=eval_count if isinstance(eval_count, int) else None,
+            prompt_eval_count=(
+                prompt_eval_count if isinstance(prompt_eval_count, int) else None
+            ),
         )
+
+    def _chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        call_reserver: Callable[[], int] | None = None,
+    ) -> _ChatResult:
+        diagnostics = self._diag()
+        for attempt in range(2):
+            if call_reserver is not None:
+                call_reserver()
+            diagnostics["provider_call_count"] += 1
+            try:
+                result = self._chat_once(messages)
+            except HTTPError as error:
+                transient = error.code == 429 or 500 <= error.code <= 599
+                if not transient or attempt:
+                    raise
+            except (URLError, TimeoutError, ConnectionError):
+                if attempt:
+                    raise
+            else:
+                diagnostics["input_tokens"] += result.prompt_eval_count or 0
+                diagnostics["output_tokens"] += result.eval_count or 0
+                diagnostics["done_reason"] = result.done_reason
+                return result
+            diagnostics["network_retry_count"] += 1
+            time.sleep(random.uniform(0.05, 0.15))
+        raise RuntimeError("unreachable provider retry state")
 
     @staticmethod
     def _valid_object(
@@ -290,7 +354,9 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         user_payload: dict[str, Any],
         response_format: dict[str, Any],
         output_label: str,
+        call_reserver: Callable[[], int] | None = None,
     ) -> dict[str, Any]:
+        self._reset_diagnostics()
         schema = _response_schema(response_format)
         schema_text = json.dumps(
             schema, ensure_ascii=False, separators=(",", ":")
@@ -308,11 +374,18 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 "content": json.dumps(user_payload, ensure_ascii=False),
             },
         ]
-        first = self._chat(messages)
+        first = self._chat(messages, call_reserver=call_reserver)
         valid = self._valid_object(first.content, schema)
         if valid is not None:
             return valid
+        if first.done_reason == "length":
+            raise ClinicalLlmLengthLimit(
+                f"{output_label} reached the output limit; "
+                f"eval_count={first.eval_count}; chars={len(first.content)}; "
+                f"issue={_invalid_issue(first.content, schema)}"
+            )
 
+        self._diag()["repair_count"] += 1
         repair_prompt = (
             "Repair the prior assistant output so it is exactly one JSON object "
             "that satisfies the supplied JSON Schema. Preserve the prior factual "
@@ -323,16 +396,28 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             [
                 {"role": "system", "content": repair_prompt},
                 {"role": "user", "content": first.content},
-            ]
+            ],
+            call_reserver=call_reserver,
         )
         valid = self._valid_object(repaired.content, schema)
         if valid is not None:
             return valid
+        if repaired.done_reason == "length":
+            raise ClinicalLlmLengthLimit(
+                f"{output_label} repair reached the output limit; "
+                f"eval_count={repaired.eval_count}; chars={len(repaired.content)}"
+            )
 
-        regeneration = self._chat(messages)
+        self._diag()["regeneration_count"] += 1
+        regeneration = self._chat(messages, call_reserver=call_reserver)
         valid = self._valid_object(regeneration.content, schema)
         if valid is not None:
             return valid
+        if regeneration.done_reason == "length":
+            raise ClinicalLlmLengthLimit(
+                f"{output_label} regeneration reached the output limit; "
+                f"eval_count={regeneration.eval_count}; chars={len(regeneration.content)}"
+            )
         raise InvalidClinicalLlmOutput(
             f"Ollama Cloud returned no valid {output_label} JSON after one repair "
             "and one regeneration; "
@@ -349,4 +434,12 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             f"regeneration_chars={len(regeneration.content)}; "
             f"regeneration_issue={_invalid_issue(regeneration.content, schema)}"
         )
+
+
+__all__ = [
+    "ClinicalLlmClient",
+    "ClinicalLlmLengthLimit",
+    "InvalidClinicalLlmOutput",
+    "OllamaCloudClinicalLlmClient",
+]
 
