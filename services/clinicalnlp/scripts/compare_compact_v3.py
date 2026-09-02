@@ -21,9 +21,10 @@ def _summary(
     include_field_text: bool,
     mode: str = "compare",
 ) -> dict[str, Any]:
+    primary_mode = mode in {"primary", "legacy", "lean_primary"}
     comparison = (
         result.get("compact_v3_primary")
-        if mode == "primary"
+        if primary_mode
         else result.get("compact_v3_comparison")
     )
     comparison = comparison if isinstance(comparison, dict) else {}
@@ -42,7 +43,7 @@ def _summary(
     ]
     fields = comparison.get("fields")
     fields = fields if isinstance(fields, dict) else {}
-    if mode == "primary":
+    if primary_mode:
         record = comparison.get("record")
         fields = (
             record.get("fields")
@@ -53,7 +54,7 @@ def _summary(
     for field_id, field in fields.items():
         if not isinstance(field, dict):
             continue
-        if mode == "primary":
+        if primary_mode:
             item = {
                 "generation_status": field.get("generation_status"),
                 "fact_refs": field.get("fact_refs", []),

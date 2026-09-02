@@ -75,12 +75,12 @@ import {
   emptyRecord,
   followUpQuestions,
   kcdCandidates,
-  outcomeOptions,
   recordFieldLabels,
   type CheckStatus,
   type EmergencyRecord,
   type RecordFieldKey,
 } from "@/lib/mock-data";
+import { outcomeOptions } from "@/lib/clinical-record-outcome";
 import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
@@ -772,9 +772,6 @@ function RecordWorkflow({ patient }: { patient: ReturnType<typeof createWorkflow
                               <SelectValue placeholder="선택되지 않음" />
                             </SelectTrigger>
                             <SelectContent>
-                              {record.outcome && !outcomeOptions.includes(record.outcome) ? (
-                                <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
-                              ) : null}
                               {outcomeOptions.map((o) => (
                                 <SelectItem key={o} value={o}>
                                   {o}

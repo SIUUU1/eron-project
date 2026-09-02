@@ -427,7 +427,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                     "status": "BLOCK",
                     "processing_status": "completed",
                     "issues": [{
-                        "code": "UNSUPPORTED_FACT_REFERENCE",
+                        "issue_code": "UNSUPPORTED_FACT_REFERENCE",
                         "rule_id": "G01",
                         "severity": "BLOCK",
                         "message": "generated field has unsupported evidence",

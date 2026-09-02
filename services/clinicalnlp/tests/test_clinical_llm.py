@@ -1,7 +1,10 @@
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from urllib.error import URLError
 
 from clinicalnlp_api3.clinical_llm import (
     ClinicalLlmLengthLimit,
@@ -160,6 +163,63 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(client.last_diagnostics()["repair_count"], 0)
         self.assertEqual(client.last_diagnostics()["regeneration_count"], 0)
+
+    def test_network_retry_consumes_one_logical_call_reservation(self):
+        class RetryOnceClient(OllamaCloudClinicalLlmClient):
+            attempts = 0
+
+            def _chat_once(self, messages, *, timeout=None):
+                del messages, timeout
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise URLError("synthetic transient failure")
+                return SimpleNamespace(
+                    content='{"ok": true}',
+                    done_reason="stop",
+                    eval_count=5,
+                    prompt_eval_count=12,
+                )
+
+        client = RetryOnceClient(
+            "http://unused.local",
+            model_name="gemma4:31b",
+            api_key="test-secret",
+        )
+        reservations = []
+
+        result = client.generate_json(
+            system_prompt="Return JSON.",
+            user_payload={"synthetic": True},
+            response_format=_OK_RESPONSE_FORMAT,
+            output_label="test output",
+            call_reserver=lambda: reservations.append(len(reservations) + 1),
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(reservations, [1])
+        self.assertEqual(client.last_diagnostics()["provider_call_count"], 2)
+        self.assertEqual(client.last_diagnostics()["network_retry_count"], 1)
+
+    def test_expired_deadline_stops_before_provider_request(self):
+        class NoRequestClient(OllamaCloudClinicalLlmClient):
+            def _chat_once(self, messages, *, timeout=None):
+                raise AssertionError("provider request must not start")
+
+        client = NoRequestClient(
+            "http://unused.local",
+            model_name="gemma4:31b",
+            api_key="test-secret",
+            timeout=10_000,
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+            client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=_OK_RESPONSE_FORMAT,
+                output_label="test output",
+                deadline=time.monotonic() - 1,
+            )
 
     def test_regenerates_once_from_original_context_when_repair_is_invalid(self):
         server, thread, captured = self._serve(

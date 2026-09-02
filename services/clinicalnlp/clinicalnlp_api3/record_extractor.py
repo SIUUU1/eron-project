@@ -72,7 +72,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8192
 MAX_CANDIDATES_PER_ANNOTATION = 5
 MAX_MODEL_CANDIDATES_PER_ANNOTATION = 3
 MAX_MODEL_CANDIDATE_ANNOTATIONS = 16
-CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.12"
+CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.13"
 CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
 COMPACT_PROMPT_VERSION = "clinical-record-compact-v3.2"
@@ -225,6 +225,19 @@ class LlamaServerClinicalExtractor:
         self.lean_fields_prompt_path = Path(
             lean_fields_prompt_path or DEFAULT_LEAN_FIELDS_PROMPT
         )
+        lean_base_prompt = self.prompt_path.read_text(encoding="utf-8")
+        self._lean_extraction_rules = lean_base_prompt.split(
+            "Value V is", 1
+        )[0].rstrip()
+        self._lean_output_prompt = self.lean_output_prompt_path.read_text(
+            encoding="utf-8"
+        )
+        self._lean_fact_prompt = self.lean_fact_prompt_path.read_text(
+            encoding="utf-8"
+        )
+        self._lean_fields_prompt = self.lean_fields_prompt_path.read_text(
+            encoding="utf-8"
+        )
 
     @classmethod
     def from_environment(cls) -> "LlamaServerClinicalExtractor":
@@ -312,6 +325,7 @@ class LlamaServerClinicalExtractor:
         required_key: str,
         required_type: type,
         output_label: str,
+        request_timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         if self.llm_client is not None:
             return [
@@ -345,7 +359,10 @@ class LlamaServerClinicalExtractor:
             headers={"content-type": "application/json"},
             method="POST",
         )
-        with urlopen(request, timeout=self.timeout) as response:
+        with urlopen(
+            request,
+            timeout=self.timeout if request_timeout is None else request_timeout,
+        ) as response:
             result = json.loads(response.read().decode("utf-8"))
         choice = result["choices"][0]
         content = choice["message"]["content"]
@@ -528,11 +545,9 @@ class LlamaServerClinicalExtractor:
         telemetry: _LeanTelemetry,
         deadline: float,
     ) -> dict[str, Any]:
-        if deadline - time.monotonic() < min(
-            float(self.timeout),
-            LEAN_REQUEST_DEADLINE_SECONDS,
-        ):
-            raise TimeoutError("Compact v3.1 Lean request deadline is insufficient")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Compact v3.1 Lean request deadline exceeded")
         diagnostics: dict[str, Any] = {}
         try:
             if self.llm_client is not None:
@@ -543,6 +558,7 @@ class LlamaServerClinicalExtractor:
                         response_format=response_format,
                         output_label=output_label,
                         call_reserver=budget.reserve,
+                        deadline=deadline,
                     )
                 budget.reserve()
                 return self.llm_client.generate_json(
@@ -560,6 +576,7 @@ class LlamaServerClinicalExtractor:
                     required_key=required_key,
                     required_type=required_type,
                     output_label=output_label,
+                    request_timeout=min(float(self.timeout), remaining),
                 )[0]
             except ValueError as error:
                 if "finish_reason=length" in str(error):
@@ -809,7 +826,9 @@ class LlamaServerClinicalExtractor:
         except ClinicalLlmLengthLimit:
             telemetry.increment("length_fallback_count")
         except Exception:
-            return {}, list(FIELD_GROUPS[0] + FIELD_GROUPS[1] + FIELD_GROUPS[2])
+            # A smaller field group can still recover from a malformed response
+            # or a transient failure in the all-fields call.
+            pass
 
         fields: dict[str, Any] = {}
         failed_fields: list[str] = []
@@ -845,11 +864,10 @@ class LlamaServerClinicalExtractor:
         deadline = time.monotonic() + LEAN_REQUEST_DEADLINE_SECONDS
         budget = _LeanCallBudget(MAX_LOGICAL_LLM_CALLS)
         telemetry = _LeanTelemetry()
-        base_prompt = self.prompt_path.read_text(encoding="utf-8")
-        extraction_rules = base_prompt.split("Value V is", 1)[0].rstrip()
-        lean_prompt = self.lean_output_prompt_path.read_text(encoding="utf-8")
-        fact_prompt = self.lean_fact_prompt_path.read_text(encoding="utf-8")
-        fields_prompt = self.lean_fields_prompt_path.read_text(encoding="utf-8")
+        extraction_rules = self._lean_extraction_rules
+        lean_prompt = self._lean_output_prompt
+        fact_prompt = self._lean_fact_prompt
+        fields_prompt = self._lean_fields_prompt
         model_payload = self._model_payload(payload)
         segments = model_payload.get("segments")
         segments = segments if isinstance(segments, list) else []
@@ -909,8 +927,8 @@ class LlamaServerClinicalExtractor:
         )
         telemetry.set("fact_chunk_count", len(chunks))
         failed_segment_ids = list(overflow_ids)
-        chunk_audit: list[dict[str, Any]] = []
         ordered_fact_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        ordered_audit_entries: dict[int, list[dict[str, Any]]] = defaultdict(list)
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {}
             for index, chunk in enumerate(chunks, start=1):
@@ -933,16 +951,21 @@ class LlamaServerClinicalExtractor:
                 index = futures[future]
                 fact_groups, failed_ids, audit_entries = future.result()
                 ordered_fact_groups[index].extend(fact_groups)
+                ordered_audit_entries[index].extend(audit_entries)
                 failed_segment_ids.extend(failed_ids)
-                for entry in audit_entries:
-                    chunk_audit.append({"chunk_id": f"chunk_{index:02d}", **entry})
 
         flattened: list[tuple[int, Mapping[str, Any]]] = []
+        chunk_audit: list[dict[str, Any]] = []
         chunk_number = 0
-        for index in sorted(ordered_fact_groups):
-            for facts in ordered_fact_groups[index]:
+        for index in sorted(ordered_audit_entries):
+            fact_groups = iter(ordered_fact_groups[index])
+            for entry in ordered_audit_entries[index]:
                 chunk_number += 1
-                flattened.append((chunk_number, facts))
+                chunk_audit.append(
+                    {"chunk_id": f"chunk_{chunk_number:02d}", **entry}
+                )
+                if entry.get("status") == "completed":
+                    flattened.append((chunk_number, next(fact_groups)))
         merged_facts, fact_id_map = merge_chunk_facts(flattened)
         successful_chunk_count = len(flattened)
         fields, failed_field_ids = self._generate_lean_fields(

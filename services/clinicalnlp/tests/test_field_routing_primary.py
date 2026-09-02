@@ -3754,6 +3754,36 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
         self.assertEqual(field["status"], "filled")
         self.assertEqual(field["evidence"][0]["segment_id"], "seg_0001")
 
+    def test_outcome_accepts_an_explicit_final_admission_in_english(self):
+        source = {
+            "text": "입원",
+            "category": "Admission",
+            "information_status": "PRESENT",
+            "fact_type": "OUTCOME",
+            "decision": {
+                "raw_value": "We will proceed with admission",
+                "status": "confirmed",
+                "evidence": {"source_segment_id": "seg_0001"},
+            },
+        }
+        api3 = {
+            "segments": [{
+                "id": "seg_0001",
+                "start": 0.0,
+                "end": 1.0,
+                "raw_text": "We will proceed with admission.",
+                "annotations": [],
+            }]
+        }
+
+        field = build_draft(
+            {"clinical_record": {"outcome": source}}, api3
+        )["fields"]["outcome"]
+
+        self.assertEqual(field["value"], "입원")
+        self.assertEqual(field["status"], "filled")
+        self.assertEqual(field["evidence"][0]["segment_id"], "seg_0001")
+
     def test_outcome_does_not_promote_a_conditional_admission_plan(self):
         source = {
             "text": "입원",
@@ -3782,6 +3812,43 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
 
         self.assertEqual(field["value"], "")
         self.assertEqual(field["status"], "needs_review")
+
+    def test_outcome_keeps_english_nonfinal_admission_statements_unresolved(self):
+        cases = (
+            ("Admission is being considered", "Admission"),
+            ("We will decide after the CT result", None),
+            ("The patient may require admission", "Admission"),
+        )
+
+        for decision_text, category in cases:
+            with self.subTest(decision_text=decision_text):
+                source = {
+                    "text": None,
+                    "category": category,
+                    "information_status": "UNCERTAIN",
+                    "fact_type": "OUTCOME",
+                    "decision": {
+                        "raw_value": decision_text,
+                        "status": "needs_confirmation",
+                        "evidence": {"source_segment_id": "seg_0001"},
+                    },
+                }
+                api3 = {
+                    "segments": [{
+                        "id": "seg_0001",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "raw_text": f"{decision_text}.",
+                        "annotations": [],
+                    }]
+                }
+
+                field = build_draft(
+                    {"clinical_record": {"outcome": source}}, api3
+                )["fields"]["outcome"]
+
+                self.assertEqual(field["value"], "")
+                self.assertEqual(field["status"], "needs_review")
 
     def test_outcome_does_not_infer_death_from_cardiac_arrest_or_cpr(self):
         source = {

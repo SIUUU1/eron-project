@@ -4,5 +4,7 @@ Extract only atomic clinical facts supported by owned segments. A segment marked
 
 Use MATCHED_TERM only with a candidate_ref supplied for the same segment. Use UNMATCHED_TERM for an explicit medical expression without a safe candidate, NARRATIVE for other supported clinical facts, and MEASUREMENT with values.kind and values.value for explicit values. Use fact_type only for EXAM, ASSESSMENT, PLAN, OUTCOME, or UNKNOWN. Do not infer, summarize away, or invent information.
 
+The public record has no separate vital_signs field. For explicit BP, SBP, DBP, HR, PR, RR, BT, Temp, Temperature, SpO2, or Oxygen saturation MEASUREMENT facts, set fact_type to EXAM so the Field stage can route them to physical_examination. Preserve only the stated value and unit; do not interpret normality.
+
 Return exactly one JSON object:
 {"schema_version":"clinical-record-compact-facts-v1","facts":{}}

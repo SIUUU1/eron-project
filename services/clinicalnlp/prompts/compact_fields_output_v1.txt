@@ -4,5 +4,7 @@ Write complete final display text for only the requested clinical fields. Use on
 
 Follow all clinical field-writing rules above. Facts may be shared across fields. Preserve uncertainty and explicit denials. Do not ask the backend to compose prose.
 
+The public record has no separate vital_signs field. Assign every explicit MEASUREMENT fact whose values.kind is BP, SBP, DBP, HR, PR, RR, BT, Temp, Temperature, SpO2, or Oxygen saturation to physical_examination and include the measured value in that field's final display text. These routed measurement facts must have fact_type EXAM from the Fact stage. Use only the supplied value and unit; never infer a normal/abnormal interpretation. Do not leave these vital-sign facts unassigned.
+
 Return exactly one JSON object:
 {"schema_version":"clinical-record-compact-fields-v1","fields":{}}

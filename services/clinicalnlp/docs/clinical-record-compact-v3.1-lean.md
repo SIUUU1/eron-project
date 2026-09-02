@@ -38,12 +38,18 @@ from different source segments are not semantically merged. A final call writes
 only sparse fields from validated Facts. If that response reaches its length
 limit, three fixed field groups are attempted within the global call budget.
 
-The logical model-call budget is nine, recursive chunk split depth is four, the
+The logical model-call budget is fourteen, recursive chunk split depth is four, the
 ClinicalNLP request deadline is 620 seconds, and an Ollama call is bounded to
 240 seconds. `done_reason=length` skips same-size repair and selects the bounded
 long-input path. Schema-invalid `stop` responses retain one repair and one
 original-context regeneration. Transient network failures receive at most one
-retry when the deadline permits.
+retry when the deadline permits; that HTTP retry remains part of the same
+logical model call and does not consume a second logical-call reservation.
+
+Because the unchanged public record has no dedicated vital-sign field, explicit
+BP, HR/PR, RR, BT/temperature, and SpO2 measurements are written by the model in
+`physical_examination`. The backend validates their Fact references but does not
+compose or medically interpret the display text.
 
 Successful chunks are preserved. Failed segment ranges produce `partial` and
 `CHUNK_GENERATION_FAILED`; they never become missing clinical information.

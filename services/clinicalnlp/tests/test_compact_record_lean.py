@@ -28,9 +28,21 @@ def _segments(count):
 
 
 class _LeanClient:
-    def __init__(self, *, length_on_first=False, fail_segment_id=None):
+    def __init__(
+        self,
+        *,
+        length_on_first=False,
+        fail_segment_id=None,
+        measurement=False,
+        fail_combined_fields=False,
+        split_fact_chunks_over=None,
+    ):
         self.length_on_first = length_on_first
         self.fail_segment_id = fail_segment_id
+        self.measurement = measurement
+        self.fail_combined_fields = fail_combined_fields
+        self.split_fact_chunks_over = split_fact_chunks_over
+        self._combined_fields_failed = False
         self.calls = []
         self._lock = threading.Lock()
 
@@ -40,6 +52,7 @@ class _LeanClient:
             self.calls.append({
                 "payload": copy.deepcopy(user_payload),
                 "name": response_format["json_schema"]["name"],
+                "system_prompt": system_prompt,
             })
         if self.length_on_first and call_index == 0:
             raise ClinicalLlmLengthLimit("synthetic length")
@@ -62,7 +75,24 @@ class _LeanClient:
         if name == "clinical_record_compact_facts_v1":
             if self.fail_segment_id in user_payload["owned_segment_ids"]:
                 raise RuntimeError("synthetic chunk failure")
+            if (
+                isinstance(self.split_fact_chunks_over, int)
+                and len(user_payload["owned_segment_ids"])
+                > self.split_fact_chunks_over
+            ):
+                raise ClinicalLlmLengthLimit("synthetic chunk length")
             segment_id = user_payload["owned_segment_ids"][0]
+            if self.measurement:
+                return {
+                    "schema_version": "clinical-record-compact-facts-v1",
+                    "facts": {"f1": {
+                        "type": "MEASUREMENT",
+                        "values": {"kind": "BP", "value": "138/82", "unit": "mmHg"},
+                        "assertion": "PRESENT",
+                        "segments": [segment_id],
+                        "fact_type": "EXAM",
+                    }},
+                }
             return {
                 "schema_version": "clinical-record-compact-facts-v1",
                 "facts": {"f1": {
@@ -72,15 +102,32 @@ class _LeanClient:
                     "segments": [segment_id],
                 }},
             }
+        requested_fields = user_payload.get("requested_fields", [])
+        if (
+            self.fail_combined_fields
+            and len(requested_fields) == 12
+            and not self._combined_fields_failed
+        ):
+            self._combined_fields_failed = True
+            raise RuntimeError("synthetic all-fields failure")
         first_fact = next(iter(user_payload["facts"]), None)
-        return {
-            "schema_version": "clinical-record-compact-fields-v1",
-            "fields": ({
+        if self.measurement:
+            fields = ({
+                "physical_examination": {
+                    "text": "Vital signs: BP 138/82 mmHg",
+                    "fact_refs": [first_fact],
+                }
+            } if first_fact and "physical_examination" in requested_fields else {})
+        else:
+            fields = ({
                 "chief_complaint": {
                     "text": "Cough",
                     "fact_refs": [first_fact],
                 }
-            } if first_fact else {}),
+            } if first_fact and "chief_complaint" in requested_fields else {})
+        return {
+            "schema_version": "clinical-record-compact-fields-v1",
+            "fields": fields,
         }
 
 
@@ -156,6 +203,10 @@ class CompactRecordLeanContractTests(unittest.TestCase):
         self.assertEqual(result["generation"]["generation_route"], "single")
         self.assertEqual(result["generation"]["llm_call_count"], 1)
         self.assertEqual(len(client.calls), 1)
+        self.assertIn(
+            "no separate structured vital_signs field",
+            client.calls[0]["system_prompt"],
+        )
 
     def test_length_switches_once_to_chunked_facts_and_fields(self):
         client = _LeanClient(length_on_first=True)
@@ -165,7 +216,7 @@ class CompactRecordLeanContractTests(unittest.TestCase):
 
         self.assertEqual(result["generation"]["generation_route"], "chunked")
         self.assertEqual(result["generation"]["length_fallback_count"], 1)
-        self.assertLessEqual(result["generation"]["llm_call_count"], 9)
+        self.assertLessEqual(result["generation"]["llm_call_count"], 14)
         self.assertTrue(result["record"]["facts"])
         self.assertIn("chief_complaint", result["record"]["fields"])
 
@@ -193,6 +244,94 @@ class CompactRecordLeanContractTests(unittest.TestCase):
             "seg_0017",
             {segment["id"] for segment in field_payload["segments"]},
         )
+
+    def test_vital_measurement_is_assigned_to_physical_examination(self):
+        client = _LeanClient(length_on_first=True, measurement=True)
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(3)}, {})
+
+        physical = result["record"]["fields"]["physical_examination"]
+        self.assertEqual(physical["text"], "Vital signs: BP 138/82 mmHg")
+        self.assertEqual(physical["fact_refs"], ["c01_f001"])
+        self.assertFalse(any(
+            issue.get("issue_code") in {
+                "UNASSIGNED_FACT",
+                "UNRESOLVED_FACT_TYPE",
+                "FACT_TYPE_FIELD_MISMATCH",
+            }
+            for issue in result["validation"]["issues"]
+        ))
+        field_call = next(
+            call for call in client.calls
+            if call["name"] == "clinical_record_compact_fields_v1"
+        )
+        fact_call = next(
+            call for call in client.calls
+            if call["name"] == "clinical_record_compact_facts_v1"
+        )
+        self.assertIn("no separate vital_signs field", fact_call["system_prompt"])
+        self.assertIn("no separate vital_signs field", field_call["system_prompt"])
+
+    def test_all_fields_failure_retries_fixed_field_groups(self):
+        client = _LeanClient(fail_combined_fields=True)
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(128)}, {})
+
+        self.assertEqual(result["generation"]["fact_chunk_count"], 8)
+        self.assertEqual(result["generation"]["field_group_call_count"], 3)
+        self.assertIn("chief_complaint", result["record"]["fields"])
+        self.assertNotIn("FIELD_GENERATION_FAILED", {
+            issue.get("issue_code") for issue in result["validation"]["issues"]
+        })
+
+    def test_split_chunk_audit_ids_match_fact_id_map(self):
+        client = _LeanClient(split_fact_chunks_over=8)
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        completed_audit_ids = {
+            item["chunk_id"]
+            for item in result["audit"]["chunks"]
+            if item["status"] == "completed"
+        }
+        mapped_chunk_ids = {
+            item["chunk_id"] for item in result["audit"]["fact_id_map"]
+        }
+        self.assertEqual(completed_audit_ids, mapped_chunk_ids)
+        self.assertEqual(completed_audit_ids, {"chunk_01", "chunk_02", "chunk_03"})
+
+    def test_dangling_supersedes_reference_is_blocked(self):
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "facts": {"f1": {
+                "type": "NARRATIVE",
+                "text": "corrected symptom",
+                "assertion": "PRESENT",
+                "segments": ["seg_0001"],
+                "supersedes_fact_id": "missing_fact",
+            }},
+            "fields": {"chief_complaint": {
+                "text": "Corrected symptom",
+                "fact_refs": ["f1"],
+            }},
+        }
+
+        validation = validate_lean_record(
+            record,
+            segment_ids=["seg_0001"],
+            candidate_snapshots={},
+        )
+
+        self.assertEqual(validation["status"], "BLOCK")
+        issue = next(
+            item for item in validation["issues"]
+            if item.get("issue_code") == "INVALID_SUPERSEDES_FACT_REFERENCE"
+        )
+        self.assertEqual(issue["fact_id"], "f1")
+        self.assertEqual(issue["field_ids"], ["chief_complaint"])
 
 
 if __name__ == "__main__":

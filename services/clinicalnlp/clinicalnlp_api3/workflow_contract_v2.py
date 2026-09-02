@@ -385,6 +385,9 @@ def to_clinical_workflow_v2(
         for source_issue in compact_validation.get("issues", []):
             if not isinstance(source_issue, dict):
                 continue
+            issue_code = (
+                source_issue.get("issue_code") or source_issue.get("code")
+            )
             field_ids = source_issue.get("field_ids")
             field_ids = field_ids if isinstance(field_ids, list) else []
             targets = [str(value) for value in field_ids] or ["workflow"]
@@ -394,7 +397,7 @@ def to_clinical_workflow_v2(
                     {
                         "rule_id": str(
                             source_issue.get("rule_id")
-                            or source_issue.get("code")
+                            or issue_code
                             or "COMPACT_V3"
                         ),
                         "severity": str(
@@ -412,7 +415,7 @@ def to_clinical_workflow_v2(
                         ),
                         "policy_evidence": [],
                         "policy_evidence_status": "not_applicable",
-                        "compact_issue_code": source_issue.get("code"),
+                        "compact_issue_code": issue_code,
                     }
                 )
         result["validation"]["status"] = (

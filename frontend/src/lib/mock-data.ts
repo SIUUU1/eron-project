@@ -475,8 +475,6 @@ export const aiDraftRecord: EmergencyRecord = {
   outcome: "",
 };
 
-export const outcomeOptions = ["진료 진행 중", "귀가", "입원", "전원", "사망", "기타"];
-
 export type CheckStatus = "complete" | "review" | "missing";
 
 export const checkStatusMeta: Record<

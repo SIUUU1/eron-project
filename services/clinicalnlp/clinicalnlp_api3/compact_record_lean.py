@@ -25,7 +25,9 @@ MAX_MEASUREMENT_PROPERTIES = 8
 MAX_CANDIDATES_PER_CHUNK = 64
 MAX_SEGMENTS_PER_CHUNK = 16
 MAX_CHUNKS = 8
-MAX_LOGICAL_LLM_CALLS = 9
+# Eight initial Fact chunks + one all-fields call + one bounded repair and
+# regeneration + three fixed field-group fallbacks.
+MAX_LOGICAL_LLM_CALLS = 14
 MAX_SPLIT_DEPTH = 4
 
 ASSERTIONS = ("DENIED", "PRESENT", "UNCERTAIN")
@@ -365,6 +367,32 @@ def validate_lean_record(
             }
         )
     for fact_id in facts:
+        fact = facts.get(fact_id)
+        supersedes = (
+            fact.get("supersedes_fact_id")
+            if isinstance(fact, Mapping)
+            else None
+        )
+        if supersedes is not None and str(supersedes) not in facts:
+            affected_fields = [
+                str(field_id)
+                for field_id, field in fields.items()
+                if isinstance(field, Mapping)
+                and str(fact_id) in {
+                    str(value) for value in field.get("fact_refs", [])
+                }
+            ]
+            extra_issues.append(
+                {
+                    "issue_code": "INVALID_SUPERSEDES_FACT_REFERENCE",
+                    "severity": "BLOCK",
+                    "message": (
+                        "supersedes_fact_id does not reference an existing fact"
+                    ),
+                    "fact_id": str(fact_id),
+                    "field_ids": affected_fields,
+                }
+            )
         if str(fact_id) not in referenced:
             extra_issues.append(
                 {

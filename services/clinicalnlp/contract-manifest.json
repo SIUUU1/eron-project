@@ -11,8 +11,8 @@
     {
       "path": "prompts/clinical_record_extraction_v2.txt",
       "kind": "prompt",
-      "version": "clinical-record-extraction-v2.12",
-      "sha256": "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
+      "version": "clinical-record-extraction-v2.13",
+      "sha256": "5005b420323e0c9ed453cd1399758ac7942cbcb2f24589c1cda1a2d0d164f6d3"
     },
     {
       "path": "prompts/candidate_adjudication_v1.txt",
@@ -36,19 +36,19 @@
       "path": "prompts/compact_record_output_v3_1_lean.txt",
       "kind": "prompt",
       "version": "clinical-record-compact-v3.1-lean-v1",
-      "sha256": "1c2ec2cf75fe8fdf47380a76b8e44b1d3fef45118db1bf45de64147962bee02b"
+      "sha256": "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
     },
     {
       "path": "prompts/compact_fact_output_v1.txt",
       "kind": "prompt",
       "version": "clinical-record-compact-facts-v1",
-      "sha256": "bc2b4f35441cd885a3e2d1225652a7d7796222fa4072408aca6c91c7c8d15704"
+      "sha256": "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
     },
     {
       "path": "prompts/compact_fields_output_v1.txt",
       "kind": "prompt",
       "version": "clinical-record-compact-fields-v1",
-      "sha256": "a79336dd368f53727d9545c3e50226a0c6928d2b8040c07493b72067407531ea"
+      "sha256": "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
     }
   ]
 }

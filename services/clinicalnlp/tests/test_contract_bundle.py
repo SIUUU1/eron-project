@@ -27,6 +27,11 @@ class ClinicalContractBundleTests(unittest.TestCase):
         self.assertIn("final, current-encounter disposition decision", prompt)
         self.assertIn("Discharge, Admission, Transfer, Death, or Other", prompt)
         self.assertIn("Never turn a considered, planned, possible, or conditional", prompt)
+        self.assertIn("We will proceed with admission.", prompt)
+        self.assertIn("입원 진행하겠습니다.", prompt)
+        self.assertIn("Admission is being considered.", prompt)
+        self.assertIn("We will decide after the CT result.", prompt)
+        self.assertIn("The patient may require admission.", prompt)
         self.assertIn("Death requires an explicit clinician confirmation", prompt)
         self.assertIn("Never use NONE for outcome", prompt)
 
@@ -128,7 +133,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
+                "5005b420323e0c9ed453cd1399758ac7942cbcb2f24589c1cda1a2d0d164f6d3"
             ),
             "candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
@@ -140,13 +145,13 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
             ),
             "compact_record_output_v3_1_lean.txt": (
-                "1c2ec2cf75fe8fdf47380a76b8e44b1d3fef45118db1bf45de64147962bee02b"
+                "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
             ),
             "compact_fact_output_v1.txt": (
-                "bc2b4f35441cd885a3e2d1225652a7d7796222fa4072408aca6c91c7c8d15704"
+                "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
             ),
             "compact_fields_output_v1.txt": (
-                "a79336dd368f53727d9545c3e50226a0c6928d2b8040c07493b72067407531ea"
+                "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
             ),
         }
 
@@ -168,7 +173,7 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "befa840306589b60ce6cb12554f7eb8cb6b72937d5d3938388e1a535cbdbb7ec"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
+                "5005b420323e0c9ed453cd1399758ac7942cbcb2f24589c1cda1a2d0d164f6d3"
             ),
             "prompts/candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
@@ -180,13 +185,13 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
             ),
             "prompts/compact_record_output_v3_1_lean.txt": (
-                "1c2ec2cf75fe8fdf47380a76b8e44b1d3fef45118db1bf45de64147962bee02b"
+                "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
             ),
             "prompts/compact_fact_output_v1.txt": (
-                "bc2b4f35441cd885a3e2d1225652a7d7796222fa4072408aca6c91c7c8d15704"
+                "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
             ),
             "prompts/compact_fields_output_v1.txt": (
-                "a79336dd368f53727d9545c3e50226a0c6928d2b8040c07493b72067407531ea"
+                "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
             ),
         }
 

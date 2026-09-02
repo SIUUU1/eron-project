@@ -14,6 +14,7 @@ import type {
   PatientEvidence,
   TerminologyCandidate,
 } from "../lib/clinical-provenance.ts";
+import { normalizeClinicalRecordOutcome } from "../lib/clinical-record-outcome.ts";
 import type { CheckStatus, EmergencyRecord, RecordFieldKey } from "../lib/mock-data.ts";
 
 const recordFieldKeyByClinicalId: Record<string, RecordFieldKey> = {
@@ -189,6 +190,7 @@ export function workflowDraftToEmergencyRecord(
   workflow: Pick<ClinicalRecordWorkflowResponse, "draft">,
 ): EmergencyRecord {
   const fields = workflow.draft.fields;
+  const outcome = normalizeClinicalRecordOutcome(fields.outcome.value);
   return {
     chiefComplaint: fields.chief_complaint.value,
     painAssessment: fields.pain_assessment.value,
@@ -201,7 +203,7 @@ export function workflowDraftToEmergencyRecord(
     physicalExam: fields.physical_examination.value,
     treatmentPlan: fields.treatment_plan.value,
     impression: fields.impression.value,
-    outcome: fields.outcome.value,
+    outcome,
   };
 }
 
@@ -214,6 +216,11 @@ function clinicalDraftFieldStatus(field: ClinicalDraftField): CheckStatus {
   }
   if (field.information_status === "NOT_ASSESSED") return "missing";
   return "complete";
+}
+
+function clinicalDraftOutcomeStatus(field: ClinicalDraftField): CheckStatus {
+  if (!normalizeClinicalRecordOutcome(field.value)) return "missing";
+  return clinicalDraftFieldStatus(field);
 }
 
 export function workflowDraftToFieldStatuses(
@@ -232,7 +239,7 @@ export function workflowDraftToFieldStatuses(
     physicalExam: clinicalDraftFieldStatus(fields.physical_examination),
     treatmentPlan: clinicalDraftFieldStatus(fields.treatment_plan),
     impression: clinicalDraftFieldStatus(fields.impression),
-    outcome: clinicalDraftFieldStatus(fields.outcome),
+    outcome: clinicalDraftOutcomeStatus(fields.outcome),
   };
 }
 
@@ -294,18 +301,6 @@ function reviewCandidate(
     semanticType: semanticTypes.length > 0 ? semanticTypes.join(", ") : null,
     similarity: candidateSimilarity(provenance.similarity),
     selectionGroupIds: [item.id],
-  };
-}
-
-function unresolvedCandidate(item: ClinicalDraftReviewItem): TerminologyCandidate {
-  return {
-    id: `${item.id}:unresolved`,
-    query: item.search_terms_en?.[0] ?? item.source ?? "검색어 없음",
-    canonicalValue: null,
-    source: "UNRESOLVED",
-    cui: null,
-    semanticType: null,
-    similarity: null,
   };
 }
 
@@ -458,8 +453,6 @@ export function workflowDraftToFieldProvenance(
       .filter((candidate): candidate is TerminologyCandidate => candidate !== null);
     if (candidates.length > 0) {
       target.candidates.push(...candidates);
-    } else if (item.needs_review === true) {
-      target.candidates.push(unresolvedCandidate(item));
     }
   });
 

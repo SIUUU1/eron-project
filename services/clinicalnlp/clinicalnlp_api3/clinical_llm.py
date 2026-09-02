@@ -265,7 +265,12 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
     def last_diagnostics(self) -> dict[str, Any]:
         return dict(self._diag())
 
-    def _chat_once(self, messages: list[dict[str, str]]) -> _ChatResult:
+    def _chat_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout: float | None = None,
+    ) -> _ChatResult:
         body = json.dumps(
             {
                 "model": self.model_name,
@@ -288,7 +293,10 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             },
             method="POST",
         )
-        with urlopen(request, timeout=self.timeout) as response:
+        with urlopen(
+            request,
+            timeout=self.timeout if timeout is None else timeout,
+        ) as response:
             result = json.loads(response.read().decode("utf-8"))
         message = result.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -311,14 +319,26 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         messages: list[dict[str, str]],
         *,
         call_reserver: Callable[[], int] | None = None,
+        deadline: float | None = None,
     ) -> _ChatResult:
         diagnostics = self._diag()
+        if deadline is not None and deadline <= time.monotonic():
+            raise TimeoutError("clinical LLM request deadline exceeded")
+        if call_reserver is not None:
+            # A transient HTTP retry is still part of the same logical model
+            # call. Repair and regeneration invoke _chat again and therefore
+            # reserve their own logical calls.
+            call_reserver()
         for attempt in range(2):
-            if call_reserver is not None:
-                call_reserver()
+            request_timeout = self.timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("clinical LLM request deadline exceeded")
+                request_timeout = min(self.timeout, remaining)
             diagnostics["provider_call_count"] += 1
             try:
-                result = self._chat_once(messages)
+                result = self._chat_once(messages, timeout=request_timeout)
             except HTTPError as error:
                 transient = error.code == 429 or 500 <= error.code <= 599
                 if not transient or attempt:
@@ -355,6 +375,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         response_format: dict[str, Any],
         output_label: str,
         call_reserver: Callable[[], int] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         self._reset_diagnostics()
         schema = _response_schema(response_format)
@@ -374,7 +395,11 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 "content": json.dumps(user_payload, ensure_ascii=False),
             },
         ]
-        first = self._chat(messages, call_reserver=call_reserver)
+        first = self._chat(
+            messages,
+            call_reserver=call_reserver,
+            deadline=deadline,
+        )
         valid = self._valid_object(first.content, schema)
         if valid is not None:
             return valid
@@ -398,6 +423,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 {"role": "user", "content": first.content},
             ],
             call_reserver=call_reserver,
+            deadline=deadline,
         )
         valid = self._valid_object(repaired.content, schema)
         if valid is not None:
@@ -409,7 +435,11 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             )
 
         self._diag()["regeneration_count"] += 1
-        regeneration = self._chat(messages, call_reserver=call_reserver)
+        regeneration = self._chat(
+            messages,
+            call_reserver=call_reserver,
+            deadline=deadline,
+        )
         valid = self._valid_object(regeneration.content, schema)
         if valid is not None:
             return valid

@@ -1,7 +1,6 @@
 import {
   Check,
   ChevronDown,
-  CircleHelp,
   MessageSquareText,
   Search,
   X,
@@ -43,6 +42,9 @@ export function FieldProvenancePanel({
 }: FieldProvenancePanelProps) {
   const [selectedByGroup, setSelectedByGroup] = useState<Record<string, string>>({});
   const [excludedCandidates, setExcludedCandidates] = useState<Record<string, boolean>>({});
+  const visibleCandidates = provenance.candidates.filter(
+    (candidate) => candidate.canonicalValue?.trim(),
+  );
 
   const selectCandidate = (candidate: TerminologyCandidate) => {
     const groupIds = candidate.selectionGroupIds ?? [candidate.id];
@@ -154,7 +156,7 @@ export function FieldProvenancePanel({
         </div>
       ) : null}
 
-      {provenance.candidates.length > 0 ? (
+      {visibleCandidates.length > 0 ? (
         <div className="rounded-md border bg-card p-2.5">
           <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold">
             <Search className="size-3.5 text-primary" />
@@ -164,14 +166,13 @@ export function FieldProvenancePanel({
             </span>
           </div>
           <div className="space-y-2">
-            {provenance.candidates.map((candidate) => {
+            {visibleCandidates.map((candidate) => {
               const groupIds = candidate.selectionGroupIds ?? [candidate.id];
               const selected =
                 groupIds.length > 0 &&
                 groupIds.every((groupId) => selectedByGroup[groupId] === candidate.id);
               const excluded = excludedCandidates[candidate.id] === true;
-              const unresolved = candidate.source === "UNRESOLVED";
-              const selectable = !unresolved && !candidate.alreadyApplied;
+              const selectable = !candidate.alreadyApplied;
               return (
                 <article
                   key={candidate.id}
@@ -208,17 +209,13 @@ export function FieldProvenancePanel({
                         )}
                       </div>
                       <p className="mt-1.5 whitespace-pre-wrap break-words text-sm font-semibold [overflow-wrap:anywhere]">
-                        {candidate.canonicalValue ?? "정규화 후보 없음"}
+                        {candidate.canonicalValue}
                       </p>
                       <p className="mt-0.5 whitespace-pre-wrap break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
                         검색어 · {candidate.query}
                       </p>
                     </div>
-                    {unresolved ? (
-                      <span className="flex items-center gap-1 text-xs text-risk-critical">
-                        <CircleHelp className="size-3.5" /> 원문 유지
-                      </span>
-                    ) : selectable ? (
+                    {selectable ? (
                       <div className="flex shrink-0 gap-1.5">
                         <Button
                           type="button"

@@ -17,6 +17,10 @@ import {
   workflowDraftToFieldStatuses,
 } from "../src/api/clinical-records.ts";
 import { applyTerminologyCandidateDecision } from "../src/lib/clinical-provenance.ts";
+import {
+  normalizeClinicalRecordOutcome,
+  outcomeOptions,
+} from "../src/lib/clinical-record-outcome.ts";
 
 test("의료진이 선택한 후보는 초안 원문을 유지하고 새 줄에 추가한다", () => {
   const candidate = {
@@ -74,10 +78,7 @@ test("다른 후보를 선택하거나 제외하면 추가된 후보 줄만 교�
     "excluded",
   );
 
-  assert.equal(
-    changed.value,
-    "디오트로피움과 살부타몰 복용 중\nTiotropium bromide",
-  );
+  assert.equal(changed.value, "디오트로피움과 살부타몰 복용 중\nTiotropium bromide");
   assert.equal(restored.value, "디오트로피움과 살부타몰 복용 중");
 });
 
@@ -171,7 +172,7 @@ test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 �
         physical_examination: field("physical_examination", "Tachypnea"),
         treatment_plan: field("treatment_plan", "산소 적용 및 모니터링"),
         impression: field("impression", "폐렴 의증"),
-        outcome: field("outcome", "진료 진행 중"),
+        outcome: field("outcome", "입원"),
       },
     },
   };
@@ -188,8 +189,49 @@ test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 �
     physicalExam: "Tachypnea",
     treatmentPlan: "산소 적용 및 모니터링",
     impression: "폐렴 의증",
-    outcome: "진료 진행 중",
+    outcome: "입원",
   });
+});
+
+test("응급진료결과는 고정 선택지만 반영하고 미확인 값은 선택하지 않는다", () => {
+  assert.deepEqual(outcomeOptions, ["귀가", "입원", "전원", "사망", "기타"]);
+  const workflow = {
+    draft: {
+      fields: {
+        chief_complaint: { value: "" },
+        pain_assessment: { value: "" },
+        history_of_present_illness: { value: "" },
+        past_history: { value: "" },
+        medications: { value: "" },
+        drug_allergy: { value: "" },
+        social_history: { value: "" },
+        review_of_systems: { value: "" },
+        physical_examination: { value: "" },
+        treatment_plan: { value: "" },
+        impression: { value: "" },
+        outcome: { value: "진료 진행 중" },
+      },
+    },
+  };
+
+  assert.equal(workflowDraftToEmergencyRecord(workflow).outcome, "");
+  assert.equal(workflowDraftToFieldStatuses(workflow).outcome, "missing");
+  workflow.draft.fields.outcome.value = "";
+  assert.equal(workflowDraftToEmergencyRecord(workflow).outcome, "");
+  assert.equal(workflowDraftToFieldStatuses(workflow).outcome, "missing");
+  workflow.draft.fields.outcome.value = "입원";
+  assert.equal(workflowDraftToFieldStatuses(workflow).outcome, "complete");
+});
+
+test("응급진료결과의 영문 카테고리와 상세정보를 UI 선택값으로 정규화한다", () => {
+  assert.equal(normalizeClinicalRecordOutcome("입원"), "입원");
+  assert.equal(normalizeClinicalRecordOutcome("Admission"), "입원");
+  assert.equal(normalizeClinicalRecordOutcome("admission"), "입원");
+  assert.equal(normalizeClinicalRecordOutcome("Admission (surgery)"), "입원");
+  assert.equal(normalizeClinicalRecordOutcome("입원 - 외과"), "입원");
+  assert.equal(normalizeClinicalRecordOutcome("Discharge"), "귀가");
+  assert.equal(normalizeClinicalRecordOutcome(""), "");
+  assert.equal(normalizeClinicalRecordOutcome("환자가 퇴원을 원함"), "");
 });
 
 test("ClinicalNLP의 구조화 상태를 응급기록 필드 상태로 변환한다", () => {
@@ -213,7 +255,7 @@ test("ClinicalNLP의 구조화 상태를 응급기록 필드 상태로 변환한
         physical_examination: field("physical_examination", "PRESENT"),
         treatment_plan: field("treatment_plan", "PRESENT"),
         impression: field("impression", "PRESENT"),
-        outcome: field("outcome", "PRESENT"),
+        outcome: { ...field("outcome", "PRESENT"), value: "입원" },
       },
     },
   };
@@ -409,17 +451,7 @@ test("ClinicalNLP 응답의 대화 근거와 검색 후보를 응급기록 필�
     ],
   );
   assert.deepEqual(result.impression.candidates[0].selectionGroupIds, ["seg_2:0"]);
-  assert.deepEqual(result.medication.candidates, [
-    {
-      id: "seg_3:0:unresolved",
-      query: "amlodipine",
-      canonicalValue: null,
-      source: "UNRESOLVED",
-      cui: null,
-      semanticType: null,
-      similarity: null,
-    },
-  ]);
+  assert.deepEqual(result.medication.candidates, []);
 });
 
 test("초안 API 오류를 의료진이 이해할 수 있는 안내로 구분한다", () => {
