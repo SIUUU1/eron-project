@@ -80,12 +80,12 @@ import {
   checkStatusMeta,
   currentUser,
   emptyRecord,
-  outcomeOptions,
   recordFieldLabels,
   type CheckStatus,
   type EmergencyRecord,
   type RecordFieldKey,
 } from "@/lib/mock-data";
+import { outcomeOptions } from "@/lib/clinical-record-outcome";
 import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
@@ -1009,7 +1009,7 @@ function RecordWorkflow({
                             <SelectContent>
                               {record.outcome &&
                               record.outcome !== "진료 진행 중" &&
-                              !outcomeOptions.includes(record.outcome) ? (
+                              !outcomeOptions.some((option) => option === record.outcome) ? (
                                 <SelectItem value={record.outcome}>{record.outcome}</SelectItem>
                               ) : null}
                               {outcomeOptions.map((o) => (
@@ -1031,6 +1031,8 @@ function RecordWorkflow({
                           <FieldProvenancePanel
                             key={`${provenanceRevision}:${key}`}
                             provenance={provenance}
+                            draftValue={record[key]}
+                            onDraftValueChange={(value) => setField(key, value)}
                           />
                         ) : null}
                       </div>

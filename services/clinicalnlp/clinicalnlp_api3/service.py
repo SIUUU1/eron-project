@@ -47,6 +47,30 @@ def _boolean(values: Mapping[str, str], name: str, default: bool) -> bool:
     raise ConfigurationError(f"{name} must be true or false")
 
 
+def _compact_v3_mode(values: Mapping[str, str]) -> str:
+    explicit = str(values.get("CLINICALNLP_COMPACT_V3_MODE", "") or "").strip()
+    if explicit:
+        mode = explicit.casefold()
+        if mode not in {
+            "off",
+            "compare",
+            "primary",
+            "legacy",
+            "lean_shadow",
+            "lean_primary",
+        }:
+            raise ConfigurationError(
+                "CLINICALNLP_COMPACT_V3_MODE must be off, compare, primary, "
+                "legacy, lean_shadow, or lean_primary"
+            )
+        return mode
+    return (
+        "compare"
+        if _boolean(values, "CLINICALNLP_COMPACT_V3_COMPARE", False)
+        else "legacy"
+    )
+
+
 @dataclass(frozen=True)
 class ServiceSettings:
     llm_provider: str
@@ -61,13 +85,19 @@ class ServiceSettings:
     clinical_max_tokens: int
     query_max_tokens: int
     query_passes: int
-    translation_batch_size: int
     database_url: str
+    compact_v3_mode: str
     umls_enabled: bool
     umls_timeout_seconds: float
     umls_python: Path | None
     umls_worker: Path
     umls_cache_root: Path
+
+    @property
+    def compact_v3_compare(self) -> bool:
+        """Compatibility accessor for retained comparison-mode checks."""
+
+        return self.compact_v3_mode in {"compare", "lean_shadow"}
 
     @classmethod
     def from_environment(cls) -> "ServiceSettings":
@@ -112,15 +142,6 @@ class ServiceSettings:
             raise ConfigurationError(
                 "CLINICALNLP_HTTP_PORT must be between 0 and 65535"
             )
-        translation_batch_size = _positive_int(
-            values,
-            "CLINICALNLP_TRANSLATION_BATCH_SIZE",
-            3,
-        )
-        if translation_batch_size > 8:
-            raise ConfigurationError(
-                "CLINICALNLP_TRANSLATION_BATCH_SIZE must be between 1 and 8"
-            )
         umls_python_value = values.get("CLINICALNLP_UMLS_PYTHON", "").strip()
         database_url = values.get(
             "CLINICALNLP_DATABASE_URL",
@@ -133,20 +154,20 @@ class ServiceSettings:
             ollama_api_key=api_key,
             ollama_base_url=base_url,
             ollama_model=model,
-            ollama_timeout_seconds=_positive_float(values, "OLLAMA_TIMEOUT", 170),
+            ollama_timeout_seconds=_positive_float(values, "OLLAMA_TIMEOUT", 240),
             host=values.get("CLINICALNLP_HTTP_HOST", "0.0.0.0").strip()
             or "0.0.0.0",
             port=port,
             request_timeout_seconds=_positive_float(
                 values,
                 "CLINICALNLP_HTTP_TIMEOUT",
-                180,
+                620,
             ),
             context_size=_positive_int(values, "CLINICALNLP_API3_CONTEXT", 8192),
             clinical_max_tokens=_positive_int(
                 values,
                 "CLINICALNLP_GEMMA_MAX_TOKENS",
-                3072,
+                8192,
             ),
             query_max_tokens=_positive_int(
                 values,
@@ -158,8 +179,8 @@ class ServiceSettings:
                 "CLINICALNLP_QUERY_EXPANSION_PASSES",
                 1,
             ),
-            translation_batch_size=translation_batch_size,
             database_url=database_url,
+            compact_v3_mode=_compact_v3_mode(values),
             umls_enabled=_boolean(values, "CLINICALNLP_UMLS_ENABLED", True),
             umls_timeout_seconds=_positive_float(
                 values,
@@ -261,7 +282,6 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         context_size=settings.context_size,
         max_output_tokens=settings.query_max_tokens,
         max_passes=settings.query_passes,
-        translation_batch_size=settings.translation_batch_size,
         timeout=settings.ollama_timeout_seconds,
         llm_client=query_client,
     )
@@ -309,6 +329,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         policy_evidence_provider=(
             policy_repository.retrieve if policy_repository is not None else None
         ),
+        compact_v3_mode=settings.compact_v3_mode,
     )
     return ServiceRuntimeBundle(
         runtime=runtime,
@@ -327,11 +348,11 @@ def _listener(values: Mapping[str, str]) -> tuple[str, int, float]:
     if port < 0 or port > 65535:
         port = 8765
     try:
-        timeout = float(values.get("CLINICALNLP_HTTP_TIMEOUT", "180"))
+        timeout = float(values.get("CLINICALNLP_HTTP_TIMEOUT", "620"))
     except (TypeError, ValueError):
-        timeout = 180.0
+        timeout = 620.0
     if timeout <= 0:
-        timeout = 180.0
+        timeout = 620.0
     return host, port, timeout
 
 

@@ -40,6 +40,7 @@ LEGACY_TO_CANONICAL_FIELD_ID = {
     "physical": "physical_examination",
     "treatment-plan": "treatment_plan",
     "impression": "impression",
+    "outcome": "outcome",
 }
 
 CANONICAL_FIELD_IDS = (
@@ -192,7 +193,12 @@ def _v2_field(
 ) -> dict[str, Any]:
     field = source if isinstance(source, dict) else {}
     legacy_status = str(field.get("status") or "empty")
-    information_status = _information_status(clinical_source, legacy_status)
+    explicit_information_status = field.get("information_status")
+    information_status = (
+        explicit_information_status
+        if explicit_information_status in INFORMATION_STATUS_VALUES
+        else _information_status(clinical_source, legacy_status)
+    )
     value = str(field.get("value") or "")
     ai_original_value = str(field.get("ai_original_value") or value)
     suggestion_status = str(field.get("suggestion_status") or "UNCHANGED")
@@ -325,8 +331,6 @@ def to_clinical_workflow_v2(
         )
         for legacy_id, canonical_id in LEGACY_TO_CANONICAL_FIELD_ID.items()
     }
-    canonical_fields["outcome"] = _v2_field("outcome", None)
-
     review_items = copy.deepcopy(legacy_draft.get("review_items") or [])
     for item in review_items:
         if isinstance(item, dict) and isinstance(item.get("field_id"), str):
@@ -379,4 +383,59 @@ def to_clinical_workflow_v2(
         result,
         policy_evidence_provider=policy_evidence_provider,
     )
+    compact_primary = result.get("compact_v3_primary")
+    compact_validation = (
+        compact_primary.get("validation")
+        if isinstance(compact_primary, dict)
+        and isinstance(compact_primary.get("validation"), dict)
+        else None
+    )
+    if compact_validation is not None:
+        for source_issue in compact_validation.get("issues", []):
+            if not isinstance(source_issue, dict):
+                continue
+            issue_code = (
+                source_issue.get("issue_code") or source_issue.get("code")
+            )
+            field_ids = source_issue.get("field_ids")
+            field_ids = field_ids if isinstance(field_ids, list) else []
+            targets = [str(value) for value in field_ids] or ["workflow"]
+            for field_id in targets:
+                field = canonical_fields.get(field_id, {})
+                result["validation"]["issues"].append(
+                    {
+                        "rule_id": str(
+                            source_issue.get("rule_id")
+                            or issue_code
+                            or "COMPACT_V3"
+                        ),
+                        "severity": str(
+                            source_issue.get("severity") or "REVIEW_REQUIRED"
+                        ),
+                        "field_id": field_id,
+                        "message": str(
+                            source_issue.get("message")
+                            or "Compact v3 초안 검증이 필요합니다."
+                        ),
+                        "evidence": copy.deepcopy(field.get("evidence") or []),
+                        "suggested_action": (
+                            "연결된 대화 근거와 초안 값을 확인하고 수정 후 "
+                            "재검증해 주세요."
+                        ),
+                        "policy_evidence": [],
+                        "policy_evidence_status": "not_applicable",
+                        "compact_issue_code": issue_code,
+                    }
+                )
+        result["validation"]["status"] = (
+            "BLOCK"
+            if any(
+                issue.get("severity") == "BLOCK"
+                for issue in result["validation"]["issues"]
+                if isinstance(issue, dict)
+            )
+            else "REVIEW_REQUIRED"
+            if result["validation"]["issues"]
+            else "PASS"
+        )
     return result

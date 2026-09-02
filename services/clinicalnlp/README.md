@@ -23,6 +23,10 @@ parity tools. The HTTP service has no SQLite backend flag, path setting, or
 SQLite bind mount. Legacy SQLite/shadow environment variables are rejected at
 startup so an operator cannot mistake a PostgreSQL process for a rollback.
 
+Candidate retrieval uses UMLS semantic types as the primary collection route.
+Grounded clinical-field hints narrow compatible routes and are consulted only
+as a conditional fallback when the semantic route returns no candidate.
+
 ## Local configuration
 
 Copy `.env.example` to `.env` and set `OLLAMA_API_KEY`. The real `.env` is
@@ -41,6 +45,23 @@ extractor assigns conversation-grounded facts to record fields. Candidate
 review items reuse those evidence assignments and expose only semantic types
 allowed by the target field. Candidates are never automatically confirmed and
 RAW evidence is never rewritten.
+
+Local Compact rollout is controlled by `CLINICALNLP_COMPACT_V3_MODE`.
+`legacy` is the default and preserves the established Compact v3 generator.
+`lean_shadow` keeps that result authoritative while Compact v3.1 Lean runs only
+for local comparison. `lean_primary` uses the sparse Lean contract while
+preserving the public `clinical-workflow-v2` and existing UI response. The older
+`off`, `compare`, and `primary` values remain available during rollout. Do not
+use `lean_shadow` in production because it intentionally adds a second clinical
+generation call.
+
+Lean uses one model call for ordinary inputs. Predicted or actual oversized
+inputs use bounded segment chunks for atomic Fact extraction followed by one
+field-writing call. A failed chunk preserves successful facts, reports the
+failed segment IDs as `partial`, and never converts that range to
+`NOT_ASSESSED`. The model receives only candidate reference, segment, surface,
+canonical term, semantic types, and source; full immutable candidate snapshots
+remain in backend memory for deterministic validation.
 
 `GET /health` returns HTTP 200 only when required configuration and active
 PostgreSQL releases are ready. Missing optional UMLS assets use the bounded

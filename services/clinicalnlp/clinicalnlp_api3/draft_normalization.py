@@ -293,19 +293,25 @@ def build_draft_normalization_plan(
                     }
                 )
                 continue
-            if umls_allowed:
-                model_fields.append(
-                    {
-                        "field_id": field_id,
-                        "atom_id": atom_id,
-                        "original_value": original_value,
-                        "status": atom.get("status"),
-                        "source_segment_id": segment_id,
-                        "allowed_candidates": umls_allowed[
-                            :MAX_APPLIED_CANDIDATES_PER_VALUE
-                        ],
-                    }
-                )
+            translated_text = segment.get("translated_text_en")
+            translated_text = (
+                translated_text.strip()
+                if isinstance(translated_text, str) and translated_text.strip()
+                else ""
+            )
+            if umls_allowed and translated_text:
+                model_field = {
+                    "field_id": field_id,
+                    "atom_id": atom_id,
+                    "original_value": original_value,
+                    "status": atom.get("status"),
+                    "source_segment_id": segment_id,
+                    "translated_text_en": translated_text,
+                    "allowed_candidates": umls_allowed[
+                        :MAX_APPLIED_CANDIDATES_PER_VALUE
+                    ],
+                }
+                model_fields.append(model_field)
 
     return direct_suggestions, {"fields": model_fields}
 

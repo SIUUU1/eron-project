@@ -71,7 +71,7 @@ services:
       # clinical profile이 꺼져 있어도 backend 자체는 기동하며,
       # 초안 endpoint만 연결 실패를 503으로 반환한다.
       RECORD_AI_URL: ${RECORD_AI_URL:-http://clinicalnlp:8765}
-      CLINICAL_RECORD_AI_TIMEOUT_SECONDS: ${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-180}
+      CLINICAL_RECORD_AI_TIMEOUT_SECONDS: ${CLINICAL_RECORD_AI_TIMEOUT_SECONDS:-620}
       KCD_ALIAS_DB_PATH: /runtime/medical-dictionaries/ERON_응급의학용어_DB_v1.sqlite
       # stt profile이 꺼져 있으면 음성 초안 endpoint만 503을 반환한다.
       # 오래된 로컬 STT_URL이 내부 서비스 주소를 덮어쓰지 못하게 고정한다.

@@ -151,6 +151,38 @@ class ClinicalRecordDraftApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), workflow)
 
+    def test_compact_primary_prompt_metadata_is_accepted(self):
+        workflow = valid_workflow()
+        workflow["audit"]["versions"]["compact_prompt"] = (
+            "clinical-record-compact-v3.2"
+        )
+        workflow["audit"]["references"]["compact_record_path"] = (
+            "$.compact_v3_primary.record"
+        )
+        workflow["compact_v3_primary"] = {
+            "schema_version": "clinical-record-compact-primary-v1",
+            "status": "completed",
+        }
+
+        def upstream(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, json=workflow)
+
+        with TestClient(app_for_upstream(upstream)) as client:
+            response = client.post(
+                "/api/clinical-records/draft",
+                json={
+                    "segments": [{
+                        "id": "seg_0001",
+                        "start": 0,
+                        "end": 1,
+                        "text": "합성 문장",
+                    }]
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), workflow)
+
     def test_invalid_whisper_payload_returns_400_before_upstream_call(self):
         def upstream(request: httpx2.Request) -> httpx2.Response:
             raise AssertionError("invalid input must not reach ClinicalNLP")

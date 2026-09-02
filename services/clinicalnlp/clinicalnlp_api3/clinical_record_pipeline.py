@@ -98,59 +98,173 @@ def extract_clinical_record(
     if not isinstance(record, dict):
         raise ValueError("model response must contain a clinical_record object")
     default_record = {
-        "chief_complaint": {
-            "raw_value": None,
-            "status": "not_mentioned",
-            "evidence": None,
-        },
+        "chief_complaint": [],
         "pain_assessment": {
             key: {
                 "raw_value": None,
                 "status": "not_mentioned",
                 "evidence": None,
             }
-            for key in ("nrs", "location", "quality", "radiation")
+            for key in ("presence", "nrs", "location", "quality", "radiation")
         },
         "history_of_present_illness": {
-            "onset": {
-                "raw_value": None,
-                "status": "not_mentioned",
-                "evidence": None,
+            "text": "",
+            **{
+                key: {
+                    "raw_value": None,
+                    "status": "not_mentioned",
+                    "evidence": None,
+                }
+                for key in (
+                    "onset",
+                    "location",
+                    "duration",
+                    "character",
+                    "course",
+                    "radiation",
+                    "timing",
+                    "severity",
+                    "arrival",
+                )
             },
-            "course": {
-                "raw_value": None,
-                "status": "not_mentioned",
-                "evidence": None,
-            },
+            "aggravating_factors": [],
+            "alleviating_factors": [],
             "associated_symptoms": [],
+            "pre_hospital_care": [],
         },
-        "past_history": {"underlying_conditions": [], "surgery_history": []},
+        "past_history": {
+            "text": "",
+            "underlying_conditions": [],
+            "surgery_history": [],
+            "previous_admissions": [],
+            **{
+                key: {
+                    "raw_value": None,
+                    "status": "not_mentioned",
+                    "evidence": None,
+                }
+                for key in (
+                    "medical_history_status",
+                    "surgical_history_status",
+                    "admission_history_status",
+                )
+            },
+        },
         "medications": {
+            "text": "",
             "items": [],
+            "medication_status": {
+                "raw_value": None,
+                "status": "not_mentioned",
+                "evidence": None,
+            },
             "last_dose": {
                 "raw_value": None,
                 "status": "not_mentioned",
                 "evidence": None,
             },
         },
-        "allergy": {
-            "raw_value": None,
-            "status": "not_mentioned",
-            "evidence": None,
-        },
-        "social_history": {
-            key: {
+        "drug_allergy": {
+            "text" : "",
+            "items": [],
+            "allergy_status":{
                 "raw_value": None,
                 "status": "not_mentioned",
                 "evidence": None,
-            }
-            for key in ("smoking", "alcohol")
+            },
+            "specific_denials": [],
+        },
+        "social_history": {
+            "text": "",
+            "smoking": {
+                "text": "",
+                "state": None,
+                **{
+                    key: {
+                        "raw_value": None,
+                        "value": None,
+                        "status": "not_mentioned",
+                        "evidence": None,
+                    }
+                    for key in (
+                        "smoking_status",
+                        "packs_per_day",
+                        "cigarettes_per_day",
+                        "duration_years",
+                        "quit_years",
+                    )
+                },
+                "pack_years": None,
+                "pack_years_provenance": None,
+                "measurement_conflict": False,
+            },
+            "alcohol": {
+                "text": "",
+                **{
+                    key: {
+                        "raw_value": None,
+                        "value": None,
+                        "status": "not_mentioned",
+                        "evidence": None,
+                    }
+                    for key in (
+                        "alcohol_status",
+                        "frequency",
+                        "type",
+                        "amount_per_occasion",
+                    )
+                },
+            },
+        },
+        "review_of_systems": {
+            "text": None,
+            "items": [],
+        },
+        "physical_examination": {
+            "text": None,
+            "findings": [],
+        },
+        "impression": {
+            "text": None,
+            "items": [],
+        },
+        "treatment_plan": {
+            "text": None,
+            "items": [],
+        },
+        "outcome": {
+            "text": None,
+            "category": None,
+            "information_status": "NOT_ASSESSED",
+            "fact_type": "UNKNOWN",
+            "decision": {
+                "raw_value": None,
+                "status": "not_mentioned",
+                "evidence": None,
+            },
+            "detail": {
+                "raw_value": None,
+                "status": "not_mentioned",
+                "evidence": None,
+            },
         },
     }
     warnings: list[str] = []
 
     def with_defaults(value: Any, template: Any) -> Any:
         if isinstance(template, dict):
+            if isinstance(value, list) and "status" in template:
+                return [with_defaults(item, template) for item in value]
+            if isinstance(value, list) and any(
+                key in template for key in ("items", "findings")
+            ):
+                return copy.deepcopy(value)
+            if (
+                isinstance(value, dict)
+                and "status" in value
+                and "status" not in template
+            ):
+                return copy.deepcopy(value)
             source = value if isinstance(value, dict) else {}
             return {
                 key: (
@@ -181,6 +295,17 @@ def extract_clinical_record(
             return 0.0
         return len(raw_tokens & source_tokens) / len(raw_tokens)
 
+    def segment_match_score(raw_value: Any, segment: dict[str, Any]) -> float:
+        return max(
+            evidence_match_score(raw_value, str(segment.get(key) or ""))
+            for key in (
+                "text",
+                "raw_text",
+                "corrected_text",
+                "translated_text_en",
+            )
+        )
+
     def normalize_evidence(evidence: Any, raw_value: Any = None) -> dict[str, Any]:
         if isinstance(evidence, str):
             reference = evidence
@@ -196,12 +321,10 @@ def extract_clinical_record(
         if segment_id is None:
             raise ValueError("clinical record evidence references missing segment")
         source = segments[segment_id]
-        if raw_value is not None and evidence_match_score(
-            raw_value, source["text"]
-        ) < 0.5:
+        if raw_value is not None and segment_match_score(raw_value, source) < 0.5:
             candidates = [
                 (
-                    evidence_match_score(raw_value, candidate["text"]),
+                    segment_match_score(raw_value, candidate),
                     candidate_id,
                     candidate,
                 )

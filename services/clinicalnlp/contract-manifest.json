@@ -6,13 +6,13 @@
       "path": "contracts/clinical-workflow-v2.schema.json",
       "kind": "json_schema",
       "version": "clinical-workflow-v2",
-      "sha256": "1707d4bc4c6e6dcd695832ce349a80c8fe997392efe871f39bbb51f80f0dc3e4"
+      "sha256": "d28ed3ef3f98e3afaa364c49d9ecfaabcbfb0443f74baf3f64c94f4d515b3116"
     },
     {
       "path": "prompts/clinical_record_extraction_v2.txt",
       "kind": "prompt",
-      "version": "clinical-record-extraction-v2",
-      "sha256": "34efdb7d7fd5b8dbb9c51d4d8fb2d9892ae367e75784877d15fc00ee425baf2a"
+      "version": "clinical-record-extraction-v2.13",
+      "sha256": "4662a50c5aaf2bc8bd712d257f77f28f9823043b80bd3b64cd822d0c0e1ee52e"
     },
     {
       "path": "prompts/candidate_adjudication_v1.txt",
@@ -24,7 +24,31 @@
       "path": "prompts/draft_normalization_v1.txt",
       "kind": "prompt",
       "version": "draft-normalization-v1",
-      "sha256": "75d0735d66183c46b4d640e718b07f8463f8a899f5f6c05d1658fa7c3664fa1f"
+      "sha256": "0d8d686d26b7efde5f2d502037528737fe1fdbd16a80bb6da69ccad6570bfe66"
+    },
+    {
+      "path": "prompts/compact_record_output_v3.txt",
+      "kind": "prompt",
+      "version": "clinical-record-compact-v3.2",
+      "sha256": "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
+    },
+    {
+      "path": "prompts/compact_record_output_v3_1_lean.txt",
+      "kind": "prompt",
+      "version": "clinical-record-compact-v3.1-lean-v1",
+      "sha256": "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
+    },
+    {
+      "path": "prompts/compact_fact_output_v1.txt",
+      "kind": "prompt",
+      "version": "clinical-record-compact-facts-v1",
+      "sha256": "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
+    },
+    {
+      "path": "prompts/compact_fields_output_v1.txt",
+      "kind": "prompt",
+      "version": "clinical-record-compact-fields-v1",
+      "sha256": "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
     }
   ]
 }

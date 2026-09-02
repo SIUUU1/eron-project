@@ -63,7 +63,7 @@ class Settings:
 
     # 응급기록 초안 생성용 내부 ClinicalNLP 서비스.
     record_ai_url: str | None = None
-    clinical_record_ai_timeout_seconds: float = 180.0
+    clinical_record_ai_timeout_seconds: float = 620.0
 
     # KCD 검색어를 표준 진단명으로 확장하는 읽기 전용 임상용어 약어 사전.
     kcd_alias_db_path: str | None = None
@@ -107,7 +107,7 @@ def load_settings() -> Settings:
         record_ai_url=os.getenv("RECORD_AI_URL") or None,
         clinical_record_ai_timeout_seconds=_float_env(
             "CLINICAL_RECORD_AI_TIMEOUT_SECONDS",
-            180.0,
+            620.0,
         ),
         kcd_alias_db_path=os.getenv("KCD_ALIAS_DB_PATH") or None,
         stt_url=os.getenv("STT_URL") or None,

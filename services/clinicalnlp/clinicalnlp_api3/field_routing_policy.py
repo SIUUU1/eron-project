@@ -10,12 +10,13 @@ CANONICAL_FIELD_ORDER = (
     "history_of_present_illness",
     "past_history",
     "medications",
-    "allergy",
+    "drug_allergy",
     "social_history",
     "review_of_systems",
     "physical_examination",
     "impression",
     "treatment_plan",
+    "outcome",
 )
 
 CANONICAL_TO_DRAFT_FIELD = {
@@ -24,12 +25,13 @@ CANONICAL_TO_DRAFT_FIELD = {
     "history_of_present_illness": "history",
     "past_history": "past-history",
     "medications": "medication",
-    "allergy": "allergy",
+    "drug_allergy": "allergy",
     "social_history": "social",
     "review_of_systems": "review-of-systems",
     "physical_examination": "physical",
     "impression": "impression",
     "treatment_plan": "treatment-plan",
+    "outcome": "outcome",
 }
 DRAFT_TO_CANONICAL_FIELD = {
     draft: canonical for canonical, draft in CANONICAL_TO_DRAFT_FIELD.items()
@@ -53,6 +55,16 @@ _TERM_TYPE_ORDER = (
     VITAL,
     DEVICE,
 )
+_TERM_TYPE_COLLECTION = {
+    SYMPTOM: "emergency_terms",
+    DISEASE: "emergency_terms",
+    DRUG: "drug_terms",
+    ALLERGY: "drug_terms",
+    ANATOMY: "anatomy_terms",
+    PROCEDURE: "procedure_terms",
+    VITAL: "emergency_terms",
+    DEVICE: "procedure_terms",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,50 +75,75 @@ class FieldPolicy:
 
 FIELD_POLICIES = {
     "chief_complaint": FieldPolicy(
-        "The explicit primary reason for the emergency visit, in patient wording.",
+        "Every explicitly stated core reason for the emergency visit, regardless "
+        "of speaker; symptoms and explicitly stated diagnoses are allowed.",
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "pain_assessment": FieldPolicy(
-        "Only explicitly stated pain assessment content; NRS requires an explicit score.",
+        "Only explicit pain presence, denial, NRS score, and anatomical pain site; "
+        "missing elements are never inferred.",
         frozenset({SYMPTOM, ANATOMY, VITAL}),
     ),
     "history_of_present_illness": FieldPolicy(
-        "Onset, course, change, and associated symptoms of the current problem.",
+        "Only explicit OLDCARTS facts, associated symptoms, pre-hospital care, "
+        "and arrival or transfer details of the current problem; unmentioned "
+        "elements are never inferred or converted to negative findings.",
         frozenset({SYMPTOM, DISEASE, ANATOMY}),
     ),
     "past_history": FieldPolicy(
-        "Previously diagnosed conditions and completed historical operations or "
-        "procedures.",
+        "Explicit pre-existing diseases, completed surgeries or transplants, and "
+        "clinically relevant previous admissions; medication, allergy, and social "
+        "history are excluded.",
         frozenset({DISEASE, PROCEDURE}),
     ),
     "medications": FieldPolicy(
-        "Medication currently taken or explicitly reported as administered.",
+        "Every explicitly stated ongoing current medication; one-time pre-hospital "
+        "administration and newly ordered emergency treatment are excluded.",
         frozenset({DRUG}),
     ),
-    "allergy": FieldPolicy(
-        "Explicit allergen or drug allergy and its reported reaction.",
+    "drug_allergy": FieldPolicy(
+        "Explicit drug, contrast-media, latex, food, or other allergy and its "
+        "reported reaction; adverse effects and intolerance are not inferred as allergy.",
         frozenset({ALLERGY, DRUG, SYMPTOM}),
     ),
     "social_history": FieldPolicy(
-        "Explicit smoking and alcohol history; terminology candidates are not generated here.",
+        "Independent explicit smoking and alcohol history with reported quantity, "
+        "duration, cessation, frequency, beverage, and amount preserved; risk labels "
+        "are never inferred and terminology candidates are not generated here.",
         frozenset(),
     ),
     "review_of_systems": FieldPolicy(
-        "Patient-reported positive, negative, or uncertain answers to symptom review.",
+        "Patient- or guardian-reported positive, negative, or uncertain symptoms "
+        "from chief complaint, HPI, and targeted review; HPI modifiers and observed "
+        "findings are excluded.",
         frozenset({SYMPTOM, ANATOMY}),
     ),
     "physical_examination": FieldPolicy(
-        "Clinician-observed or measured examination findings, never inferred from symptoms.",
+        "Explicit clinician-obtained inspection, auscultation, percussion, palpation, "
+        "neurologic, or other direct examination findings by body system; patient-reported "
+        "symptoms, unexamined normal findings, vital-only measurements, and diagnostic "
+        "interpretations are excluded.",
         frozenset({SYMPTOM, ANATOMY, VITAL, DEVICE}),
     ),
     "impression": FieldPolicy(
-        "Explicitly stated diagnosis, suspected diagnosis, or differential with "
-        "certainty preserved.",
+        "Clinician-explicit established, suspected, rule-out, or differential "
+        "diagnoses with certainty and every alternative preserved; symptoms, "
+        "findings, measurements, patient self-diagnoses, and retrieval candidates "
+        "alone never create an impression or a final KCD code.",
         frozenset({DISEASE, SYMPTOM}),
     ),
     "treatment_plan": FieldPolicy(
-        "Explicitly stated tests, medications, procedures, devices, or orders.",
+        "Explicit clinician decisions, orders, completed current-visit actions, "
+        "conditional plans, cancellations, or refusals for diagnostic workup, "
+        "medication/procedure, consultation, and disposition/safety-netting; "
+        "patient requests and unstated order-set details are excluded.",
         frozenset({PROCEDURE, DRUG, DEVICE}),
+    ),
+    "outcome": FieldPolicy(
+        "Only an explicit final clinician disposition of Discharge, Admission, "
+        "Transfer, Death, or Other; conditional plans, patient wishes, clinical "
+        "severity, diagnoses, and test results alone never establish an outcome.",
+        frozenset(),
     ),
 }
 
@@ -119,7 +156,7 @@ _TERM_TYPE_FIELD_PRIORITY = {
         "review_of_systems",
         "physical_examination",
         "impression",
-        "allergy",
+        "drug_allergy",
     ),
     DISEASE: (
         "impression",
@@ -127,8 +164,8 @@ _TERM_TYPE_FIELD_PRIORITY = {
         "history_of_present_illness",
         "chief_complaint",
     ),
-    DRUG: ("medications", "allergy", "treatment_plan"),
-    ALLERGY: ("allergy",),
+    DRUG: ("medications", "drug_allergy", "treatment_plan"),
+    ALLERGY: ("drug_allergy",),
     ANATOMY: (
         "physical_examination",
         "history_of_present_illness",
@@ -197,7 +234,22 @@ def _atomic_values(value: Any) -> Iterable[dict[str, Any]]:
 
 def evidence_fields_by_segment(
     clinical_record: dict[str, Any],
+    *,
+    segments: Iterable[dict[str, Any]] = (),
 ) -> dict[str, tuple[FieldEvidence, ...]]:
+    segment_ids_by_time: dict[tuple[object, object], str] = {}
+    ambiguous_times: set[tuple[object, object]] = set()
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("id") is None:
+            continue
+        key = (segment.get("start"), segment.get("end"))
+        if key in segment_ids_by_time:
+            ambiguous_times.add(key)
+        else:
+            segment_ids_by_time[key] = str(segment["id"])
+    for key in ambiguous_times:
+        segment_ids_by_time.pop(key, None)
+
     routed: dict[str, list[FieldEvidence]] = {}
     for field_id in CANONICAL_FIELD_ORDER:
         for value in _atomic_values(clinical_record.get(field_id)):
@@ -207,13 +259,49 @@ def evidence_fields_by_segment(
                 if isinstance(evidence, dict)
                 else None
             )
+            if segment_id is None and isinstance(evidence, dict):
+                segment_id = segment_ids_by_time.get(
+                    (evidence.get("start"), evidence.get("end"))
+                )
             raw_value = str(value.get("raw_value") or "").strip()
-            if not isinstance(segment_id, str) or not segment_id or not raw_value:
+            if segment_id is None or not str(segment_id) or not raw_value:
                 continue
+            normalized_segment_id = str(segment_id)
             entry = FieldEvidence(field_id=field_id, raw_value=raw_value)
-            if entry not in routed.setdefault(segment_id, []):
-                routed[segment_id].append(entry)
+            if entry not in routed.setdefault(normalized_segment_id, []):
+                routed[normalized_segment_id].append(entry)
     return {key: tuple(value) for key, value in routed.items()}
+
+
+def field_collection_hints_by_segment(
+    clinical_record: dict[str, Any],
+    *,
+    segments: Iterable[dict[str, Any]] = (),
+) -> dict[str, frozenset[str]]:
+    """Map grounded record evidence to the vector collections it can use.
+
+    Empty-policy fields such as social history intentionally contribute no
+    hint. A missing hint therefore preserves the existing unrestricted safety
+    path instead of suppressing terminology candidates.
+    """
+
+    routed: dict[str, set[str]] = {}
+    for segment_id, evidence in evidence_fields_by_segment(
+        clinical_record,
+        segments=segments,
+    ).items():
+        collections = {
+            _TERM_TYPE_COLLECTION[term_type]
+            for item in evidence
+            for term_type in FIELD_POLICIES[item.field_id].allowed_term_types
+            if term_type in _TERM_TYPE_COLLECTION
+        }
+        if collections:
+            routed[segment_id] = collections
+    return {
+        segment_id: frozenset(collections)
+        for segment_id, collections in routed.items()
+    }
 
 
 def _semantic_types(candidate: dict[str, Any]) -> set[str]:
@@ -372,20 +460,30 @@ def choose_evidence_field(
     preferred = _preferred_fields((*declared_categories, *categories))
     preferred_rank = {field_id: index for index, field_id in enumerate(preferred)}
 
-    compatible: list[tuple[int, int, int, int, int, str]] = []
     normalized_source = source_text.strip().casefold()
-    for entry in entries:
+    exact_entries = [
+        entry
+        for entry in entries
+        if normalized_source
+        and (
+            normalized_source in entry.raw_value.casefold()
+            or entry.raw_value.casefold() in normalized_source
+        )
+    ]
+    # A translated candidate deliberately keeps the whole RAW sentence as its
+    # source span because translated offsets cannot be presented as RAW
+    # offsets. If that sentence grounds one or more draft atoms, candidates
+    # must stay inside those atoms instead of being moved to an unrelated field
+    # merely because its dictionary collection happens to be compatible.
+    routed_entries = exact_entries or entries
+
+    compatible: list[tuple[int, int, int, int, int, str]] = []
+    for entry in routed_entries:
         policy = FIELD_POLICIES.get(entry.field_id)
         if policy is None or not categories & policy.allowed_term_types:
             continue
         normalized_value = entry.raw_value.casefold()
-        exact_atom = bool(
-            normalized_source
-            and (
-                normalized_source in normalized_value
-                or normalized_value in normalized_source
-            )
-        )
+        exact_atom = entry in exact_entries
         compatible.append(
             (
                 0 if exact_atom else 1,

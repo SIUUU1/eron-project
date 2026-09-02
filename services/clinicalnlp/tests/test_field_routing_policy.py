@@ -5,6 +5,7 @@ from clinicalnlp_api3.field_routing_policy import (
     candidate_allowed_for_field,
     choose_evidence_field,
     evidence_fields_by_segment,
+    field_collection_hints_by_segment,
     filter_candidates_for_field,
 )
 from clinicalnlp_api3.workflow import build_draft
@@ -44,6 +45,66 @@ def _atom(raw_value, segment_id="seg_0001", status="confirmed"):
 
 
 class FieldRoutingPolicyTests(unittest.TestCase):
+    def test_impression_policy_requires_an_explicit_clinician_assessment(self):
+        from clinicalnlp_api3.field_routing_policy import FIELD_POLICIES
+
+        description = FIELD_POLICIES["impression"].definition
+
+        self.assertIn("Clinician-explicit", description)
+        self.assertIn("patient self-diagnoses", description)
+        self.assertIn("never create an impression", description)
+
+    def test_outcome_policy_requires_a_final_clinician_disposition(self):
+        from clinicalnlp_api3.field_routing_policy import FIELD_POLICIES
+
+        definition = FIELD_POLICIES["outcome"].definition
+
+        self.assertIn("explicit final clinician disposition", definition)
+        self.assertIn("conditional plans", definition)
+        self.assertEqual(FIELD_POLICIES["outcome"].allowed_term_types, frozenset())
+
+    def test_field_collection_hints_are_derived_from_grounded_record_fields(self):
+        record = {
+            "medications": [_atom("암로디핀 복용 중")],
+            "treatment_plan": [_atom("흉부 CT를 시행합니다.")],
+            "social_history": {"smoking": _atom("흡연력 미확인")},
+        }
+
+        routed = field_collection_hints_by_segment(record)
+
+        self.assertEqual(
+            routed,
+            {
+                "seg_0001": frozenset(
+                    {"drug_terms", "procedure_terms"}
+                )
+            },
+        )
+
+    def test_timestamp_evidence_is_mapped_back_to_its_source_segment(self):
+        record = {
+            "impression": [{
+                "raw_value": "폐렴 의심",
+                "status": "needs_confirmation",
+                "evidence": {"start": 4.0, "end": 6.0, "text": "..."},
+            }]
+        }
+
+        routed = field_collection_hints_by_segment(
+            record,
+            segments=[{
+                "id": "seg_0003",
+                "start": 4.0,
+                "end": 6.0,
+                "text": "...",
+            }],
+        )
+
+        self.assertEqual(
+            routed,
+            {"seg_0003": frozenset({"emergency_terms"})},
+        )
+
     def test_evidence_index_preserves_multiple_atomic_fields_for_one_segment(self):
         record = {
             "history_of_present_illness": {
@@ -79,6 +140,84 @@ class FieldRoutingPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(field_id, "past_history")
+
+    def test_exact_grounded_sentence_is_not_rerouted_by_an_unrelated_drug_hit(self):
+        unrelated_drug = _candidate(
+            "yellow-compound",
+            "Astragalus Root/Lonicera Flower/Yellow Beeswax",
+            [],
+            collection="drug_terms",
+            entity_type="product",
+        )
+        source = "The sputum has turned more yellow than usual."
+        evidence = (
+            FieldEvidence("history_of_present_illness", source),
+            FieldEvidence("medications", "Amlodipine"),
+        )
+
+        field_id = choose_evidence_field(
+            evidence,
+            source_text=source,
+            candidates=[unrelated_drug],
+        )
+
+        self.assertIsNone(field_id)
+
+    def test_review_items_keep_only_candidate_that_matches_grounded_draft_field(self):
+        source = "The sputum has turned more yellow than usual."
+        unrelated_drug = _candidate(
+            "yellow-compound",
+            "Astragalus Root/Lonicera Flower/Yellow Beeswax",
+            [],
+            collection="drug_terms",
+            entity_type="product",
+        )
+        sputum = _candidate(
+            "sputum",
+            "Sputum",
+            ["T184"],
+        )
+        api3 = {
+            "segments": [{
+                "id": "seg_0001",
+                "start": 0.0,
+                "end": 3.0,
+                "raw_text": source,
+                "annotations": [{
+                    "type": "medical_term_candidate",
+                    "source_span": {
+                        "text": source,
+                        "start_char": 0,
+                        "end_char": len(source),
+                    },
+                    "candidates": [unrelated_drug],
+                    "needs_review": True,
+                }, {
+                    "type": "medical_term_candidate",
+                    "source_span": {
+                        "text": source,
+                        "start_char": 0,
+                        "end_char": len(source),
+                    },
+                    "candidates": [sputum],
+                    "needs_review": True,
+                }],
+            }]
+        }
+        api2 = {
+            "clinical_record": {
+                "history_of_present_illness": {
+                    "course": _atom(source),
+                },
+                "medications": [_atom("Amlodipine")],
+            }
+        }
+
+        draft = build_draft(api2, api3)
+
+        self.assertEqual(len(draft["review_items"]), 1)
+        self.assertEqual(draft["review_items"][0]["field_id"], "history")
+        self.assertEqual(draft["review_items"][0]["candidates"], ["Sputum"])
 
     def test_umls_semantic_type_overrides_misleading_collection(self):
         disease_in_drug_collection = _candidate(

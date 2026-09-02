@@ -45,6 +45,11 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.port, 8765)
+        self.assertFalse(settings.compact_v3_compare)
+        self.assertEqual(settings.compact_v3_mode, "legacy")
+        self.assertEqual(settings.ollama_timeout_seconds, 240.0)
+        self.assertEqual(settings.request_timeout_seconds, 620.0)
+        self.assertEqual(settings.clinical_max_tokens, 8192)
         self.assertEqual(
             settings.database_url,
             "postgresql+psycopg://user:secret@postgres/eron",
@@ -177,7 +182,10 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
                 "CLINICALNLP_GEMMA_MAX_TOKENS": "3072",
                 "CLINICALNLP_QUERY_EXPANSION_MAX_TOKENS": "1536",
                 "CLINICALNLP_QUERY_EXPANSION_PASSES": "1",
-                "CLINICALNLP_TRANSLATION_BATCH_SIZE": "3",
+                "CLINICALNLP_COMPACT_V3_COMPARE": "true",
+                # Retained deployments may still carry this obsolete setting.
+                # Dynamic token budgeting must ignore it.
+                "CLINICALNLP_TRANSLATION_BATCH_SIZE": "not-a-number",
                 "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
                 "CLINICALNLP_UMLS_ENABLED": "true",
                 "CLINICALNLP_UMLS_TIMEOUT": "90",
@@ -197,7 +205,9 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(settings.clinical_max_tokens, 3072)
         self.assertEqual(settings.query_max_tokens, 1536)
         self.assertEqual(settings.query_passes, 1)
-        self.assertEqual(settings.translation_batch_size, 3)
+        self.assertTrue(settings.compact_v3_compare)
+        self.assertEqual(settings.compact_v3_mode, "compare")
+        self.assertFalse(hasattr(settings, "translation_batch_size"))
         self.assertEqual(
             settings.database_url,
             "postgresql://clinical@postgres/eron",
@@ -216,6 +226,44 @@ class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
             settings.umls_cache_root,
             Path("/runtime/scispacy/cache"),
         )
+
+    def test_explicit_compact_primary_mode_overrides_legacy_compare_flag(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
+                "CLINICALNLP_COMPACT_V3_MODE": "primary",
+                "CLINICALNLP_COMPACT_V3_COMPARE": "true",
+            }
+        )
+
+        self.assertEqual(settings.compact_v3_mode, "primary")
+        self.assertFalse(settings.compact_v3_compare)
+
+    def test_lean_primary_mode_is_accepted(self):
+        settings = ServiceSettings.from_mapping(
+            {
+                "OLLAMA_API_KEY": "test-secret",
+                "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
+                "CLINICALNLP_COMPACT_V3_MODE": "lean_primary",
+            }
+        )
+
+        self.assertEqual(settings.compact_v3_mode, "lean_primary")
+        self.assertFalse(settings.compact_v3_compare)
+
+    def test_invalid_compact_mode_is_rejected(self):
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "CLINICALNLP_COMPACT_V3_MODE must be off, compare, primary, legacy",
+        ):
+            ServiceSettings.from_mapping(
+                {
+                    "OLLAMA_API_KEY": "test-secret",
+                    "CLINICALNLP_DATABASE_URL": "postgresql://clinical@postgres/eron",
+                    "CLINICALNLP_COMPACT_V3_MODE": "replace-everything",
+                }
+            )
 
 
 if __name__ == "__main__":
