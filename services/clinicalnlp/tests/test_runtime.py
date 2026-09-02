@@ -32,7 +32,12 @@ class _SyntheticQueryExpander:
 
 
 class _SyntheticClinicalExtractor:
+    def __init__(self):
+        self.compact_compare_calls = 0
+        self.extract_calls = 0
+
     def extract(self, payload):
+        self.extract_calls += 1
         return {
             "schema_version": "clinical-record-v2",
             "clinical_record": {
@@ -53,6 +58,56 @@ class _SyntheticClinicalExtractor:
                 "draft_normalization_prompt_version": None,
             },
             "stage_errors": [],
+        }
+
+    def compare_compact_record(self, payload, candidate_snapshots):
+        self.compact_compare_calls += 1
+        fields = {
+            field_id: {
+                "generation_status": "NOT_MENTIONED",
+                "text": None,
+                "fact_refs": [],
+            }
+            for field_id in (
+                "chief_complaint",
+                "pain_assessment",
+                "history_of_present_illness",
+                "past_history",
+                "medications",
+                "drug_allergy",
+                "social_history",
+                "review_of_systems",
+                "physical_examination",
+                "impression",
+                "treatment_plan",
+                "outcome",
+            )
+        }
+        fields["chief_complaint"] = {
+            "generation_status": "GENERATED",
+            "text": "Abdominal pain.",
+            "fact_refs": ["f1"],
+        }
+        return {
+            "prompt_version": "clinical-record-compact-v3.1",
+            "record": {
+                "schema_version": "clinical-record-compact-v3",
+                "facts": {
+                    "f1": {
+                        "type": "NARRATIVE",
+                        "text": "배가 아파요",
+                        "assertion": "PRESENT",
+                        "segments": ["seg_0001"],
+                    }
+                },
+                "fields": fields,
+            },
+            "validation": {
+                "schema_version": "clinical-record-compact-validation-v1",
+                "status": "PASS",
+                "processing_status": "completed",
+                "issues": [],
+            },
         }
 
 
@@ -148,6 +203,210 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
         self.assertEqual(
             result["telemetry"]["vector_emergency_terms_statement_count"],
             1,
+        )
+
+    def test_compact_comparison_is_opt_in_and_preserves_v2_draft(self):
+        extractor = _SyntheticClinicalExtractor()
+        default_runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=extractor,
+            query_expander=_SyntheticQueryExpander(),
+        )
+        payload = {
+            "language": "ko",
+            "segments": [{
+                "id": "seg_0001",
+                "start": 0.0,
+                "end": 2.0,
+                "text": "배가 아파요",
+            }],
+        }
+
+        default_result = default_runtime.generate_draft(payload)
+
+        self.assertNotIn("compact_v3_comparison", default_result)
+        self.assertEqual(extractor.compact_compare_calls, 0)
+
+        compare_runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=extractor,
+            query_expander=_SyntheticQueryExpander(),
+            compact_v3_compare=True,
+        )
+        compared = compare_runtime.generate_draft(payload)
+
+        self.assertEqual(extractor.compact_compare_calls, 1)
+        self.assertEqual(
+            compared["compact_v3_comparison"]["status"],
+            "completed",
+        )
+        self.assertTrue(
+            compared["compact_v3_comparison"]["fields"]["chief_complaint"][
+                "matches"
+            ]
+        )
+        self.assertNotIn(
+            "past_history",
+            compared["compact_v3_comparison"]["mismatch_field_ids"],
+        )
+        self.assertIn(
+            "review_of_systems",
+            compared["compact_v3_comparison"]["evidence_mismatch_field_ids"],
+        )
+        self.assertEqual(
+            compared["compact_v3_comparison"]["fields"]["chief_complaint"][
+                "comparison_class"
+            ],
+            "EXACT_MATCH",
+        )
+        self.assertEqual(compared["draft"], default_result["draft"])
+        self.assertEqual(compared["processing_status"], default_result["processing_status"])
+        self.assertEqual(compared["errors"], default_result["errors"])
+
+    def test_compact_comparison_failure_is_isolated_from_v2(self):
+        class FailingExtractor(_SyntheticClinicalExtractor):
+            def compare_compact_record(self, payload, candidate_snapshots):
+                raise RuntimeError("sensitive model preview must not escape")
+
+        runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=FailingExtractor(),
+            query_expander=_SyntheticQueryExpander(),
+            compact_v3_compare=True,
+        )
+
+        result = runtime.generate_draft(
+            {
+                "language": "ko",
+                "segments": [{
+                    "id": "seg_0001",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "배가 아파요",
+                }],
+            }
+        )
+
+        self.assertEqual(result["processing_status"], "completed")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["draft"]["fields"]["chief_complaint"]["value"], "Abdominal pain.")
+        comparison = result["compact_v3_comparison"]
+        self.assertEqual(comparison["status"], "unavailable")
+        self.assertEqual(comparison["error_code"], "RuntimeError")
+        self.assertNotIn("sensitive", comparison["detail"])
+
+    def test_compact_primary_skips_legacy_extraction_and_projects_v2_ui(self):
+        extractor = _SyntheticClinicalExtractor()
+        runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=extractor,
+            query_expander=_SyntheticQueryExpander(),
+            compact_v3_mode="primary",
+        )
+
+        result = runtime.generate_draft(
+            {
+                "language": "ko",
+                "segments": [{
+                    "id": "seg_0001",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "배가 아파요",
+                }],
+            }
+        )
+
+        self.assertEqual(extractor.extract_calls, 0)
+        self.assertEqual(extractor.compact_compare_calls, 1)
+        self.assertEqual(result["processing_status"], "completed")
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["value"],
+            "Abdominal pain.",
+        )
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["information_status"],
+            "PRESENT",
+        )
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["evidence"][0][
+                "segment_id"
+            ],
+            "seg_0001",
+        )
+        self.assertEqual(
+            result["draft"]["fields"]["past_history"]["information_status"],
+            "NOT_ASSESSED",
+        )
+        self.assertEqual(result["compact_v3_primary"]["status"], "completed")
+        self.assertEqual(result["compact_v3_primary"]["validation"]["status"], "PASS")
+        self.assertEqual(
+            result["audit"]["references"]["compact_record_path"],
+            "$.compact_v3_primary.record",
+        )
+
+    def test_invalid_compact_mode_is_rejected_before_generation(self):
+        with self.assertRaisesRegex(ValueError, "off, compare, or primary"):
+            create_clinical_runtime(
+                retriever=_EmptyRetriever(),
+                clinical_extractor=_SyntheticClinicalExtractor(),
+                compact_v3_mode="unsafe",
+            )
+
+    def test_compact_primary_block_is_propagated_without_erasing_text(self):
+        class BlockedCompactExtractor(_SyntheticClinicalExtractor):
+            def compare_compact_record(self, payload, candidate_snapshots):
+                result = super().compare_compact_record(
+                    payload,
+                    candidate_snapshots,
+                )
+                result["validation"] = {
+                    "schema_version": "clinical-record-compact-validation-v1",
+                    "status": "BLOCK",
+                    "processing_status": "completed",
+                    "issues": [{
+                        "code": "UNSUPPORTED_FACT_REFERENCE",
+                        "rule_id": "G01",
+                        "severity": "BLOCK",
+                        "message": "generated field has unsupported evidence",
+                        "field_ids": ["chief_complaint"],
+                    }],
+                    "field_statuses": {"chief_complaint": "BLOCK"},
+                }
+                return result
+
+        runtime = create_clinical_runtime(
+            retriever=_EmptyRetriever(),
+            clinical_extractor=BlockedCompactExtractor(),
+            query_expander=_SyntheticQueryExpander(),
+            compact_v3_mode="primary",
+        )
+
+        result = runtime.generate_draft(
+            {
+                "language": "ko",
+                "segments": [{
+                    "id": "seg_0001",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "배가 아파요",
+                }],
+            }
+        )
+
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["value"],
+            "Abdominal pain.",
+        )
+        self.assertEqual(
+            result["draft"]["fields"]["chief_complaint"]["information_status"],
+            "UNCERTAIN",
+        )
+        self.assertEqual(result["validation"]["status"], "BLOCK")
+        self.assertTrue(
+            any(
+                issue.get("compact_issue_code") == "UNSUPPORTED_FACT_REFERENCE"
+                for issue in result["validation"]["issues"]
+            )
         )
 
 

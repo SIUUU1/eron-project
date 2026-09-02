@@ -3,6 +3,7 @@ import unittest
 
 from clinicalnlp_api3.candidate_snapshot import (
     seal_candidate_snapshot,
+    snapshots_from_api3_document,
     verify_candidate_snapshot,
 )
 from clinicalnlp_api3.compact_record_v3 import (
@@ -11,6 +12,7 @@ from clinicalnlp_api3.compact_record_v3 import (
     compact_record_response_format,
     validate_compact_record,
 )
+from clinicalnlp_api3.record_extractor import LlamaServerClinicalExtractor
 
 
 def candidate_snapshot(
@@ -79,6 +81,56 @@ class CandidateSnapshotTests(unittest.TestCase):
         changed["canonical"] = "Cough variant asthma"
         self.assertFalse(verify_candidate_snapshot(changed))
 
+    def test_api3_candidates_require_exact_offsets_and_a_version(self):
+        document = {
+            "segments": [{
+                "id": "seg_0001",
+                "raw_text": "코프가 있어요",
+                "annotations": [{
+                    "source_span": {
+                        "text": "코프",
+                        "start_char": 0,
+                        "end_char": 2,
+                    },
+                    "search_terms_en": ["cough"],
+                    "candidates": [{
+                        "entity_id": "umls:C0010200",
+                        "canonical_en": "Cough",
+                        "match_type": "umls_dictionary_search",
+                        "retrieval_score": 0.97,
+                        "dictionary_version": "umls-2022AB",
+                        "provenance": {
+                            "cui": "C0010200",
+                            "semantic_types": ["T184"],
+                        },
+                    }, {
+                        "entity_id": "unversioned",
+                        "canonical_en": "Cough",
+                        "match_type": "vector",
+                        "retrieval_score": 0.80,
+                    }],
+                }],
+            }],
+        }
+
+        snapshots = snapshots_from_api3_document(
+            document,
+            request_id="req_001",
+            created_at="2026-09-01T00:00:00+00:00",
+        )
+
+        self.assertEqual(len(snapshots), 1)
+        snapshot = next(iter(snapshots.values()))
+        self.assertTrue(verify_candidate_snapshot(snapshot))
+        self.assertEqual(snapshot["source_span"], "코프")
+        self.assertEqual(snapshot["versions"], {"dictionary": "umls-2022AB"})
+
+        document["segments"][0]["annotations"][0]["source_span"]["text"] = "오프"
+        self.assertEqual(
+            snapshots_from_api3_document(document, request_id="req_002"),
+            {},
+        )
+
 
 class CompactRecordContractTests(unittest.TestCase):
     def test_model_contract_binds_segments_candidates_and_all_fields(self):
@@ -105,6 +157,53 @@ class CompactRecordContractTests(unittest.TestCase):
         self.assertEqual(
             matched["properties"]["segments"]["items"]["enum"],
             ["seg_0001"],
+        )
+
+    def test_model_contract_disallows_matched_terms_without_snapshots(self):
+        response_format = compact_record_response_format(["seg_0001"], [])
+        variants = response_format["json_schema"]["schema"]["properties"][
+            "facts"
+        ]["additionalProperties"]["oneOf"]
+
+        self.assertNotIn(
+            "MATCHED_TERM",
+            {item["properties"]["type"]["const"] for item in variants},
+        )
+
+    def test_model_contract_binds_each_candidate_to_its_snapshot_segment(self):
+        snapshot = candidate_snapshot()
+        response_format = compact_record_response_format(
+            ["seg_0001", "seg_0002"],
+            {snapshot["candidate_ref"]: snapshot},
+        )
+        variants = response_format["json_schema"]["schema"]["properties"][
+            "facts"
+        ]["additionalProperties"]["oneOf"]
+        matched = next(
+            item
+            for item in variants
+            if item["properties"]["type"]["const"] == "MATCHED_TERM"
+        )
+
+        self.assertEqual(
+            matched["properties"]["candidate_ref"]["enum"],
+            [snapshot["candidate_ref"]],
+        )
+        self.assertEqual(
+            matched["allOf"],
+            [{
+                "if": {
+                    "required": ["candidate_ref"],
+                    "properties": {
+                        "candidate_ref": {"const": snapshot["candidate_ref"]}
+                    },
+                },
+                "then": {
+                    "properties": {
+                        "segments": {"contains": {"const": "seg_0001"}}
+                    }
+                },
+            }],
         )
 
     def test_valid_record_passes_without_rewriting_the_draft(self):
@@ -394,6 +493,168 @@ class CompactRecordContractTests(unittest.TestCase):
             "CONFLICTING_ASSERTION",
             {item["issue_code"] for item in resolved["issues"]},
         )
+
+    def test_supersedes_cycle_is_blocked_and_cannot_hide_assertion_conflict(self):
+        denied = candidate_snapshot(candidate_id="cough-denied")
+        present = candidate_snapshot(candidate_id="cough-present")
+        facts = {
+            "f1": {
+                "type": "MATCHED_TERM",
+                "candidate_ref": denied["candidate_ref"],
+                "assertion": "DENIED",
+                "segments": ["seg_0001"],
+                "supersedes_fact_id": "f2",
+            },
+            "f2": {
+                "type": "MATCHED_TERM",
+                "candidate_ref": present["candidate_ref"],
+                "assertion": "PRESENT",
+                "segments": ["seg_0001"],
+                "supersedes_fact_id": "f1",
+            },
+        }
+        fields = empty_fields()
+        fields["review_of_systems"] = {
+            "generation_status": "GENERATED",
+            "text": "Cough(?)",
+            "fact_refs": ["f1", "f2"],
+        }
+        snapshots = {
+            denied["candidate_ref"]: denied,
+            present["candidate_ref"]: present,
+        }
+
+        result = validate_compact_record(
+            compact_document(facts=facts, fields=fields),
+            segment_ids=["seg_0001"],
+            candidate_snapshots=snapshots,
+        )
+
+        self.assertEqual(result["status"], "BLOCK")
+        self.assertIn(
+            "INVALID_FACT_RELATION",
+            {item["issue_code"] for item in result["issues"]},
+        )
+
+    def test_missing_or_invalid_field_contract_changes_processing_status(self):
+        fields = empty_fields()
+        fields.pop("past_history")
+        fields["medications"]["generation_status"] = "BROKEN"
+
+        result = validate_compact_record(
+            compact_document(fields=fields),
+            segment_ids=[],
+            candidate_snapshots={},
+        )
+
+        self.assertEqual(result["processing_status"], "partial")
+        self.assertEqual(result["summary"]["failed_field_count"], 2)
+
+    def test_unknown_fact_type_preserves_high_risk_text_for_review(self):
+        facts = {
+            "f1": {
+                "type": "NARRATIVE",
+                "fact_type": "UNKNOWN",
+                "text": "복부 CT를 진행하겠습니다",
+                "assertion": "PRESENT",
+                "segments": ["seg_0001"],
+            }
+        }
+        fields = empty_fields()
+        fields["treatment_plan"] = {
+            "generation_status": "GENERATED",
+            "text": "Diagnostic Workup: Abdomen CT",
+            "fact_refs": ["f1"],
+        }
+        document = compact_document(facts=facts, fields=fields)
+
+        result = validate_compact_record(
+            document,
+            segment_ids=["seg_0001"],
+            candidate_snapshots={},
+        )
+
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertEqual(result["processing_status"], "completed")
+        self.assertEqual(
+            result["field_statuses"]["treatment_plan"], "REVIEW_REQUIRED"
+        )
+        self.assertEqual(
+            document["fields"]["treatment_plan"]["text"],
+            "Diagnostic Workup: Abdomen CT",
+        )
+
+    def test_high_risk_field_rejects_mismatched_fact_type(self):
+        facts = {
+            "f1": {
+                "type": "NARRATIVE",
+                "fact_type": "ASSESSMENT",
+                "text": "충수염이 의심됩니다",
+                "assertion": "UNCERTAIN",
+                "segments": ["seg_0001"],
+            }
+        }
+        fields = empty_fields()
+        fields["treatment_plan"] = {
+            "generation_status": "GENERATED",
+            "text": "R/O Acute appendicitis",
+            "fact_refs": ["f1"],
+        }
+
+        result = validate_compact_record(
+            compact_document(facts=facts, fields=fields),
+            segment_ids=["seg_0001"],
+            candidate_snapshots={},
+        )
+
+        self.assertEqual(
+            result["field_statuses"]["treatment_plan"], "REVIEW_REQUIRED"
+        )
+        self.assertIn(
+            "FACT_TYPE_FIELD_MISMATCH",
+            {item["issue_code"] for item in result["issues"]},
+        )
+
+
+class CompactRecordExtractorTests(unittest.TestCase):
+    def test_comparison_uses_compact_contract_and_validates_result(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def generate_json(self, **kwargs):
+                self.calls.append(kwargs)
+                return compact_document()
+
+        client = Client()
+        extractor = LlamaServerClinicalExtractor(
+            "http://unused.invalid",
+            llm_client=client,
+        )
+
+        result = extractor.compare_compact_record(
+            {
+                "segments": [{
+                    "id": "seg_0001",
+                    "start": 0.0,
+                    "end": 1.0,
+                    "raw_text": "확인된 임상 내용 없음",
+                    "translated_text_en": "No clinical content was stated.",
+                    "annotations": [],
+                }]
+            },
+            {},
+        )
+
+        self.assertEqual(result["validation"]["status"], "PASS")
+        self.assertEqual(result["prompt_version"], "clinical-record-compact-v3.2")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            client.calls[0]["response_format"]["json_schema"]["name"],
+            "clinical_record_compact_v3",
+        )
+        self.assertIn("Compact v3 output contract", client.calls[0]["system_prompt"])
+        self.assertNotIn("Return JSON only:\n{\n  \"clinical_record\"", client.calls[0]["system_prompt"])
 
 
 if __name__ == "__main__":

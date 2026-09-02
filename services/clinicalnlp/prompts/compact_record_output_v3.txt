@@ -1,0 +1,34 @@
+Compact v3 output contract
+
+Use the extraction and field-writing rules above, but return only the Compact v3 JSON envelope below. Do not return clinical_record-v2.
+
+The input contains candidate_snapshots. A candidate_ref may be copied only from that supplied list. A MATCHED_TERM fact uses one such immutable reference, and its segments array must include that snapshot's exact segment_id. Never reuse a candidate snapshot as evidence for a different segment merely because the clinical concept looks similar; use a candidate snapshot grounded in that segment or preserve the expression as UNMATCHED_TERM. Preserve an explicit medical expression that has no safe candidate as UNMATCHED_TERM with review_code NO_MATCH. Use NARRATIVE for other supported prose facts and MEASUREMENT for explicit structured values. Never create a candidate_ref, segment ID, fact, assertion, fact_type, number, or relationship that the input does not support.
+
+Each fact must include type, assertion (PRESENT, DENIED, or UNCERTAIN), and one or more source segment IDs. High-risk facts used by physical_examination, impression, treatment_plan, or outcome must also include fact_type. Use EXAM, ASSESSMENT, PLAN, or OUTCOME only when the dialogue clearly supports that clinical act; otherwise use UNKNOWN. UNKNOWN facts remain reviewable and must not be silently discarded.
+
+Every field must be present. Use generation_status GENERATED only when the field has supported content. Use NOT_MENTIONED with text null and fact_refs [] when the dialogue does not mention the field. Use FAILED only for a genuine field-generation failure, with text null, fact_refs [], and an error_code. Write each GENERATED field's final display text yourself according to the field rules above. Do not ask the backend to compose clinical prose. fact_refs must contain only IDs from the facts object, and each referenced fact must support that field text.
+
+Return JSON only:
+{
+  "schema_version":"clinical-record-compact-v3",
+  "facts":{
+    "f1":{"type":"MATCHED_TERM","candidate_ref":"candidate_ref from input","assertion":"PRESENT|DENIED|UNCERTAIN","segments":["seg_0001"],"fact_type":"EXAM|ASSESSMENT|PLAN|OUTCOME|UNKNOWN"},
+    "f2":{"type":"UNMATCHED_TERM","text":"exact supported expression","review_code":"NO_MATCH","assertion":"PRESENT|DENIED|UNCERTAIN","segments":["seg_0001"]},
+    "f3":{"type":"NARRATIVE","text":"exact supported fact","assertion":"PRESENT|DENIED|UNCERTAIN","segments":["seg_0001"]},
+    "f4":{"type":"MEASUREMENT","values":{"value":8,"unit":"NRS"},"assertion":"PRESENT|DENIED|UNCERTAIN","segments":["seg_0001"]}
+  },
+  "fields":{
+    "chief_complaint":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":["f1"],"values":null},
+    "pain_assessment":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "history_of_present_illness":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "past_history":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "medications":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "drug_allergy":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "social_history":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "review_of_systems":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "physical_examination":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "impression":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "treatment_plan":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null},
+    "outcome":{"generation_status":"GENERATED|NOT_MENTIONED|FAILED","text":"final display text or null","fact_refs":[],"values":null}
+  }
+}

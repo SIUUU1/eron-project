@@ -46,6 +46,12 @@ review items reuse those evidence assignments and expose only semantic types
 allowed by the target field. Candidates are never automatically confirmed and
 RAW evidence is never rewritten.
 
+Local Compact v3 rollout is controlled by `CLINICALNLP_COMPACT_V3_MODE`:
+`off` keeps the established v2 path, `compare` dual-runs Compact v3 for
+evaluation, and `primary` uses one Compact v3 draft generation after retrieval
+while preserving the existing UI response contract. Keep `off` until local
+regression and latency checks are accepted.
+
 `GET /health` returns HTTP 200 only when required configuration and active
 PostgreSQL releases are ready. Missing optional UMLS assets use the bounded
 n-gram fallback. Telemetry values diagnose latency only; they are not confidence

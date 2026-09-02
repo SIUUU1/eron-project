@@ -3298,6 +3298,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                         },
                                     },
                                     "assertion": "PRESENT",
+                                    "fact_type": "EXAM",
                                 },
                                 {
                                     "system": "Chest",
@@ -3308,7 +3309,8 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                             "source_segment_id": "seg_0001"
                                         },
                                     },
-                                    "assertion": "ABSENT",
+                                    "assertion": "NONE",
+                                    "fact_type": "EXAM",
                                 },
                                 {
                                     "system": "Abdomen",
@@ -3320,6 +3322,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                         },
                                     },
                                     "assertion": "PRESENT",
+                                    "fact_type": "EXAM",
                                 },
                             ],
                         }
@@ -3400,6 +3403,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                     },
                                 },
                                 "assertion": "PRESENT",
+                                "fact_type": "UNKNOWN",
                             }],
                         }
                     },
@@ -3475,6 +3479,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                     },
                                 },
                                 "assertion": "UNCERTAIN",
+                                "fact_type": "EXAM",
                             }],
                         }
                     },
@@ -3605,6 +3610,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                         "confirmed",
                                     ),
                                     "certainty": "CONFIRMED",
+                                    "fact_type": "ASSESSMENT",
                                 },
                                 {
                                     "diagnosis": diagnosis(
@@ -3613,6 +3619,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                         "needs_confirmation",
                                     ),
                                     "certainty": "SUSPECTED",
+                                    "fact_type": "ASSESSMENT",
                                 },
                                 {
                                     "diagnosis": diagnosis(
@@ -3621,6 +3628,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                         "needs_confirmation",
                                     ),
                                     "certainty": "RULE_OUT",
+                                    "fact_type": "ASSESSMENT",
                                 },
                             ],
                         }
@@ -3721,6 +3729,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
             "text": "입원",
             "category": "Admission",
             "information_status": "PRESENT",
+            "fact_type": "OUTCOME",
             "decision": {
                 "raw_value": "외과로 입원해서 치료하겠습니다",
                 "status": "confirmed",
@@ -3750,6 +3759,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
             "text": "입원",
             "category": "Admission",
             "information_status": "PRESENT",
+            "fact_type": "OUTCOME",
             "decision": {
                 "raw_value": "CT 결과 보고 입원 여부를 결정하겠습니다",
                 "status": "confirmed",
@@ -3770,7 +3780,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
             {"clinical_record": {"outcome": source}}, api3
         )["fields"]["outcome"]
 
-        self.assertEqual(field["value"], "진료 진행 중")
+        self.assertEqual(field["value"], "")
         self.assertEqual(field["status"], "needs_review")
 
     def test_outcome_does_not_infer_death_from_cardiac_arrest_or_cpr(self):
@@ -3778,6 +3788,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
             "text": "사망",
             "category": "Death",
             "information_status": "PRESENT",
+            "fact_type": "UNKNOWN",
             "decision": {
                 "raw_value": "심정지로 CPR을 시행했습니다",
                 "status": "confirmed",
@@ -3798,7 +3809,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
             {"clinical_record": {"outcome": source}}, api3
         )["fields"]["outcome"]
 
-        self.assertEqual(field["value"], "진료 진행 중")
+        self.assertEqual(field["value"], "")
         self.assertEqual(field["status"], "needs_review")
 
     def test_outcome_not_assessed_remains_empty(self):
@@ -3877,6 +3888,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                     ),
                                     "assertion": "PRESENT",
                                     "plan_status": "ORDERED",
+                                    "fact_type": "PLAN",
                                 },
                                 {
                                     "category": "Medication / Procedure",
@@ -3886,6 +3898,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                     ),
                                     "assertion": "PRESENT",
                                     "plan_status": "PLANNED",
+                                    "fact_type": "PLAN",
                                 },
                                 {
                                     "category": "Consultation",
@@ -3895,6 +3908,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                     ),
                                     "assertion": "UNCERTAIN",
                                     "plan_status": "CONDITIONAL",
+                                    "fact_type": "PLAN",
                                 },
                             ],
                         }
@@ -3975,6 +3989,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                 },
                                 "assertion": "PRESENT",
                                 "plan_status": "ORDERED",
+                                "fact_type": "PLAN",
                             }],
                         }
                     },
@@ -4056,6 +4071,7 @@ class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
                                 },
                                 "assertion": "UNCERTAIN",
                                 "plan_status": "CONDITIONAL",
+                                "fact_type": "PLAN",
                             }],
                         }
                     },

@@ -30,6 +30,28 @@ class ClinicalContractBundleTests(unittest.TestCase):
         self.assertIn("Death requires an explicit clinician confirmation", prompt)
         self.assertIn("Never use NONE for outcome", prompt)
 
+    def test_high_risk_fields_use_bounded_fact_types_without_diarization(self):
+        prompt = (
+            SERVICE_ROOT / "prompts" / "clinical_record_extraction_v2.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"fact_type":"EXAM|UNKNOWN"', prompt)
+        self.assertIn('"fact_type":"ASSESSMENT|UNKNOWN"', prompt)
+        self.assertIn('"fact_type":"PLAN|UNKNOWN"', prompt)
+        self.assertIn('"fact_type":"OUTCOME|UNKNOWN"', prompt)
+        self.assertNotIn("speaker_role", prompt)
+
+    def test_compact_prompt_binds_candidate_reference_to_snapshot_segment(self):
+        prompt = (
+            SERVICE_ROOT / "prompts" / "compact_record_output_v3.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "segments array must include that snapshot's exact segment_id",
+            prompt,
+        )
+        self.assertIn("Never reuse a candidate snapshot", prompt)
+
     def test_workflow_schema_preserves_the_public_draft_interface(self):
         schema_path = (
             SERVICE_ROOT / "contracts" / "clinical-workflow-v2.schema.json"
@@ -66,17 +88,56 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "outcome",
             ],
         )
+        version_properties = schema["properties"]["audit"]["properties"][
+            "versions"
+        ]["properties"]
+        self.assertIn("draft_normalization_prompt", version_properties)
+        self.assertIn("compact_prompt", version_properties)
+        reference_properties = schema["properties"]["audit"]["properties"][
+            "references"
+        ]["properties"]
+        self.assertIn("compact_record_path", reference_properties)
+
+    def test_backend_and_clinicalnlp_workflow_schemas_match(self):
+        service_schema = json.loads(
+            (SERVICE_ROOT / "contracts" / "clinical-workflow-v2.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        backend_schema = json.loads(
+            (
+                SERVICE_ROOT.parents[1]
+                / "backend"
+                / "app"
+                / "contracts"
+                / "clinical-workflow-v2.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        package_schema = json.loads(
+            (
+                SERVICE_ROOT
+                / "clinicalnlp_api3"
+                / "contracts"
+                / "clinical-workflow-v2.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(backend_schema, service_schema)
+        self.assertEqual(package_schema, service_schema)
 
     def test_prompt_bundle_matches_the_approved_source_versions(self):
         expected_hashes = {
             "clinical_record_extraction_v2.txt": (
-                "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
+                "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
             ),
             "candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "draft_normalization_v1.txt": (
                 "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
+            ),
+            "compact_record_output_v3.txt": (
+                "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
             ),
         }
 
@@ -95,16 +156,19 @@ class ClinicalContractBundleTests(unittest.TestCase):
         )
         expected_assets = {
             "contracts/clinical-workflow-v2.schema.json": (
-                "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
+                "befa840306589b60ce6cb12554f7eb8cb6b72937d5d3938388e1a535cbdbb7ec"
             ),
             "prompts/clinical_record_extraction_v2.txt": (
-                "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
+                "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
             ),
             "prompts/candidate_adjudication_v1.txt": (
                 "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "prompts/draft_normalization_v1.txt": (
                 "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
+            ),
+            "prompts/compact_record_output_v3.txt": (
+                "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
             ),
         }
 

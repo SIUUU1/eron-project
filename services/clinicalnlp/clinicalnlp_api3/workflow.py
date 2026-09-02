@@ -2147,6 +2147,7 @@ def _physical_exam_draft_field(
     for finding in findings:
         system = str(finding.get("system") or "").strip()
         assertion = str(finding.get("assertion") or "").strip().upper()
+        fact_type = str(finding.get("fact_type") or "UNKNOWN").strip().upper()
         finding_atoms = [
             atom
             for atom in _atomic_values(finding.get("finding"))
@@ -2156,8 +2157,10 @@ def _physical_exam_draft_field(
             validation_reasons.append("unsupported_system")
         if system and system not in systems_in_text:
             validation_reasons.append("system_not_rendered")
-        if assertion not in {"PRESENT", "ABSENT", "UNCERTAIN"}:
+        if assertion not in {"PRESENT", "NONE", "UNCERTAIN"}:
             validation_reasons.append("unsupported_assertion")
+        if fact_type != "EXAM":
+            validation_reasons.append("unresolved_fact_type")
         if not finding_atoms:
             validation_reasons.append("finding_without_evidence")
             continue
@@ -2182,7 +2185,7 @@ def _physical_exam_draft_field(
 
             inferred_assertion = {
                 "positive": "PRESENT",
-                "negative": "ABSENT",
+                "negative": "NONE",
                 "uncertain": "UNCERTAIN",
             }[_ros_assertion(atom)]
             if assertion != inferred_assertion:
@@ -2259,6 +2262,7 @@ def _impression_draft_field(
 
     for index, item in enumerate(items):
         certainty = str(item.get("certainty") or "").strip().upper()
+        fact_type = str(item.get("fact_type") or "UNKNOWN").strip().upper()
         diagnosis_atoms = [
             atom
             for atom in _atomic_values(item.get("diagnosis"))
@@ -2267,6 +2271,8 @@ def _impression_draft_field(
         if certainty not in allowed_certainties or not diagnosis_atoms:
             needs_review = True
             continue
+        if fact_type != "ASSESSMENT":
+            needs_review = True
         if certainty in {"SUSPECTED", "RULE_OUT"}:
             needs_review = True
         for atom in diagnosis_atoms:
@@ -2344,7 +2350,7 @@ def _outcome_draft_field(
         return {"value": "", "status": "empty", "evidence": []}
     if information_status == "UNCERTAIN":
         return {
-            "value": "진료 진행 중",
+            "value": "",
             "status": "needs_review",
             "evidence": evidence,
         }
@@ -2352,6 +2358,7 @@ def _outcome_draft_field(
     expected_text = _OUTCOME_LABELS.get(category)
     needs_review = (
         information_status != "PRESENT"
+        or str(source.get("fact_type") or "UNKNOWN").strip().upper() != "OUTCOME"
         or expected_text is None
         or not decision_atoms
         or any(atom.get("status") != "confirmed" for atom in decision_atoms)
@@ -2371,7 +2378,7 @@ def _outcome_draft_field(
     )
     if conditional:
         return {
-            "value": "진료 진행 중",
+            "value": "",
             "status": "needs_review",
             "evidence": evidence,
         }
@@ -2382,7 +2389,7 @@ def _outcome_draft_field(
         re.IGNORECASE,
     ):
         return {
-            "value": "진료 진행 중",
+            "value": "",
             "status": "needs_review",
             "evidence": evidence,
         }
@@ -2498,6 +2505,7 @@ def _treatment_plan_draft_field(
         category = str(item.get("category") or "").strip()
         assertion = str(item.get("assertion") or "").strip().upper()
         plan_status = str(item.get("plan_status") or "").strip().upper()
+        fact_type = str(item.get("fact_type") or "UNKNOWN").strip().upper()
         action_atoms = [
             atom
             for atom in _atomic_values(item.get("action"))
@@ -2509,6 +2517,8 @@ def _treatment_plan_draft_field(
             validation_reasons.append("category_not_rendered")
         if _TREATMENT_PLAN_STATUS_ASSERTION.get(plan_status) != assertion:
             validation_reasons.append("plan_status_assertion_mismatch")
+        if fact_type != "PLAN":
+            validation_reasons.append("unresolved_fact_type")
         if not action_atoms:
             validation_reasons.append("plan_without_evidence")
             continue
@@ -3489,6 +3499,7 @@ def _api2_payload(
         "retrieval_score",
         "retrieved_text",
         "provenance",
+        "dictionary_version",
     }
 
     def compact_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3790,6 +3801,7 @@ def _resolved_candidates_for_pipeline(
             "match_type": match_type,
             "review_status": candidate.review_status,
             "retrieval_score": match.retrieval_score,
+            "dictionary_version": match.dictionary_version,
         }
         if evidence.scope != "exact_raw_span":
             translated_span = evidence.translated_query_span
@@ -3826,6 +3838,41 @@ def _resolved_candidates_for_pipeline(
     return projected, resolution
 
 
+def _legacy_field_evidence_segments(field: Any) -> set[str]:
+    if not isinstance(field, dict):
+        return set()
+    return {
+        str(item.get("segment_id"))
+        for item in field.get("evidence", [])
+        if isinstance(item, dict) and item.get("segment_id") is not None
+    }
+
+
+def _compact_field_evidence_segments(
+    field: Any,
+    facts: dict[str, Any],
+) -> set[str]:
+    if not isinstance(field, dict):
+        return set()
+    segments: set[str] = set()
+    for fact_ref in field.get("fact_refs", []):
+        fact = facts.get(str(fact_ref))
+        if not isinstance(fact, dict):
+            continue
+        segments.update(
+            str(segment_id)
+            for segment_id in fact.get("segments", [])
+            if isinstance(segment_id, str)
+        )
+    return segments
+
+
+def _comparison_text(value: Any, *, mentioned: bool) -> str:
+    if not mentioned:
+        return ""
+    return " ".join(str(value or "").split()).casefold()
+
+
 def run_clinical_workflow(
     whisper_payload: dict[str, Any],
     *,
@@ -3835,9 +3882,17 @@ def run_clinical_workflow(
     medical_query_resolver: Any | None = None,
     preserve_unsupported: bool = False,
     include_query_resolution_summary: bool = False,
+    compact_v3_mode: str = "off",
 ) -> dict[str, Any]:
     from .contracts import validate_whisper_payload
+    from .candidate_snapshot import snapshots_from_api3_document
+    from .compact_primary import candidate_field_routes, project_compact_primary_draft
     from .query_expansion import run_query_expansion
+
+    compact_v3_mode = str(compact_v3_mode or "off").strip().casefold()
+    if compact_v3_mode not in {"off", "compare", "primary"}:
+        raise ValueError("compact_v3_mode must be off, compare, or primary")
+    compact_v3_primary = compact_v3_mode == "primary"
 
     def telemetry_number(value: object, default: float = 0.0) -> float:
         if (
@@ -3879,7 +3934,7 @@ def run_clinical_workflow(
         return extracted, round((time.perf_counter() - started) * 1000, 3)
 
     query_expansion, measured_translation_ms = run_translation_stage()
-    if staged_extraction:
+    if staged_extraction and not compact_v3_primary:
         translations = {
             str(item.get("segment_id")): str(
                 item.get("translated_text_en") or ""
@@ -4084,6 +4139,9 @@ def run_clinical_workflow(
     if isinstance(enriched_query_expansion, dict):
         query_expansion = enriched_query_expansion
     api2_document: dict[str, Any] | None = None
+    api2_payload: dict[str, Any] | None = None
+    compact_primary_result: dict[str, Any] | None = None
+    compact_primary_snapshots: dict[str, dict[str, Any]] = {}
     clinical_extraction_started = time.perf_counter()
     try:
         api2_payload = _api2_payload(
@@ -4091,14 +4149,67 @@ def run_clinical_workflow(
             api3_document,
             query_expansion,
         )
-        if staged_extraction and extracted_record_stage is not None:
+        if compact_v3_primary:
+            generate_compact = getattr(
+                clinical_extractor,
+                "generate_compact_record",
+                None,
+            )
+            if not callable(generate_compact):
+                generate_compact = getattr(
+                    clinical_extractor,
+                    "compare_compact_record",
+                    None,
+                )
+            if not callable(generate_compact):
+                raise RuntimeError("Compact v3 primary generation is unavailable")
+            metadata = (
+                api3_document.get("metadata")
+                if isinstance(api3_document.get("metadata"), dict)
+                else {}
+            )
+            created_at = metadata.get("created_at")
+            compact_primary_snapshots = snapshots_from_api3_document(
+                api3_document,
+                request_id=f"local-primary:{created_at or 'undated'}",
+                created_at=created_at if isinstance(created_at, str) else None,
+            )
+            compact_primary_result = generate_compact(
+                api2_payload,
+                compact_primary_snapshots,
+            )
+            if not isinstance(compact_primary_result, dict):
+                raise ValueError("Compact v3 generator returned an invalid contract")
+            compact_record = compact_primary_result.get("record")
+            compact_validation = compact_primary_result.get("validation")
+            if not isinstance(compact_record, dict) or not isinstance(
+                compact_validation, dict
+            ):
+                raise ValueError("Compact v3 generator returned an invalid contract")
+            api2_document = {
+                "schema_version": "clinical-record-v2",
+                "clinical_record": {},
+                "unresolved_questions": [],
+                "validation_warnings": [],
+                "candidate_decisions": [],
+                "draft_suggestions": [],
+                "metadata": {
+                    "model": getattr(clinical_extractor, "model_name", None),
+                    "prompt_version": compact_primary_result.get("prompt_version"),
+                    "candidate_prompt_version": None,
+                    "draft_normalization_prompt_version": None,
+                },
+            }
+        elif staged_extraction and extracted_record_stage is not None:
             api2_document = staged_finalize_record(
                 extracted_record_stage,
                 api2_payload,
             )
         else:
             api2_document = clinical_extractor.extract(api2_payload)
-        if isinstance(api2_document, dict):
+        if not isinstance(api2_document, dict):
+            raise ValueError("clinical extractor returned an invalid contract")
+        if not compact_v3_primary:
             stage_errors = api2_document.pop("stage_errors", None)
             if isinstance(stage_errors, list):
                 for stage_error in stage_errors:
@@ -4122,8 +4233,6 @@ def run_clinical_workflow(
                 preserve_unsupported=preserve_unsupported,
                 translated_segments=query_expansion.get("translated_segments"),
             )
-        else:
-            raise ValueError("clinical extractor returned an invalid contract")
     except Exception as error:
         api2_document = None
         errors.append(
@@ -4144,12 +4253,207 @@ def run_clinical_workflow(
     processing_status = (
         "partial" if errors or api3_status == "partial" else "completed"
     )
+    if compact_primary_result is not None:
+        compact_processing_status = str(
+            (compact_primary_result.get("validation") or {}).get(
+                "processing_status", "completed"
+            )
+        )
+        if compact_processing_status in {"partial", "failed"}:
+            processing_status = compact_processing_status
     candidate_decisions = _candidate_decisions(api2_document, api3_document)
     if api2_document is not None:
         api2_document["candidate_decisions"] = _api2_candidate_decisions(
             candidate_decisions
         )
     audit = _workflow_audit(api3_document, api2_document)
+    translated_segments = (
+        query_expansion.get("translated_segments")
+        if isinstance(query_expansion.get("translated_segments"), list)
+        else None
+    )
+    if compact_primary_result is not None:
+        draft = project_compact_primary_draft(
+            compact_primary_result["record"],
+            compact_primary_result["validation"],
+            api3_document,
+            translated_segments,
+        )
+        candidate_reviews = _review_items(
+            api3_document,
+            candidate_decisions,
+            {},
+        )
+        routes = candidate_field_routes(
+            compact_primary_result["record"],
+            compact_primary_snapshots,
+        )
+        for item in candidate_reviews:
+            route = routes.get(
+                (str(item.get("segment_id") or ""), int(str(item["id"]).rsplit(":", 1)[-1]))
+            ) if str(item.get("id") or "").rsplit(":", 1)[-1].isdigit() else None
+            if route is not None:
+                item["field_id"] = route
+            draft["review_items"].append(item)
+            field = draft["fields"].get(str(item.get("field_id") or ""))
+            if isinstance(field, dict):
+                field["status"] = "needs_review"
+                field["suggestion_status"] = "UNRESOLVED"
+    else:
+        draft = build_draft(
+            api2_document,
+            api3_document,
+            candidate_decisions,
+            translated_segments,
+        )
+    compact_comparison: dict[str, Any] | None = None
+    if compact_v3_mode == "compare":
+        started = time.perf_counter()
+        compare = getattr(clinical_extractor, "compare_compact_record", None)
+        try:
+            if not callable(compare) or api2_payload is None:
+                raise RuntimeError("Compact v3 comparison is unavailable")
+            metadata = (
+                api3_document.get("metadata")
+                if isinstance(api3_document.get("metadata"), dict)
+                else {}
+            )
+            created_at = metadata.get("created_at")
+            request_id = f"local-compare:{created_at or 'undated'}"
+            snapshots = snapshots_from_api3_document(
+                api3_document,
+                request_id=request_id,
+                created_at=created_at if isinstance(created_at, str) else None,
+            )
+            compact_result = compare(api2_payload, snapshots)
+            compact_record = (
+                compact_result.get("record")
+                if isinstance(compact_result, dict)
+                and isinstance(compact_result.get("record"), dict)
+                else {}
+            )
+            compact_fields = (
+                compact_record.get("fields")
+                if isinstance(compact_record.get("fields"), dict)
+                else {}
+            )
+            compact_facts = (
+                compact_record.get("facts")
+                if isinstance(compact_record.get("facts"), dict)
+                else {}
+            )
+            legacy_fields = (
+                draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
+            )
+            field_comparison: dict[str, Any] = {}
+            mismatch_field_ids: list[str] = []
+            evidence_mismatch_field_ids: list[str] = []
+            for canonical_id, legacy_id in _CANONICAL_TO_LEGACY_FIELD_ID.items():
+                legacy_field = legacy_fields.get(legacy_id)
+                compact_field = compact_fields.get(canonical_id)
+                v2_text = (
+                    legacy_field.get("value")
+                    if isinstance(legacy_field, dict)
+                    else None
+                )
+                v3_text = (
+                    compact_field.get("text")
+                    if isinstance(compact_field, dict)
+                    else None
+                )
+                v2_mentioned = (
+                    isinstance(legacy_field, dict)
+                    and legacy_field.get("status") not in {"empty", "unknown"}
+                    and bool(str(v2_text or "").strip())
+                )
+                v3_mentioned = (
+                    isinstance(compact_field, dict)
+                    and compact_field.get("generation_status") == "GENERATED"
+                    and bool(str(v3_text or "").strip())
+                )
+                normalized_v2 = _comparison_text(
+                    v2_text,
+                    mentioned=v2_mentioned,
+                )
+                normalized_v3 = _comparison_text(
+                    v3_text,
+                    mentioned=v3_mentioned,
+                )
+                matches = normalized_v2 == normalized_v3
+                v2_segments = _legacy_field_evidence_segments(legacy_field)
+                v3_segments = _compact_field_evidence_segments(
+                    compact_field,
+                    compact_facts,
+                )
+                same_evidence = v2_segments == v3_segments
+                shared_evidence = bool(v2_segments & v3_segments)
+                if matches:
+                    comparison_class = "EXACT_MATCH"
+                elif v2_mentioned != v3_mentioned:
+                    comparison_class = "MISSINGNESS_MISMATCH"
+                elif same_evidence and v2_segments:
+                    comparison_class = "TEXT_VARIANT_SAME_EVIDENCE"
+                elif shared_evidence:
+                    comparison_class = "TEXT_VARIANT_SHARED_EVIDENCE"
+                elif not v2_segments and not v3_segments:
+                    comparison_class = "TEXT_VARIANT_NO_EVIDENCE"
+                else:
+                    comparison_class = "EVIDENCE_MISMATCH"
+                if not matches:
+                    mismatch_field_ids.append(canonical_id)
+                if comparison_class in {
+                    "MISSINGNESS_MISMATCH",
+                    "EVIDENCE_MISMATCH",
+                }:
+                    evidence_mismatch_field_ids.append(canonical_id)
+                field_comparison[canonical_id] = {
+                    "v2_text": v2_text,
+                    "compact_v3_text": v3_text,
+                    "matches": matches,
+                    "comparison_class": comparison_class,
+                    "v2_segment_ids": sorted(v2_segments),
+                    "compact_v3_segment_ids": sorted(v3_segments),
+                }
+            compact_comparison = {
+                "schema_version": "clinical-record-compact-comparison-v1",
+                "status": "completed",
+                "prompt_version": compact_result.get("prompt_version"),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "candidate_snapshot_count": len(snapshots),
+                "candidate_snapshots": list(snapshots.values()),
+                "record": compact_record,
+                "validation": compact_result.get("validation"),
+                "fields": field_comparison,
+                "mismatch_field_ids": mismatch_field_ids,
+                "evidence_mismatch_field_ids": evidence_mismatch_field_ids,
+            }
+        except Exception as error:
+            compact_comparison = {
+                "schema_version": "clinical-record-compact-comparison-v1",
+                "status": "unavailable",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "error_code": type(error).__name__,
+                "detail": (
+                    "Compact v3 comparison failed; the authoritative v2 draft "
+                    "was preserved"
+                ),
+            }
+    compact_primary_output: dict[str, Any] | None = None
+    if compact_primary_result is not None:
+        compact_primary_output = {
+            "schema_version": "clinical-record-compact-primary-v1",
+            "status": "completed",
+            "prompt_version": compact_primary_result.get("prompt_version"),
+            "elapsed_ms": telemetry.get("clinical_extraction_ms", 0.0),
+            "candidate_snapshot_count": len(compact_primary_snapshots),
+            "candidate_snapshots": list(compact_primary_snapshots.values()),
+            "record": compact_primary_result.get("record"),
+            "validation": compact_primary_result.get("validation"),
+        }
+        audit["references"]["compact_record_path"] = "$.compact_v3_primary.record"
+        audit["versions"]["compact_prompt"] = compact_primary_result.get(
+            "prompt_version"
+        )
     api3_document.pop("metadata", None)
     if api2_document is not None:
         api2_document.pop("metadata", None)
@@ -4161,14 +4465,7 @@ def run_clinical_workflow(
         "api2": api2_document,
         "candidate_decisions": candidate_decisions,
         "audit": audit,
-        "draft": build_draft(
-            api2_document,
-            api3_document,
-            candidate_decisions,
-            query_expansion.get("translated_segments")
-            if isinstance(query_expansion.get("translated_segments"), list)
-            else None,
-        ),
+        "draft": draft,
         "errors": errors,
         "telemetry": {
             key: round(value, 3) if isinstance(value, float) else value
@@ -4177,5 +4474,9 @@ def run_clinical_workflow(
     }
     if include_query_resolution_summary and query_resolution_summary is not None:
         result["query_resolution"] = query_resolution_summary
+    if compact_comparison is not None:
+        result["compact_v3_comparison"] = compact_comparison
+    if compact_primary_output is not None:
+        result["compact_v3_primary"] = compact_primary_output
     return result
 

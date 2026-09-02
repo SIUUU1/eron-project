@@ -95,6 +95,7 @@
             "query_expansion_path": {"const": "$.query_expansion"},
             "segments_path": {"const": "$.api3.segments"},
             "clinical_record_path": {"const": "$.api2.clinical_record"},
+            "compact_record_path": {"const": "$.compact_v3_primary.record"},
             "candidate_decisions_path": {"const": "$.candidate_decisions"},
             "errors_path": {"const": "$.errors"}
           },
@@ -119,6 +120,7 @@
             "clinical_prompt": {"type": ["string", "null"]},
             "candidate_prompt": {"type": ["string", "null"]},
             "draft_normalization_prompt": {"type": ["string", "null"]},
+            "compact_prompt": {"type": ["string", "null"]},
             "alias_db": {"type": ["integer", "null"]}
           },
           "additionalProperties": false
@@ -259,4 +261,3 @@
     }
   }
 }
-

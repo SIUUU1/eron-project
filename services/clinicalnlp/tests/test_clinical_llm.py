@@ -124,18 +124,45 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         self.assertIn("Repair", repair_messages[0]["content"])
         self.assertIn("unexpected", repair_messages[1]["content"])
 
-    def test_rejects_output_that_remains_invalid_after_one_repair(self):
-        server, thread, captured = self._serve(["not json", '{"ok": "yes"}'])
+    def test_regenerates_once_from_original_context_when_repair_is_invalid(self):
+        server, thread, captured = self._serve(
+            ["not json", '{"ok": "yes"}', '{"ok": true}']
+        )
         try:
             client = OllamaCloudClinicalLlmClient(
                 f"http://127.0.0.1:{server.server_port}",
                 model_name="gemma4:31b",
                 api_key="test-secret",
             )
-            with self.assertRaisesRegex(
-                InvalidClinicalLlmOutput,
-                "no valid test output JSON after one repair",
-            ):
+            result = client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=_OK_RESPONSE_FORMAT,
+                output_label="test output",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(
+            captured[2]["payload"]["messages"],
+            captured[0]["payload"]["messages"],
+        )
+
+    def test_rejects_output_that_remains_invalid_after_bounded_recovery(self):
+        server, thread, captured = self._serve(
+            ["not json", '{"ok": "yes"}', '{"ok": "still yes"}']
+        )
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            with self.assertRaises(InvalidClinicalLlmOutput) as raised:
                 client.generate_json(
                     system_prompt="Return JSON.",
                     user_payload={"synthetic": True},
@@ -147,6 +174,147 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+        self.assertEqual(len(captured), 3)
+        detail = str(raised.exception)
+        self.assertIn("no valid test output JSON after one repair", detail)
+        self.assertIn("initial_done_reason=stop", detail)
+        self.assertIn("initial_issue=no complete JSON object", detail)
+        self.assertIn("repair_done_reason=stop", detail)
+        self.assertIn("repair_issue=$.ok has the wrong type", detail)
+        self.assertIn("regeneration_done_reason=stop", detail)
+        self.assertIn("regeneration_issue=$.ok has the wrong type", detail)
+
+    def test_repairs_invalid_dynamic_one_of_candidate_reference(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "candidate_fact",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["facts"],
+                    "properties": {
+                        "facts": {
+                            "type": "object",
+                            "maxProperties": 1,
+                            "additionalProperties": {
+                                "oneOf": [{
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["type", "candidate_ref"],
+                                    "properties": {
+                                        "type": {"const": "MATCHED_TERM"},
+                                        "candidate_ref": {
+                                            "type": "string",
+                                            "enum": ["cr_allowed"],
+                                        },
+                                    },
+                                }, {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["type", "text"],
+                                    "properties": {
+                                        "type": {"const": "NARRATIVE"},
+                                        "text": {"type": "string"},
+                                    },
+                                }]
+                            },
+                        }
+                    },
+                },
+            },
+        }
+        server, thread, captured = self._serve([
+            '{"facts":{"f1":{"type":"MATCHED_TERM","candidate_ref":"cr_invented"}}}',
+            '{"facts":{"f1":{"type":"MATCHED_TERM","candidate_ref":"cr_allowed"}}}',
+        ])
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            result = client.generate_json(
+                system_prompt="Return one candidate fact.",
+                user_payload={"synthetic": True},
+                response_format=response_format,
+                output_label="candidate fact",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(
+            result["facts"]["f1"]["candidate_ref"],
+            "cr_allowed",
+        )
+        self.assertEqual(len(captured), 2)
+
+    def test_repairs_array_missing_required_contains_item(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "evidence_segments",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["candidate_ref", "segments"],
+                    "properties": {
+                        "candidate_ref": {
+                            "type": "string",
+                            "enum": ["cr_one", "cr_two"],
+                        },
+                        "segments": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["seg_0001", "seg_0002"],
+                            },
+                        }
+                    },
+                    "allOf": [{
+                        "if": {
+                            "required": ["candidate_ref"],
+                            "properties": {
+                                "candidate_ref": {"const": "cr_one"}
+                            },
+                        },
+                        "then": {
+                            "properties": {
+                                "segments": {"contains": {"const": "seg_0001"}}
+                            }
+                        },
+                    }],
+                },
+            },
+        }
+        server, thread, captured = self._serve(
+            [
+                '{"candidate_ref":"cr_one","segments":["seg_0002"]}',
+                '{"candidate_ref":"cr_one","segments":["seg_0001","seg_0002"]}',
+            ]
+        )
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            result = client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=response_format,
+                output_label="evidence segments",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(result["segments"], ["seg_0001", "seg_0002"])
         self.assertEqual(len(captured), 2)
 
 

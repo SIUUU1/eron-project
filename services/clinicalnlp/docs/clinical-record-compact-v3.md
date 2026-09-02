@@ -1,12 +1,19 @@
 # Clinical Record Compact v3
 
-Status: internal foundation, not connected to the production workflow.
+Status: internal foundation with validation hardening; not connected to the
+production workflow or public UI response yet.
 
 ## Purpose
 
 Compact v3 is the internal Gemma output contract for the next clinical-record
 workflow. It keeps clinical interpretation in the model while keeping evidence,
 terminology provenance, and deterministic validation in backend code.
+
+High-risk facts may also carry a bounded `fact_type`: `EXAM`, `ASSESSMENT`,
+`PLAN`, `OUTCOME`, or `UNKNOWN`. This is a semantic act classification, not
+speaker diarization. It is produced in the existing clinical extraction call;
+no additional model call is permitted. `UNKNOWN` preserves the draft and raises
+the referencing high-risk field to `REVIEW_REQUIRED`.
 
 This contract does not replace `clinical-workflow-v2` yet. The existing workflow
 and frontend response remain unchanged while individual emergency-record fields
@@ -233,14 +240,15 @@ Other. Each structured finding carries its exact source phrase and one
 assertion:
 
 - `PRESENT`: an observed abnormal finding or an explicitly stated normal result;
-- `ABSENT`: an examined abnormal finding explicitly found to be absent; and
+- `NONE`: an examined abnormal finding explicitly found to be absent; and
 - `UNCERTAIN`: an attempted examination that was limited or indeterminate.
 
 Vital measurements remain in structured vitals, and diagnoses or causal
 interpretations are excluded from the examination display. No mentioned
 examination produces `text: null` and an empty finding list.
 
-Backend validation preserves the model-written text and checks the supported
+Backend validation preserves the model-written text and checks `fact_type`
+(`EXAM` or reviewable `UNKNOWN`), the supported
 system set, system-line rendering, assertion agreement, source evidence, and
 the presence of objective examination context in the current or immediately
 preceding dialogue segment. A patient symptom projected as an examination
@@ -270,7 +278,8 @@ consultation, disposition, follow-up, or safety-net action belongs here. No
 mentioned plan produces `text: null` and an empty item list.
 
 Backend validation preserves the model-written text and checks category
-rendering, status/assertion agreement, source grounding, clinician plan context,
+rendering, `fact_type` (`PLAN` or reviewable `UNKNOWN`), status/assertion
+agreement, source grounding, clinician plan context,
 and whether every displayed action is supported by the category's evidence. An
 unstated action raises non-destructive G08 `BLOCK`; conditional content remains
 visible as `REVIEW_REQUIRED` without becoming a definite order.
@@ -312,3 +321,30 @@ code would cross the responsibility seam.
 4. Run fixed and unseen Whisper JSON regression tests behind an opt-in mode.
 5. Switch the default only after all fields and the existing UI contract pass.
 6. Remove legacy semantic string assemblers in a separate cleanup change.
+
+## Local rollout modes
+
+`CLINICALNLP_COMPACT_V3_MODE` accepts `off`, `compare`, or `primary` and defaults
+to `off`. `compare` adds one Compact v3 model call after terminology retrieval;
+the existing v2 draft remains authoritative and comparison failure is isolated
+inside `compact_v3_comparison`.
+
+`primary` skips the legacy clinical extraction, candidate-adjudication, and
+normalization model calls. It runs translation and terminology retrieval first,
+then generates one Compact v3 record and deterministically projects its
+model-authored field text and fact evidence into the existing v2 UI envelope.
+The adapter maps IDs and validation state only; it does not rewrite clinical
+prose. A generation failure returns a partial response while preserving the
+translated conversation and terminology results.
+
+`CLINICALNLP_COMPACT_V3_COMPARE=true` remains a deprecated compatibility switch
+when the new mode variable is absent.
+
+Only candidates with an exact RAW source span and a non-empty terminology data
+version are sealed as candidate snapshots. Translation-only or unversioned
+results cannot receive a fabricated `candidate_ref`.
+
+For every sealed reference, the generated JSON Schema conditionally requires
+the fact's `segments` array to contain that snapshot's immutable `segment_id`.
+The same binding is checked again after generation; a mismatch is never repaired
+by rewriting or deleting the model-authored field text.

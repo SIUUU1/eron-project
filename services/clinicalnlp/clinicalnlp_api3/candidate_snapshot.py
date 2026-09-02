@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -166,8 +167,132 @@ def verify_candidate_snapshot(snapshot: Mapping[str, Any]) -> bool:
     )
 
 
+def snapshots_from_api3_document(
+    document: Mapping[str, Any],
+    *,
+    request_id: str,
+    created_at: str | None = None,
+    max_annotations: int = 16,
+    max_candidates_per_annotation: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """Seal candidates only when RAW offsets and a data version are auditable."""
+
+    if not isinstance(document, Mapping):
+        return {}
+    timestamp = created_at or datetime.now(timezone.utc).isoformat()
+    snapshots: dict[str, dict[str, Any]] = {}
+    annotation_count = 0
+    for segment in document.get("segments", []):
+        if not isinstance(segment, Mapping):
+            continue
+        segment_id = segment.get("id")
+        raw_text = segment.get("raw_text")
+        if not isinstance(segment_id, str) or not isinstance(raw_text, str):
+            continue
+        for position, annotation in enumerate(segment.get("annotations", [])):
+            if annotation_count >= max_annotations:
+                return snapshots
+            if not isinstance(annotation, Mapping):
+                continue
+            span = annotation.get("source_span")
+            if not isinstance(span, Mapping):
+                continue
+            source_span = span.get("text")
+            start = span.get("start_char")
+            end = span.get("end_char")
+            if (
+                not isinstance(source_span, str)
+                or not source_span
+                or not isinstance(start, int)
+                or isinstance(start, bool)
+                or not isinstance(end, int)
+                or isinstance(end, bool)
+                or start < 0
+                or end <= start
+                or end > len(raw_text)
+                or raw_text[start:end] != source_span
+            ):
+                continue
+            candidates = annotation.get("candidates")
+            if not isinstance(candidates, list):
+                continue
+            annotation_count += 1
+            search_terms = annotation.get("search_terms_en")
+            translated_query = source_span
+            if isinstance(search_terms, list):
+                translated_query = next(
+                    (
+                        value.strip()
+                        for value in search_terms
+                        if isinstance(value, str) and value.strip()
+                    ),
+                    source_span,
+                )
+            for rank, candidate in enumerate(
+                candidates[:max_candidates_per_annotation], start=1
+            ):
+                if not isinstance(candidate, Mapping):
+                    continue
+                candidate_id = candidate.get("entity_id")
+                dictionary_version = candidate.get("dictionary_version")
+                canonical = candidate.get("canonical_en") or candidate.get(
+                    "canonical_ko"
+                )
+                score = candidate.get("retrieval_score")
+                source = candidate.get("match_type")
+                if (
+                    not isinstance(candidate_id, str)
+                    or not candidate_id
+                    or not isinstance(dictionary_version, str)
+                    or not dictionary_version
+                    or not isinstance(canonical, str)
+                    or not canonical
+                    or not isinstance(source, str)
+                    or not source
+                    or isinstance(score, bool)
+                    or not isinstance(score, (int, float))
+                ):
+                    continue
+                provenance = candidate.get("provenance")
+                provenance = provenance if isinstance(provenance, Mapping) else {}
+                semantic_types = provenance.get("semantic_types", [])
+                if not isinstance(semantic_types, list):
+                    semantic_types = []
+                try:
+                    sealed = seal_candidate_snapshot(
+                        {
+                            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+                            "request_id": request_id,
+                            "query_id": f"{segment_id}:a{position}:c{rank}",
+                            "segment_id": segment_id,
+                            "source_span": source_span,
+                            "source_start": start,
+                            "source_end": end,
+                            "translated_query": translated_query,
+                            "candidate_id": candidate_id,
+                            "canonical": canonical,
+                            "concept_id": provenance.get("cui") or candidate_id,
+                            "semantic_types": [
+                                value
+                                for value in semantic_types
+                                if isinstance(value, str) and value.strip()
+                            ],
+                            "retrieval_source": source,
+                            "retrieval_score": float(score),
+                            "rank": rank,
+                            "versions": {"dictionary": dictionary_version},
+                            "created_at": timestamp,
+                        }
+                    )
+                except ValueError:
+                    continue
+                snapshots[sealed["candidate_ref"]] = sealed
+    return snapshots
+
+
 __all__ = [
     "SNAPSHOT_SCHEMA_VERSION",
     "seal_candidate_snapshot",
+    "snapshots_from_api3_document",
     "verify_candidate_snapshot",
 ]

@@ -28,6 +28,9 @@ CANONICAL_FIELD_IDS = (
 FACT_TYPES = frozenset(
     {"MATCHED_TERM", "UNMATCHED_TERM", "NARRATIVE", "MEASUREMENT"}
 )
+CLINICAL_ACT_VALUES = frozenset(
+    {"EXAM", "ASSESSMENT", "PLAN", "OUTCOME", "UNKNOWN"}
+)
 ASSERTION_VALUES = frozenset({"PRESENT", "DENIED", "UNCERTAIN"})
 GENERATION_STATUS_VALUES = frozenset(
     {"GENERATED", "NOT_MENTIONED", "FAILED"}
@@ -40,6 +43,12 @@ MAX_FACT_REFS_PER_FIELD = 128
 MAX_FIELD_TEXT_LENGTH = 4096
 
 _STATUS_RANK = {value: index for index, value in enumerate(VALIDATION_STATUS_VALUES)}
+_FIELD_CLINICAL_ACT = {
+    "physical_examination": "EXAM",
+    "impression": "ASSESSMENT",
+    "treatment_plan": "PLAN",
+    "outcome": "OUTCOME",
+}
 
 
 def _unique_strings(values: Iterable[str]) -> list[str]:
@@ -64,15 +73,20 @@ def _candidate_ref_schema(candidate_refs: Iterable[str]) -> dict[str, Any]:
 
 def _fact_schemas(
     segment_ids: Iterable[str],
-    candidate_refs: Iterable[str],
+    candidate_refs: Iterable[str] | Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    segments = {
-        "type": "array",
-        "minItems": 1,
-        "maxItems": MAX_SEGMENTS_PER_FACT,
-        "uniqueItems": True,
-        "items": _segment_schema(segment_ids),
-    }
+    candidate_ref_values = _unique_strings(candidate_refs)
+    segment_values = _unique_strings(segment_ids)
+
+    def segment_schema() -> dict[str, Any]:
+        return {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": MAX_SEGMENTS_PER_FACT,
+            "uniqueItems": True,
+            "items": _segment_schema(segment_values),
+        }
+
     assertion = {"type": "string", "enum": sorted(ASSERTION_VALUES)}
     supersedes = {"type": "string", "minLength": 1}
     variants: list[dict[str, Any]] = []
@@ -88,20 +102,57 @@ def _fact_schemas(
             "required": ["type", "assertion", "segments", *required],
             "properties": {
                 "type": {"const": fact_type},
+                "fact_type": {
+                    "type": "string",
+                    "enum": sorted(CLINICAL_ACT_VALUES),
+                },
                 "assertion": assertion,
-                "segments": segments,
+                "segments": segment_schema(),
                 "supersedes_fact_id": supersedes,
                 **extra,
             },
         }
 
-    variants.append(
-        variant(
+    if isinstance(candidate_refs, Mapping):
+        matched_variant = variant(
             "MATCHED_TERM",
             ["candidate_ref"],
-            {"candidate_ref": _candidate_ref_schema(candidate_refs)},
+            {"candidate_ref": _candidate_ref_schema(candidate_ref_values)},
         )
-    )
+        bindings: list[dict[str, Any]] = []
+        for candidate_ref in candidate_ref_values:
+            snapshot = candidate_refs.get(candidate_ref)
+            snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+            required_segment_id = snapshot.get("segment_id")
+            if required_segment_id in segment_values:
+                bindings.append(
+                    {
+                        "if": {
+                            "required": ["candidate_ref"],
+                            "properties": {
+                                "candidate_ref": {"const": candidate_ref}
+                            },
+                        },
+                        "then": {
+                            "properties": {
+                                "segments": {
+                                    "contains": {"const": required_segment_id}
+                                }
+                            }
+                        },
+                    },
+                )
+        if bindings:
+            matched_variant["allOf"] = bindings
+        variants.append(matched_variant)
+    elif candidate_ref_values:
+        variants.append(
+            variant(
+                "MATCHED_TERM",
+                ["candidate_ref"],
+                {"candidate_ref": _candidate_ref_schema(candidate_ref_values)},
+            )
+        )
     variants.append(
         variant(
             "UNMATCHED_TERM",
@@ -163,7 +214,7 @@ def _field_schema() -> dict[str, Any]:
 
 def compact_record_response_format(
     segment_ids: Iterable[str],
-    candidate_refs: Iterable[str],
+    candidate_refs: Iterable[str] | Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Return the bounded Gemma contract for the common Compact v3 envelope.
 
@@ -283,6 +334,16 @@ def _fact_shape_issues(
                 "INVALID_FACT_CONTRACT",
                 "BLOCK",
                 "fact has an unsupported assertion",
+                fact_id=fact_id,
+            )
+        )
+    clinical_act = fact.get("fact_type")
+    if clinical_act is not None and clinical_act not in CLINICAL_ACT_VALUES:
+        issues.append(
+            _issue(
+                "INVALID_FACT_CONTRACT",
+                "BLOCK",
+                "fact has an unsupported fact_type",
                 fact_id=fact_id,
             )
         )
@@ -422,6 +483,35 @@ def _conflict_issues(
     return issues
 
 
+def _supersedes_cycle_fact_ids(facts: Mapping[str, Any]) -> set[str]:
+    """Return every fact participating in a supersedes cycle."""
+
+    edges = {
+        str(fact_id): str(fact.get("supersedes_fact_id"))
+        for fact_id, fact in facts.items()
+        if isinstance(fact, Mapping)
+        and isinstance(fact.get("supersedes_fact_id"), str)
+        and fact.get("supersedes_fact_id") in facts
+    }
+    cycles: set[str] = set()
+    visited: set[str] = set()
+    for start in edges:
+        if start in visited:
+            continue
+        path: list[str] = []
+        positions: dict[str, int] = {}
+        current = start
+        while current in edges and current not in visited:
+            if current in positions:
+                cycles.update(path[positions[current] :])
+                break
+            positions[current] = len(path)
+            path.append(current)
+            current = edges[current]
+        visited.update(path)
+    return cycles
+
+
 def validate_compact_record(
     document: Mapping[str, Any],
     *,
@@ -479,6 +569,7 @@ def validate_compact_record(
                 )
             )
 
+    cyclic_fact_ids = _supersedes_cycle_fact_ids(facts)
     for fact_id, fact in facts.items():
         if not isinstance(fact_id, str) or not fact_id:
             issues.append(
@@ -533,16 +624,26 @@ def validate_compact_record(
                         fact_id=str(fact_id),
                     )
                 )
+        if str(fact_id) in cyclic_fact_ids:
+            issues.append(
+                _issue(
+                    "INVALID_FACT_RELATION",
+                    "BLOCK",
+                    "supersedes_fact_id must not form a cycle",
+                    fact_id=str(fact_id),
+                )
+            )
     issues.extend(_conflict_issues(facts, snapshots))
 
     fact_to_fields: dict[str, set[str]] = defaultdict(set)
     field_statuses = {field_id: "PASS" for field_id in CANONICAL_FIELD_IDS}
-    failed_fields = 0
+    failed_field_ids: set[str] = set()
     generated_fields = 0
 
     for field_id in CANONICAL_FIELD_IDS:
         field = fields.get(field_id)
         if not isinstance(field, Mapping):
+            failed_field_ids.add(field_id)
             issues.append(
                 _issue(
                     "INVALID_FIELD_CONTRACT",
@@ -557,6 +658,7 @@ def validate_compact_record(
         refs = field.get("fact_refs")
         error_code = field.get("error_code")
         if status not in GENERATION_STATUS_VALUES:
+            failed_field_ids.add(field_id)
             issues.append(
                 _issue(
                     "INVALID_FIELD_CONTRACT",
@@ -638,7 +740,7 @@ def validate_compact_record(
                     )
                 )
         elif status == "FAILED":
-            failed_fields += 1
+            failed_field_ids.add(field_id)
             if text not in (None, "") or refs:
                 issues.append(
                     _issue(
@@ -667,6 +769,32 @@ def validate_compact_record(
                     )
                 )
 
+        expected_act = _FIELD_CLINICAL_ACT.get(field_id)
+        if status == "GENERATED" and expected_act is not None:
+            referenced_acts = {
+                str(facts[ref].get("fact_type") or "UNKNOWN")
+                for ref in refs
+                if ref in facts and isinstance(facts[ref], Mapping)
+            }
+            if not referenced_acts or "UNKNOWN" in referenced_acts:
+                issues.append(
+                    _issue(
+                        "UNRESOLVED_FACT_TYPE",
+                        "REVIEW_REQUIRED",
+                        "high-risk field contains a fact with unresolved authorship semantics",
+                        field_ids=[field_id],
+                    )
+                )
+            unexpected_acts = referenced_acts - {expected_act, "UNKNOWN"}
+            if unexpected_acts:
+                issues.append(
+                    _issue(
+                        "FACT_TYPE_FIELD_MISMATCH",
+                        "REVIEW_REQUIRED",
+                        "fact_type is not allowed for this high-risk field",
+                        field_ids=[field_id],
+                    )
+                )
     unknown_fields = sorted(set(fields) - set(CANONICAL_FIELD_IDS))
     for field_id in unknown_fields:
         issues.append(
@@ -704,6 +832,7 @@ def validate_compact_record(
         document_status = _status_max(
             document_status, str(issue.get("severity") or "PASS")
         )
+    failed_fields = len(failed_field_ids)
     if failed_fields == len(CANONICAL_FIELD_IDS):
         processing_status = "failed"
     elif failed_fields:
@@ -730,6 +859,7 @@ def validate_compact_record(
 __all__ = [
     "ASSERTION_VALUES",
     "CANONICAL_FIELD_IDS",
+    "CLINICAL_ACT_VALUES",
     "FACT_TYPES",
     "GENERATION_STATUS_VALUES",
     "SCHEMA_VERSION",

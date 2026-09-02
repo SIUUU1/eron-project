@@ -21,6 +21,10 @@ from .draft_normalization import (
     build_draft_normalization_plan,
     ground_model_draft_suggestions,
 )
+from .compact_record_v3 import (
+    compact_record_response_format,
+    validate_compact_record,
+)
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -31,13 +35,17 @@ DEFAULT_CANDIDATE_PROMPT = (
 DEFAULT_DRAFT_NORMALIZATION_PROMPT = (
     PROJECT_ROOT / "prompts" / "draft_normalization_v1.txt"
 )
+DEFAULT_COMPACT_OUTPUT_PROMPT = (
+    PROJECT_ROOT / "prompts" / "compact_record_output_v3.txt"
+)
 DEFAULT_MAX_OUTPUT_TOKENS = 3072
 MAX_CANDIDATES_PER_ANNOTATION = 5
 MAX_MODEL_CANDIDATES_PER_ANNOTATION = 3
 MAX_MODEL_CANDIDATE_ANNOTATIONS = 16
-CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.11"
+CLINICAL_PROMPT_VERSION = "clinical-record-extraction-v2.12"
 CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
+COMPACT_PROMPT_VERSION = "clinical-record-compact-v3.2"
 
 
 def _json_candidates(
@@ -77,6 +85,7 @@ class LlamaServerClinicalExtractor:
         prompt_path: Path | None = None,
         candidate_prompt_path: Path | None = None,
         draft_normalization_prompt_path: Path | None = None,
+        compact_output_prompt_path: Path | None = None,
         llm_client: ClinicalLlmClient | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -94,6 +103,9 @@ class LlamaServerClinicalExtractor:
         )
         self.draft_normalization_prompt_path = Path(
             draft_normalization_prompt_path or DEFAULT_DRAFT_NORMALIZATION_PROMPT
+        )
+        self.compact_output_prompt_path = Path(
+            compact_output_prompt_path or DEFAULT_COMPACT_OUTPUT_PROMPT
         )
 
     @classmethod
@@ -281,6 +293,7 @@ class LlamaServerClinicalExtractor:
             "retrieval_score",
             "retrieved_text",
             "provenance",
+            "dictionary_version",
         }
         segments: list[dict[str, Any]] = []
         for segment in payload.get("segments", []):
@@ -338,6 +351,55 @@ class LlamaServerClinicalExtractor:
                 compact["annotations"] = annotations
             segments.append(compact)
         return {"segments": segments}
+
+    def generate_compact_record(
+        self,
+        payload: dict[str, Any],
+        candidate_snapshots: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Generate one validated Compact v3 clinical record."""
+
+        base_prompt = self.prompt_path.read_text(encoding="utf-8")
+        extraction_rules = base_prompt.split("Value V is", 1)[0].rstrip()
+        output_contract = self.compact_output_prompt_path.read_text(
+            encoding="utf-8"
+        )
+        model_payload = self._candidate_payload(payload)
+        model_payload["candidate_snapshots"] = list(candidate_snapshots.values())
+        segment_ids = [
+            segment.get("id")
+            for segment in model_payload.get("segments", [])
+            if isinstance(segment, dict) and isinstance(segment.get("id"), str)
+        ]
+        generated = self._generate_chunk(
+            f"{extraction_rules}\n\n{output_contract}",
+            model_payload,
+            response_format=compact_record_response_format(
+                segment_ids,
+                candidate_snapshots,
+            ),
+            required_key="fields",
+            required_type=dict,
+            output_label="Compact v3 clinical record",
+        )[0]
+        return {
+            "prompt_version": COMPACT_PROMPT_VERSION,
+            "record": generated,
+            "validation": validate_compact_record(
+                generated,
+                segment_ids=segment_ids,
+                candidate_snapshots=candidate_snapshots,
+            ),
+        }
+
+    def compare_compact_record(
+        self,
+        payload: dict[str, Any],
+        candidate_snapshots: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Backward-compatible entry point for the comparison-only mode."""
+
+        return self.generate_compact_record(payload, candidate_snapshots)
 
     @staticmethod
     def _has_candidate_annotations(payload: dict[str, Any]) -> bool:

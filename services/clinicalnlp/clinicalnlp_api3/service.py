@@ -47,6 +47,22 @@ def _boolean(values: Mapping[str, str], name: str, default: bool) -> bool:
     raise ConfigurationError(f"{name} must be true or false")
 
 
+def _compact_v3_mode(values: Mapping[str, str]) -> str:
+    explicit = str(values.get("CLINICALNLP_COMPACT_V3_MODE", "") or "").strip()
+    if explicit:
+        mode = explicit.casefold()
+        if mode not in {"off", "compare", "primary"}:
+            raise ConfigurationError(
+                "CLINICALNLP_COMPACT_V3_MODE must be off, compare, or primary"
+            )
+        return mode
+    return (
+        "compare"
+        if _boolean(values, "CLINICALNLP_COMPACT_V3_COMPARE", False)
+        else "off"
+    )
+
+
 @dataclass(frozen=True)
 class ServiceSettings:
     llm_provider: str
@@ -62,11 +78,18 @@ class ServiceSettings:
     query_max_tokens: int
     query_passes: int
     database_url: str
+    compact_v3_mode: str
     umls_enabled: bool
     umls_timeout_seconds: float
     umls_python: Path | None
     umls_worker: Path
     umls_cache_root: Path
+
+    @property
+    def compact_v3_compare(self) -> bool:
+        """Compatibility accessor for retained comparison-mode checks."""
+
+        return self.compact_v3_mode == "compare"
 
     @classmethod
     def from_environment(cls) -> "ServiceSettings":
@@ -149,6 +172,7 @@ class ServiceSettings:
                 1,
             ),
             database_url=database_url,
+            compact_v3_mode=_compact_v3_mode(values),
             umls_enabled=_boolean(values, "CLINICALNLP_UMLS_ENABLED", True),
             umls_timeout_seconds=_positive_float(
                 values,
@@ -297,6 +321,7 @@ def build_service_runtime(settings: ServiceSettings) -> ServiceRuntimeBundle:
         policy_evidence_provider=(
             policy_repository.retrieve if policy_repository is not None else None
         ),
+        compact_v3_mode=settings.compact_v3_mode,
     )
     return ServiceRuntimeBundle(
         runtime=runtime,

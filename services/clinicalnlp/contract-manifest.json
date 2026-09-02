@@ -6,13 +6,13 @@
       "path": "contracts/clinical-workflow-v2.schema.json",
       "kind": "json_schema",
       "version": "clinical-workflow-v2",
-      "sha256": "fe59f3d8e8d2feea97313d6288bc88731be3d160aa4154cf4d38692a29cd5550"
+      "sha256": "befa840306589b60ce6cb12554f7eb8cb6b72937d5d3938388e1a535cbdbb7ec"
     },
     {
       "path": "prompts/clinical_record_extraction_v2.txt",
       "kind": "prompt",
-      "version": "clinical-record-extraction-v2.11",
-      "sha256": "6d351486257702f49a774ea84113ba242fac86f25c1224629913de4c404a0fe9"
+      "version": "clinical-record-extraction-v2.12",
+      "sha256": "6ab1dc3e4370fc5c566ee1c05d97df2fc1e489d46d04674977835be4f3031cae"
     },
     {
       "path": "prompts/candidate_adjudication_v1.txt",
@@ -25,6 +25,12 @@
       "kind": "prompt",
       "version": "draft-normalization-v1",
       "sha256": "77a88ee1df3baa39d939d630d26e88a6f1d943893b9dd88b325db4732d219a19"
+    },
+    {
+      "path": "prompts/compact_record_output_v3.txt",
+      "kind": "prompt",
+      "version": "clinical-record-compact-v3.2",
+      "sha256": "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
     }
   ]
 }
