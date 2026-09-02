@@ -40,6 +40,30 @@ export interface DraftDialogueTurn {
   text: string;
 }
 
+const diagnosisListPrefix =
+  /^\s*(?:(?:\d+\s*[.)]\s*)?(?:추정\s*진단|주진단|부진단)\s*\d*\s*[:：-]?|\d+\s*[.)])\s*/i;
+
+/** Convert the model-authored impression display into ordered UI diagnosis rows. */
+export function clinicalRecordDiagnosisEntries(value: string): string[] {
+  const normalized = value.replace(/\r\n?/g, "\n").trim();
+  if (!normalized || normalized === "미확인") return [""];
+
+  const entries = normalized
+    .replace(
+      /;\s*(?=(?:(?:추정\s*진단|주진단|부진단)\s*\d*\s*[:：-]?|\d+\s*[.)]))/gi,
+      "\n",
+    )
+    .split(/(?:\n+|\s*[,;]\s*)/)
+    .map((entry) => entry.replace(diagnosisListPrefix, "").trim())
+    .filter(Boolean);
+
+  return entries.length > 0 ? entries : [""];
+}
+
+export function normalizeClinicalRecordImpression(value: string): string {
+  return clinicalRecordDiagnosisEntries(value).filter(Boolean).join("\n");
+}
+
 export function parseWhisperDraftJson(source: string): WhisperDraftRequest {
   const value: unknown = JSON.parse(source);
   if (
@@ -245,7 +269,7 @@ export function workflowDraftToEmergencyRecord(
     systemReview: fields.review_of_systems.value,
     physicalExam: fields.physical_examination.value,
     treatmentPlan: fields.treatment_plan.value,
-    impression: fields.impression.value,
+    impression: normalizeClinicalRecordImpression(fields.impression.value),
     outcome,
   };
 }

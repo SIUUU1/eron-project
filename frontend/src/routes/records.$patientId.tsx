@@ -26,6 +26,7 @@ import { toast } from "sonner";
 
 import {
   clinicalAudioTranscriptionErrorMessage,
+  clinicalRecordDiagnosisEntries,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -328,7 +329,7 @@ function RecordWorkflow({
     ? Math.round(((completeCount + reviewCount * 0.5) / fieldOrder.length) * 100)
     : 0;
 
-  const diagnosisEntries = (record.impression === "미확인" ? "" : record.impression).split("\n");
+  const diagnosisEntries = clinicalRecordDiagnosisEntries(record.impression);
   const diagnosisCount = diagnosisEntries.filter((diagnosis) => diagnosis.trim()).length;
   const nextDiagnosisIndex = selectedKcds.length;
   const nextDiagnosis = diagnosisEntries[nextDiagnosisIndex]?.trim() ?? "";

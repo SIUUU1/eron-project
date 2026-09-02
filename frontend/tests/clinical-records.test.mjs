@@ -4,6 +4,7 @@ import test from "node:test";
 import { ApiError } from "../src/api/client.ts";
 import {
   clinicalAudioTranscriptionErrorMessage,
+  clinicalRecordDiagnosisEntries,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -46,6 +47,22 @@ test("의료진이 선택한 후보는 초안 원문을 유지하고 새 줄에 
     value: "디오트로피움과 살부타몰 복용 중\nTiotropium",
     changed: true,
   });
+});
+
+test("복수 추정진단을 순서대로 주진단과 부진단 행으로 정규화한다", () => {
+  assert.deepEqual(
+    clinicalRecordDiagnosisEntries(
+      "추정진단1: hypertension; 추정진단2: diabetes mellitus\n3. 부진단 thyroid cancer",
+    ),
+    ["hypertension", "diabetes mellitus", "thyroid cancer"],
+  );
+  assert.deepEqual(clinicalRecordDiagnosisEntries("single diagnosis"), ["single diagnosis"]);
+  assert.deepEqual(
+    clinicalRecordDiagnosisEntries("Hypertension, Diabetes, Bacterial enteritis"),
+    ["Hypertension", "Diabetes", "Bacterial enteritis"],
+  );
+  assert.deepEqual(clinicalRecordDiagnosisEntries(""), [""]);
+  assert.deepEqual(clinicalRecordDiagnosisEntries("미확인"), [""]);
 });
 
 test("다른 후보를 선택하거나 제외하면 추가된 후보 줄만 교체하거나 제거한다", () => {
@@ -171,7 +188,10 @@ test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 �
         review_of_systems: field("review_of_systems", "호흡곤란 (+)"),
         physical_examination: field("physical_examination", "Tachypnea"),
         treatment_plan: field("treatment_plan", "산소 적용 및 모니터링"),
-        impression: field("impression", "폐렴 의증"),
+        impression: field(
+          "impression",
+          "추정진단1: 폐렴 의증; 추정진단2: 만성 폐쇄성 폐질환",
+        ),
         outcome: field("outcome", "입원"),
       },
     },
@@ -188,7 +208,7 @@ test("ClinicalNLP 초안의 모든 응급기록 필드를 화면 기록으로 �
     systemReview: "호흡곤란 (+)",
     physicalExam: "Tachypnea",
     treatmentPlan: "산소 적용 및 모니터링",
-    impression: "폐렴 의증",
+    impression: "폐렴 의증\n만성 폐쇄성 폐질환",
     outcome: "입원",
   });
 });
