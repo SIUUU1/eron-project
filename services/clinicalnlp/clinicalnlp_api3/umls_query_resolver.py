@@ -412,10 +412,17 @@ class VerifiedClinicalDictionary:
 
     @contextmanager
     def request_session(self):
-        """Reuse read-only SQLite handles for one resolver request/thread."""
+        """Reuse repository handles and one alias snapshot per request/thread."""
         with ExitStack() as stack:
             stack.enter_context(self._terminology_repository.request_session())
             stack.enter_context(self._vector_repository.request_session())
+            alias_request_session = getattr(
+                self._alias_store,
+                "request_session",
+                None,
+            )
+            if callable(alias_request_session):
+                stack.enter_context(alias_request_session())
             session = getattr(self._connection_local, "session", None)
             if session is None:
                 session = _ConnectionSession(connections={})

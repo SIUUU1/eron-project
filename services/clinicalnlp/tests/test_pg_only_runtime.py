@@ -279,6 +279,63 @@ class PgOnlyRuntimeTests(unittest.TestCase):
             ],
         )
 
+    def test_postgres_approved_alias_store_reuses_release_within_request(self):
+        execute_calls = []
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def execute(self, sql, parameters=()):
+                execute_calls.append((sql, parameters))
+
+            def fetchone(self):
+                return (3,)
+
+            def fetchall(self):
+                return [
+                    (
+                        "candidate-1",
+                        "코프",
+                        "emergency_terms",
+                        "emergency:1",
+                        "기침",
+                        "cough",
+                        "symptom",
+                    )
+                ]
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def cursor(self):
+                return Cursor()
+
+        with patch(
+            "clinicalnlp_api3.alias_repository.psycopg.connect",
+            return_value=Connection(),
+        ) as connect:
+            store = PostgresApprovedAliasStore(
+                "postgresql://clinical@postgres/eron"
+            )
+            with store.request_session():
+                first = store.find_approved("코프가 심해요")
+                second = store.find_approved("오늘도 코프가 있어요")
+
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(len(execute_calls), 2)
+        self.assertEqual(first[0]["start_char"], 0)
+        self.assertEqual(second[0]["start_char"], 4)
+        self.assertEqual(first[0]["alias_db_version"], 3)
+        self.assertEqual(second[0]["alias_db_version"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
