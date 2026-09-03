@@ -140,6 +140,21 @@ class _SyntheticMedicalQueryResolver:
             status="complete",
             policy_version="synthetic-policy-v1",
             telemetry=QueryResolutionTelemetry(
+                umls_ms=30.0,
+                umls_model_load_ms=50.0,
+                umls_mention_detection_ms=8.0,
+                umls_linking_ms=12.0,
+                umls_extraction_ms=20.0,
+                umls_worker_overhead_ms=10.0,
+                umls_worker_cold_start_overhead_ms=10.0,
+                umls_worker_batch_count=1,
+                umls_worker_fallback_batch_count=0,
+                umls_worker_cold_start_batch_count=1,
+                umls_input_segment_count=1,
+                umls_input_character_count=20,
+                umls_detected_span_count=2,
+                umls_detected_span_character_count=11,
+                umls_linker_document_count=1,
                 vector_ms=20.0,
                 vector_statement_count=3,
                 exact_search_batch_count=2,
@@ -233,6 +248,20 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "translation_token_eval_ms",
                 "translation_unattributed_http_ms",
                 "umls_ms",
+                "umls_model_load_ms",
+                "umls_mention_detection_ms",
+                "umls_linking_ms",
+                "umls_extraction_ms",
+                "umls_worker_overhead_ms",
+                "umls_worker_cold_start_overhead_ms",
+                "umls_worker_batch_count",
+                "umls_worker_fallback_batch_count",
+                "umls_worker_cold_start_batch_count",
+                "umls_input_segment_count",
+                "umls_input_character_count",
+                "umls_detected_span_count",
+                "umls_detected_span_character_count",
+                "umls_linker_document_count",
                 "dictionary_ms",
                 "vector_ms",
                 "exact_statement_count",
@@ -295,6 +324,14 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["telemetry"]["translation_provider_calls"], 1)
+        self.assertEqual(result["telemetry"]["umls_ms"], 30.0)
+        self.assertEqual(result["telemetry"]["umls_model_load_ms"], 50.0)
+        self.assertEqual(result["telemetry"]["umls_linking_ms"], 12.0)
+        self.assertEqual(result["telemetry"]["umls_worker_batch_count"], 1)
+        self.assertEqual(
+            result["telemetry"]["umls_worker_cold_start_batch_count"],
+            1,
+        )
         self.assertEqual(result["telemetry"]["translation_http_ms"], 140.0)
         self.assertEqual(result["telemetry"]["translation_provider_ms"], 120.0)
         self.assertEqual(

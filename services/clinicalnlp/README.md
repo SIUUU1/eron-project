@@ -84,6 +84,17 @@ lookups, vector fallbacks, UMLS surface/canonical queries, semantic fallbacks,
 and n-gram fallbacks. These counters observe the current retrieval behavior;
 they do not alter ranking, limits, routing, or candidate confirmation.
 
+UMLS telemetry decomposes the client-observed `umls_ms` into worker batches,
+fallbacks, input and detected-span counts, mention detection, entity linking,
+extractor time, and worker overhead. `umls_model_load_ms` is the worker-reported
+process load duration and is recorded as a maximum rather than summed across
+batches. `umls_worker_overhead_ms` is the non-negative difference between the
+parent's worker-call time and the worker-reported extraction time, so it can
+include readiness waits, scheduling, and IPC. Its cold-start subset is reported
+only when worker status explicitly showed that the worker was not ready before
+the call. These timings may overlap earlier workflow stages because worker
+startup is asynchronous and must not be added together as an end-to-end total.
+
 For a one-off local audit of the queries that actually reach pgvector, run the
 evaluation-only harness with an approved synthetic or de-identified Whisper
 JSON file:

@@ -4021,6 +4021,20 @@ def run_clinical_workflow(
             )
         ),
         "umls_ms": 0.0,
+        "umls_model_load_ms": 0.0,
+        "umls_mention_detection_ms": 0.0,
+        "umls_linking_ms": 0.0,
+        "umls_extraction_ms": 0.0,
+        "umls_worker_overhead_ms": 0.0,
+        "umls_worker_cold_start_overhead_ms": 0.0,
+        "umls_worker_batch_count": 0,
+        "umls_worker_fallback_batch_count": 0,
+        "umls_worker_cold_start_batch_count": 0,
+        "umls_input_segment_count": 0,
+        "umls_input_character_count": 0,
+        "umls_detected_span_count": 0,
+        "umls_detected_span_character_count": 0,
+        "umls_linker_document_count": 0,
         "dictionary_ms": 0.0,
         "vector_ms": 0.0,
         "exact_statement_count": 0,
@@ -4155,6 +4169,17 @@ def run_clinical_workflow(
                 telemetry["umls_ms"] = telemetry_number(
                     getattr(resolution_telemetry, "umls_ms", 0.0)
                 )
+                for name in (
+                    "umls_model_load_ms",
+                    "umls_mention_detection_ms",
+                    "umls_linking_ms",
+                    "umls_extraction_ms",
+                    "umls_worker_overhead_ms",
+                    "umls_worker_cold_start_overhead_ms",
+                ):
+                    telemetry[name] = telemetry_number(
+                        getattr(resolution_telemetry, name, 0.0)
+                    )
                 telemetry["dictionary_ms"] = telemetry_number(
                     getattr(resolution_telemetry, "dictionary_ms", 0.0)
                 )
@@ -4171,6 +4196,14 @@ def run_clinical_workflow(
                     getattr(resolution_telemetry, "search_cache_hit_count", 0)
                 )
                 for name in (
+                    "umls_worker_batch_count",
+                    "umls_worker_fallback_batch_count",
+                    "umls_worker_cold_start_batch_count",
+                    "umls_input_segment_count",
+                    "umls_input_character_count",
+                    "umls_detected_span_count",
+                    "umls_detected_span_character_count",
+                    "umls_linker_document_count",
                     "exact_search_batch_count",
                     "exact_search_query_count",
                     "exact_search_hit_count",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import math
@@ -1054,6 +1055,20 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
         issues: list[QueryResolutionIssue] = []
         issue_keys: set[tuple[str, str, str, str | None]] = set()
         umls_ms = 0.0
+        umls_model_load_ms = 0.0
+        umls_mention_detection_ms = 0.0
+        umls_linking_ms = 0.0
+        umls_extraction_ms = 0.0
+        umls_worker_overhead_ms = 0.0
+        umls_worker_cold_start_overhead_ms = 0.0
+        umls_worker_batch_count = 0
+        umls_worker_fallback_batch_count = 0
+        umls_worker_cold_start_batch_count = 0
+        umls_input_segment_count = 0
+        umls_input_character_count = 0
+        umls_detected_span_count = 0
+        umls_detected_span_character_count = 0
+        umls_linker_document_count = 0
         dictionary_ms = 0.0
         vector_ms = 0.0
         exact_statement_count = 0
@@ -1374,6 +1389,18 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             batches, oversized_segment_ids = _worker_batches(translated)
             worker_unavailable = bool(oversized_segment_ids)
             for batch in batches:
+                worker_ready_before: bool | None = None
+                worker_status = getattr(self._span_linker, "status", None)
+                if callable(worker_status):
+                    try:
+                        status = worker_status()
+                    except Exception:
+                        status = None
+                    if isinstance(status, dict) and isinstance(
+                        status.get("ready"), bool
+                    ):
+                        worker_ready_before = status["ready"]
+                umls_worker_batch_count += 1
                 worker_started = time.perf_counter()
                 try:
                     outcome = self._span_linker.link(
@@ -1383,8 +1410,69 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 except Exception:
                     outcome = None
                 finally:
-                    umls_ms += (time.perf_counter() - worker_started) * 1000
+                    worker_elapsed_ms = (
+                        time.perf_counter() - worker_started
+                    ) * 1000
+                    umls_ms += worker_elapsed_ms
+                extractor = (
+                    outcome.extractor
+                    if outcome is not None
+                    and isinstance(outcome.extractor, Mapping)
+                    else {}
+                )
+
+                def extractor_number(name: str) -> float | None:
+                    value = extractor.get(name)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or value < 0
+                    ):
+                        return None
+                    return float(value)
+
+                def extractor_count(name: str) -> int:
+                    value = extractor.get(name)
+                    return value if type(value) is int and value >= 0 else 0
+
+                extraction_ms = extractor_number("extraction_latency_ms")
+                worker_overhead_ms = max(
+                    0.0,
+                    worker_elapsed_ms - (extraction_ms or 0.0),
+                )
+                umls_worker_overhead_ms += worker_overhead_ms
+                if worker_ready_before is False:
+                    umls_worker_cold_start_batch_count += 1
+                    umls_worker_cold_start_overhead_ms += worker_overhead_ms
+                load_ms = extractor_number("load_latency_ms")
+                if load_ms is not None:
+                    umls_model_load_ms = max(umls_model_load_ms, load_ms)
+                mention_ms = extractor_number("mention_detection_latency_ms")
+                if mention_ms is not None:
+                    umls_mention_detection_ms += mention_ms
+                linking_ms = extractor_number("linking_latency_ms")
+                if linking_ms is not None:
+                    umls_linking_ms += linking_ms
+                if extraction_ms is not None:
+                    umls_extraction_ms += extraction_ms
+                umls_input_segment_count += extractor_count(
+                    "input_segment_count"
+                )
+                umls_input_character_count += extractor_count(
+                    "input_character_count"
+                )
+                umls_detected_span_count += extractor_count(
+                    "detected_span_count"
+                )
+                umls_detected_span_character_count += extractor_count(
+                    "detected_span_character_count"
+                )
+                umls_linker_document_count += extractor_count(
+                    "linker_document_count"
+                )
                 if outcome is None or outcome.fallback_used:
+                    umls_worker_fallback_batch_count += 1
                     worker_unavailable = True
                     continue
                 for source_span in outcome.spans:
@@ -1770,6 +1858,32 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             issues=tuple(issues),
             telemetry=QueryResolutionTelemetry(
                 umls_ms=round(umls_ms, 3),
+                umls_model_load_ms=round(umls_model_load_ms, 3),
+                umls_mention_detection_ms=round(
+                    umls_mention_detection_ms,
+                    3,
+                ),
+                umls_linking_ms=round(umls_linking_ms, 3),
+                umls_extraction_ms=round(umls_extraction_ms, 3),
+                umls_worker_overhead_ms=round(umls_worker_overhead_ms, 3),
+                umls_worker_cold_start_overhead_ms=round(
+                    umls_worker_cold_start_overhead_ms,
+                    3,
+                ),
+                umls_worker_batch_count=umls_worker_batch_count,
+                umls_worker_fallback_batch_count=(
+                    umls_worker_fallback_batch_count
+                ),
+                umls_worker_cold_start_batch_count=(
+                    umls_worker_cold_start_batch_count
+                ),
+                umls_input_segment_count=umls_input_segment_count,
+                umls_input_character_count=umls_input_character_count,
+                umls_detected_span_count=umls_detected_span_count,
+                umls_detected_span_character_count=(
+                    umls_detected_span_character_count
+                ),
+                umls_linker_document_count=umls_linker_document_count,
                 dictionary_ms=round(dictionary_ms, 3),
                 vector_ms=round(vector_ms, 3),
                 exact_statement_count=exact_statement_count,

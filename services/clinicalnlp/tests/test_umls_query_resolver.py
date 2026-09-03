@@ -139,16 +139,28 @@ def _create_dictionary_fixture(root: Path) -> None:
 
 
 class _RecordingSpanLinker:
-    def __init__(self, spans: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        spans: list[dict[str, object]],
+        *,
+        extractor: dict[str, object] | None = None,
+        ready_before: bool = True,
+    ) -> None:
         self.spans = spans
+        self.extractor = extractor or {"threshold": 0.8}
+        self.ready = ready_before
         self.calls: list[tuple[list[dict[str, str]], str]] = []
+
+    def status(self):
+        return {"ready": self.ready}
 
     def link(self, translated_segments, *, lane):
         self.calls.append((deepcopy(list(translated_segments)), lane))
+        self.ready = True
         return MedicalSpanLinkOutcome(
             status="linked",
             spans=tuple(self.spans),
-            extractor=MappingProxyType({"threshold": 0.8}),
+            extractor=MappingProxyType(self.extractor),
             generation=1,
         )
 
@@ -1307,6 +1319,62 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
 
         self.assertEqual([len(call[0]) for call in linker.calls], [50, 1])
         self.assertTrue(all(call[1] == "clinical" for call in linker.calls))
+
+    def test_worker_runtime_metrics_are_preserved_in_resolution_telemetry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _create_dictionary_fixture(root)
+            dictionary = VerifiedLocalDictionary(
+                root,
+                raw_retriever=SqliteDictionaryRetriever(root),
+            )
+            linker = _RecordingSpanLinker(
+                [],
+                ready_before=False,
+                extractor={
+                    "load_latency_ms": 57_000.0,
+                    "input_segment_count": 1,
+                    "input_character_count": 17,
+                    "detected_span_count": 2,
+                    "detected_span_character_count": 11,
+                    "linker_document_count": 1,
+                    "mention_detection_latency_ms": 12.5,
+                    "linking_latency_ms": 34.5,
+                    "extraction_latency_ms": 47.0,
+                },
+            )
+            resolver = UmlsPrimaryMedicalQueryResolver(
+                dictionary=dictionary,
+                span_linker=linker,
+            )
+
+            resolution = resolver.resolve(
+                MedicalQueryDocument(
+                    segments=(
+                        MedicalQuerySegment(
+                            segment_id="seg_1",
+                            raw_text="기침이 있습니다.",
+                            translated_text_en="Cough is present.",
+                        ),
+                    )
+                )
+            )
+
+        telemetry = resolution.telemetry
+        self.assertEqual(telemetry.umls_worker_batch_count, 1)
+        self.assertEqual(telemetry.umls_worker_fallback_batch_count, 0)
+        self.assertEqual(telemetry.umls_worker_cold_start_batch_count, 1)
+        self.assertEqual(telemetry.umls_input_segment_count, 1)
+        self.assertEqual(telemetry.umls_input_character_count, 17)
+        self.assertEqual(telemetry.umls_detected_span_count, 2)
+        self.assertEqual(telemetry.umls_detected_span_character_count, 11)
+        self.assertEqual(telemetry.umls_linker_document_count, 1)
+        self.assertEqual(telemetry.umls_model_load_ms, 57_000.0)
+        self.assertEqual(telemetry.umls_mention_detection_ms, 12.5)
+        self.assertEqual(telemetry.umls_linking_ms, 34.5)
+        self.assertEqual(telemetry.umls_extraction_ms, 47.0)
+        self.assertGreaterEqual(telemetry.umls_worker_overhead_ms, 0.0)
+        self.assertGreaterEqual(telemetry.umls_worker_cold_start_overhead_ms, 0.0)
 
     def test_dictionary_search_failure_keeps_raw_candidates_and_is_sanitized(self):
         with tempfile.TemporaryDirectory() as directory:

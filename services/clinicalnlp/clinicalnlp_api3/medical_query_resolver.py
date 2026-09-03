@@ -396,6 +396,20 @@ class QueryResolutionIssue:
 @dataclass(frozen=True)
 class QueryResolutionTelemetry:
     umls_ms: float = 0.0
+    umls_model_load_ms: float = 0.0
+    umls_mention_detection_ms: float = 0.0
+    umls_linking_ms: float = 0.0
+    umls_extraction_ms: float = 0.0
+    umls_worker_overhead_ms: float = 0.0
+    umls_worker_cold_start_overhead_ms: float = 0.0
+    umls_worker_batch_count: int = 0
+    umls_worker_fallback_batch_count: int = 0
+    umls_worker_cold_start_batch_count: int = 0
+    umls_input_segment_count: int = 0
+    umls_input_character_count: int = 0
+    umls_detected_span_count: int = 0
+    umls_detected_span_character_count: int = 0
+    umls_linker_document_count: int = 0
     dictionary_ms: float = 0.0
     vector_ms: float = 0.0
     exact_statement_count: int = 0
@@ -426,6 +440,15 @@ class QueryResolutionTelemetry:
     def __post_init__(self) -> None:
         for name, value in (
             ("umls_ms", self.umls_ms),
+            ("umls_model_load_ms", self.umls_model_load_ms),
+            ("umls_mention_detection_ms", self.umls_mention_detection_ms),
+            ("umls_linking_ms", self.umls_linking_ms),
+            ("umls_extraction_ms", self.umls_extraction_ms),
+            ("umls_worker_overhead_ms", self.umls_worker_overhead_ms),
+            (
+                "umls_worker_cold_start_overhead_ms",
+                self.umls_worker_cold_start_overhead_ms,
+            ),
             ("dictionary_ms", self.dictionary_ms),
             ("vector_ms", self.vector_ms),
         ):
@@ -439,6 +462,23 @@ class QueryResolutionTelemetry:
                     f"{name} must be a finite non-negative number"
                 )
         for name, value in (
+            ("umls_worker_batch_count", self.umls_worker_batch_count),
+            (
+                "umls_worker_fallback_batch_count",
+                self.umls_worker_fallback_batch_count,
+            ),
+            (
+                "umls_worker_cold_start_batch_count",
+                self.umls_worker_cold_start_batch_count,
+            ),
+            ("umls_input_segment_count", self.umls_input_segment_count),
+            ("umls_input_character_count", self.umls_input_character_count),
+            ("umls_detected_span_count", self.umls_detected_span_count),
+            (
+                "umls_detected_span_character_count",
+                self.umls_detected_span_character_count,
+            ),
+            ("umls_linker_document_count", self.umls_linker_document_count),
             ("exact_statement_count", self.exact_statement_count),
             ("vector_statement_count", self.vector_statement_count),
             ("search_cache_hit_count", self.search_cache_hit_count),
