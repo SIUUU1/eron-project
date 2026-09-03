@@ -1,6 +1,23 @@
 # eron-project
 위험 신호는 놓치지 않고, 기록의 빈틈은 남기지 않게.  ER:ON, 더 이로운 응급실을 만들다.
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 시스템 구성, 레이어 책임, 스키마 3분할 |
+| [docs/api-design.md](docs/api-design.md) | API 계약. **최신 정본은 `/openapi.json`** |
+| [docs/database-design.md](docs/database-design.md) | 테이블 DDL, MIMIC 매핑, 적재 전략, 데모 시간축 |
+| [docs/oci-deployment.md](docs/oci-deployment.md) | OCI 배포, 도메인, HTTPS, 인증서 갱신, DB 데이터 이관 |
+| [docs/clinical-record-persistence.md](docs/clinical-record-persistence.md) | 응급진료기록 임시저장·인증저장 규칙 |
+| [docs/clinicalnlp-integration.md](docs/clinicalnlp-integration.md) | ClinicalNLP 연동 계약 |
+| [docs/adr/](docs/adr/) | 아키텍처 결정 기록 |
+
+`architecture.md` · `api-design.md` · `database-design.md` 세 편은 2026-08-26 rev.3
+설계 기록이 바탕이라, 그 이후 달라진 부분은 각 문서 상단과 개정 표시에 따로 적어 두었습니다.
+
+개발 규칙은 [CLAUDE.md](CLAUDE.md) 와 [AGENTS.md](AGENTS.md) 를 참고하세요.
+
 ## 음성 기반 응급기록 초안
 
 선택적 `stt` 프로필은 API1의 비동기 계약을 유지하는 Groq Whisper 내부 서비스를 실행합니다.

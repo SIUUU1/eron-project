@@ -2,6 +2,8 @@
 
 > 상태: **구현 완료**. 실제 적재 결과를 반영합니다.
 > 작성 2026-08-26 / 개정 2026-08-26 (rev.3 — 구현 결과 반영)
+> 2026-09-01 개정 — riskmodel 배포에 맞춰 §7.7 적재 전략과 §9 DDL 을 갱신
+> 2026-09-02 개정 — §8 ERD 를 로컬 DB 실측으로 재작성, §12.1 프로젝트 테이블 이관 절차 추가
 > DBMS: PostgreSQL 16 (pgvector 이미지)
 
 ---
@@ -541,8 +543,28 @@ UI 표시 영역 유무는 더 이상 적재 판단 기준이 아닙니다. 적�
 
 | 테이블 | 필터 | 컬럼 | 데모 실측 행수 |
 |---|---|---|---:|
-| `mimic.labevents` | `subject_id` ∈ 코호트 34명 **AND** `charttime` ∈ stay 별 [`intime`-6h, `outtime`+24h] | `labevent_id`(PK)·`subject_id`·`hadm_id`·`itemid`·`charttime`·`storetime`·`valuenum` | **9,272** (itemid 277종, stay 커버 83/83) |
-| `mimic.chartevents` | `stay_id` ∈ `mimic.icustays` 34건 **AND** `itemid` ∈ whitelist 14종 | `id`(BIGSERIAL PK)·`icu_stay_id`·`subject_id`·`hadm_id`·`itemid`·`charttime`·`valuenum` | **25,871** (ICU stay 커버 34/34) |
+| `mimic.labevents` | `subject_id` ∈ 코호트 34명 **(시간창 없음 · 전체 이력)** | `labevent_id`(PK)·`subject_id`·`hadm_id`·`itemid`·`charttime`·`storetime`·`valuenum` | **75,312** |
+| `mimic.chartevents` | `stay_id` ∈ `mimic.icustays` 34건 **AND** `itemid` ∈ whitelist **16종** (`bundle.json` 15종 + `CHARTEVENTS_EXTRA_ITEMS` 의 `223835`) | `id`(BIGSERIAL PK)·`icu_stay_id`·`subject_id`·`hadm_id`·`itemid`·`charttime`·`valuenum` | **27,637** |
+
+> **2026-09-01 개정 — `labevents` 의 시간창을 폐지했습니다.**
+> 초기에는 stay 별 [`intime`-6h, `outtime`+24h] 로 잘라 9,272행만 적재했습니다.
+> 그런데 모델의 `lab_*_dt` / `lab_*_last` feature 는 "환자의 **마지막 검사가 언제였나**" 를
+> 보는 값이고, 학습 분포상 그 간격의 중앙값이 약 95일 · 99분위가 약 5.6년입니다
+> (`artifacts/feature_spec.json`). 체류 구간 근처만 적재하면 참조 대상이 더 과거의 검사로
+> 밀려 학습 배치와 값이 어긋납니다 — **에러 없이 성능만 조용히 떨어집니다.**
+> 관측 시점 컷오프(`storetime <= t`)는 DB 가 아니라 feature layer 가 적용합니다.
+>
+> 같은 이유로 `labevents` 에는 **itemid 화이트리스트도 걸지 않습니다.** 걸어두면 모델
+> 개정으로 필요한 검사가 늘 때 조용히 결측이 됩니다.
+>
+> `chartevents` 의 whitelist 는 유지하되 목록을 코드에 적지 않고
+> `artifacts/bundle.json["vital_itemids"]`(15종)에서 읽고, 여기에 `load_subset.py` 의
+> `CHARTEVENTS_EXTRA_ITEMS`(FiO2 `223835`)를 더해 **16종**이 됩니다. 두 곳에 적어두면
+> 어긋납니다(실제로 `224690` 이 빠져 있었습니다).
+>
+> riskmodel 의 100개 feature 중 **36개가 `lab_*`** 입니다. 이 테이블이 비어 있으면
+> 예측은 나오지만 근거가 크게 빈 상태가 됩니다 — 배포 시 반드시 적재합니다
+> (`docs/oci-deployment.md`).
 
 - **시간축**: 두 테이블 모두 `edstays.intime` 기준 상대시간 계산이 가능합니다
   (`labevents.charttime`/`storetime`, `chartevents.charttime`).
@@ -573,77 +595,200 @@ UI 표시 영역 유무는 더 이상 적재 판단 기준이 아닙니다. 적�
 
 ## 8. ERD
 
-```text
-                        ┌──────────────────────┐
-                        │ mimic.patients       │
-                        │ PK subject_id        │
-                        │    gender            │
-                        │    anchor_age        │
-                        │    anchor_year       │
-                        │    dod               │
-                        └───────────┬──────────┘
-                                    │ 1
-                      ┌─────────────┼─────────────┐
-                    N │                         N │
-        ┌─────────────▼────────────┐  ┌───────────▼──────────┐
-        │ mimic.edstays            │  │ mimic.admissions     │
-        │ PK stay_id               │  │ PK hadm_id           │
-        │ FK subject_id            │──│ FK subject_id        │
-        │ FK hadm_id (nullable)    │N1│    admittime         │
-        │    intime / outtime      │  │    dischtime         │
-        │    gender / race         │  │    deathtime         │
-        │    arrival_transport     │  │    admission_type    │
-        │    disposition           │  │    admission_location│
-        └───┬──────┬──────┬────────┘  │    hospital_expire_..│
-        1:1 │   1:N│   1:N│           └───────────┬──────────┘
-            │      │      │                     1 │
-┌───────────▼──┐ ┌─▼──────────────┐ ┌────────────▼─────────┐
-│ mimic.triage │ │ mimic.ed_      │ │ mimic.icustays       │
-│ PK stay_id   │ │   vitalsign    │ │ PK icu_stay_id       │
-│  temperature │ │ PK id          │ │ FK hadm_id           │
-│  heartrate   │ │ FK stay_id     │ │    first_careunit    │
-│  resprate    │ │    charttime   │ │    intime / outtime  │
-│  o2sat       │ │    temperature │ │    los               │
-│  sbp / dbp   │ │    heartrate   │ └──────────────────────┘
-│  pain  TEXT  │ │    resprate    │
-│  acuity      │ │    o2sat       │  ┌──────────────────────┐
-│  chiefcompl. │ │    sbp / dbp   │  │ mimic.ed_diagnosis   │
-└──────────────┘ │    rhythm      │  │ PK (stay_id,seq_num) │
-                 │    pain  TEXT  │  │    icd_code          │
-                 └────────────────┘  │    icd_version       │
-                                     │    icd_title         │
-                                     └──────────────────────┘
-─────────────────────── app 스키마 ───────────────────────
-        ┌──────────────────────────┐
-        │ app.prediction           │      ┌────────────────────┐
-        │ PK id                    │      │ app.patient_alias  │
-        │ FK ed_stay_id            │      │ PK ed_stay_id      │
-        │    model_version         │      │    display_name    │
-        │    prediction_time       │      │    is_pseudonym    │
-        │    t_idx                 │      └────────────────────┘
-        │    horizon_minutes       │
-        │    risk_probability      │      ┌────────────────────┐
-        │    risk_level            │      │ app.demo_stay      │
-        │    detail JSONB  (TODO)  │      │ PK ed_stay_id      │
-        └──────────────────────────┘      │    demo_offset     │
-                                          │    demo_intime     │
-        ┌──────────────────────────┐      │    is_active       │
-        │ app.bed                  │      └────────────────────┘
-        │ PK bed_id (A01…N06)      │
-        │    zone                  │      ┌────────────────────┐
-        └───────────┬──────────────┘      │ app.alert          │
-                  1 │                     │ PK id              │
-        ┌───────────▼──────────────┐      │ FK ed_stay_id      │
-        │ app.bed_assignment       │      │    alert_time      │
-        │ PK id                    │      │    level / message │
-        │ FK bed_id                │      │    acknowledged_at │
-        │ FK ed_stay_id (nullable) │      └────────────────────┘
-        │    devices text[]        │
-        │    assigned_at           │
-        └──────────────────────────┘
+> **2026-09-02 갱신 — 로컬 개발 DB(`eron-postgres`) 실측 기준입니다.**
+> `information_schema` 의 컬럼·PK 와 `pg_constraint` 의 FK 를 그대로 옮겼습니다.
+> 표기: `PK` 기본키 · `FK→` 외래키 · `(n)` nullable · `※` FK 를 걸지 않은 논리적 참조.
 
-        ⛔ app.ed_record — 기록 영역 제외로 설계에서 삭제
+### 8.1 `mimic` — MIMIC-IV 서브셋 (읽기 전용)
+
+```text
+                    ┌────────────────────────────┐
+                    │ mimic.patients             │
+                    │ PK subject_id      bigint  │
+                    │    gender          char    │
+                    │    anchor_age      smallint│
+                    │    anchor_year     smallint│
+                    │    anchor_year_group text  │
+                    │    dod             date    │
+                    └──────┬──────────────┬──────┘
+                         1 │            1 │
+              ┌────────────┘              └──────────────┐
+            N │                                        N │
+┌─────────────▼──────────────┐              ┌────────────▼───────────────┐
+│ mimic.admissions           │            1 │ mimic.labevents            │
+│ PK hadm_id         bigint  │◄─────────┐   │ PK labevent_id     bigint  │
+│    subject_id      bigint ※│          │   │ FK→patients.subject_id     │
+│    admittime/dischtime     │          │   │    hadm_id      bigint (n)※│
+│    deathtime          (n)  │          │   │    itemid          int     │
+│    admission_type/location │          │   │    charttime   timestamp   │
+│    discharge_location      │          │   │    storetime   timestamp(n)│
+│    insurance/marital/race  │          │   │    valuenum      float8 (n)│
+│    edregtime/edouttime     │          │   └────────────────────────────┘
+│    hospital_expire_flag    │          │   ※ hadm_id 에 FK 를 걸지 않는다(§7.7)
+└──────┬───────────────┬─────┘          │
+     1 │             1 │                │
+       │               └────────────┐   │
+       │                          N │   │
+┌──────▼─────────────────────┐  ┌───▼───▼────────────────────┐
+│ mimic.edstays              │  │ mimic.icustays             │
+│ PK stay_id         bigint  │  │ PK icu_stay_id     bigint  │
+│ FK→patients.subject_id     │  │    subject_id      bigint ※│
+│ FK→admissions.hadm_id  (n) │  │ FK→admissions.hadm_id      │
+│    intime/outtime timestamp│  │    first/last_careunit     │
+│    gender          char    │  │    intime/outtime timestamp│
+│    race                    │  │    los            float8   │
+│    arrival_transport       │  └───────────┬────────────────┘
+│    disposition             │            1 │
+└──┬────────┬────────┬───────┘              │ N
+ 1 │      N │      N │              ┌───────▼────────────────────┐
+   │        │        │              │ mimic.chartevents          │
+   │        │        │              │ PK id           bigserial  │
+   │        │        │              │ FK→icustays.icu_stay_id    │
+   │        │        │              │    subject_id/hadm_id     ※│
+   │        │        │              │    itemid          int     │
+   │        │        │              │    charttime   timestamp   │
+   │        │        │              │    valuenum      float8 (n)│
+   │        │        │              └────────────────────────────┘
+   │        │        │              itemid whitelist 16종 (§7.7)
+   │        │        │
+┌──▼──────────────┐ ┌▼───────────────────┐ ┌▼──────────────────────┐
+│ mimic.triage    │ │ mimic.ed_vitalsign │ │ mimic.ed_diagnosis    │
+│ PK stay_id      │ │ PK id    bigserial │ │ PK (stay_id, seq_num) │
+│ FK→edstays      │ │ FK→edstays.stay_id │ │ FK→edstays.stay_id    │
+│    subject_id  ※│ │    subject_id     ※│ │    subject_id        ※│
+│    temperature  │ │    charttime       │ │    icd_code    text   │
+│    heartrate    │ │    temperature     │ │    icd_version smallint│
+│    resprate     │ │    heartrate       │ │    icd_title   text   │
+│    o2sat        │ │    resprate        │ └───────────────────────┘
+│    sbp / dbp    │ │    o2sat           │
+│    pain    text │ │    sbp / dbp       │
+│    acuity smallint│ │    rhythm   text  │
+│    chiefcomplaint│ │    pain     text   │
+└─────────────────┘ └────────────────────┘
 ```
+
+`triage.pain` 과 `ed_vitalsign.pain` 이 `text` 인 이유는 §2.3 (원본에 `"7-8"`, `"denies"`
+같은 값이 섞여 있다) 을 참고하세요.
+
+### 8.2 `app` — 애플리케이션 데이터 (읽기·쓰기)
+
+```text
+        mimic.edstays.stay_id ◄──── FK 로 참조하는 5개 테이블 ────┐
+                                                                  │
+┌──────────────────────────────┐  ┌──────────────────────────────┐│
+│ app.prediction               │  │ app.prediction_ack           ││
+│ PK id             bigserial  │  │ PK (ed_stay_id,              ││
+│ FK→edstays.stay_id ──────────┼──┼─►    prediction_time)        ││
+│    model_version    text     │  │    ed_stay_id      bigint   ※││
+│    prediction_time  timestamp│  │    prediction_time timestamp ││
+│    t_idx            int      │  │    acknowledged_at timestamp ││
+│    horizon_minutes  int      │  │    acknowledged_demo_at      ││
+│    risk_probability float8   │  │    acknowledged_by  text (n) ││
+│    risk_level       text     │  │    created_at   timestamp    ││
+│    detail           jsonb    │  └──────────────────────────────┘│
+│    created_at    timestamp   │  ※ 확인 상태만 담는다. FK 없음.   │
+└──────────────────────────────┘                                  │
+  detail 에 모델이 만든 근거 문장이 그대로 들어간다(§9.2)          │
+                                                                  │
+┌──────────────────────────────┐  ┌──────────────────────────────┐│
+│ app.cohort                   │  │ app.patient_alias            ││
+│ PK ed_stay_id      bigint  ※ │  │ PK ed_stay_id      bigint ───┼┤
+│    subject_id      bigint    │  │    display_name    text      ││
+│    hadm_id      bigint (n)   │  │    is_pseudonym    bool      ││
+│    tier            char      │  └──────────────────────────────┘│
+│    acuity          smallint  │                                  │
+│    vital_count     int       │  ┌──────────────────────────────┐│
+│    seed            text      │  │ app.demo_stay                ││
+│    selected_at  timestamp    │  │ PK ed_stay_id      bigint ───┼┤
+└──────────────────────────────┘  │    now_ref      timestamp    ││
+  ※ 예측 대상 83건의 정본.         │    is_active       bool      ││
+    FK 없음(선별이 적재보다 앞선다) └──────────────────────────────┘│
+                                                                  │
+┌──────────────────────────────┐  ┌──────────────────────────────┐│
+│ app.bed                      │  │ app.alert                    ││
+│ PK bed_id  text (A01…N06)    │  │ PK id            bigserial   ││
+│    zone            text      │  │ FK→edstays.stay_id ──────────┼┘
+│    sort_order      int       │  │    alert_time   timestamp    │
+└───────────┬──────────────────┘  │    level / message   text    │
+          1 │                     │    acknowledged_at/_by   (n) │
+          N │                     └──────────────────────────────┘
+┌───────────▼──────────────────┐    현재 경고는 app.prediction 에서
+│ app.bed_assignment           │    조회 시점에 파생한다(§9.2 주석).
+│ PK id             bigserial  │
+│ FK→bed.bed_id                │  ┌──────────────────────────────┐
+│ FK→edstays.stay_id      (n)  │  │ app.demo_clock  (1행 고정)    │
+│    devices        text[]     │  │ PK id            smallint    │
+│    assigned_at  timestamp    │  │    epoch_virtual timestamp   │
+│    released_at  timestamp(n) │  │    anchor_real   timestamp   │
+└──────────────────────────────┘  │    anchor_virtual timestamp  │
+                                  │    speed          numeric    │
+                                  │    updated_at   timestamp    │
+                                  └──────────────────────────────┘
+                                    데모 시계. app.demo_now() 의 원천(§6.1)
+```
+
+`app` 스키마의 뷰는 §11 에서 다룹니다.
+
+| 뷰 | 컬럼 |
+|---|---|
+| `app.v_demo_stay` | `ed_stay_id`, `is_active`, `now_ref`, `demo_offset`(interval), `demo_intime`, `demo_outtime`, `has_departed` |
+| `app.v_latest_prediction` | `stay_id`, `prediction_time`, `risk_probability`, `risk_level`, `detail`, `model_version` |
+| `app.v_latest_vitalsign` | `stay_id`, `measured_at`, `heartrate`, `resprate`, `sbp`, `dbp`, `o2sat`, `temperature_c` |
+| `mimic.v_ed_vitalsign_clean` | `ed_vitalsign` + `temperature_c`(°F→°C 변환) |
+
+> `demo_offset` · `demo_intime` 은 테이블이 아니라 **`app.v_demo_stay` 뷰의 계산 컬럼**입니다.
+> 테이블 `app.demo_stay` 가 실제로 저장하는 것은 `now_ref` 와 `is_active` 뿐입니다.
+
+### 8.3 `public` — 기존 CRUD 도메인 (별개 자원)
+
+`/api/ed/*` 가 다루는 MIMIC ED stay 와 **다른 도메인**입니다(§6 D4). 서로 FK 로 연결되지 않습니다.
+
+```text
+┌───────────────────────┐
+│ public.patients       │        ┌──────────────────────────────┐
+│ PK id           serial│        │ public.clinical_records      │
+│    patient_number     │        │ PK id             serial     │
+│    name / gender      │        │    ed_stay_id   varchar    ※ │
+│    birth_date   date  │        │    status       varchar      │
+│    created_at         │        │    record_payload    json    │
+└───────────┬───────────┘        │    selected_kcd      json    │
+          1 │                    │    clinician_id/_name        │
+          N │                    │    signed_by / signed_at (n) │
+┌───────────▼───────────┐        │    created_at / updated_at   │
+│ public.visits         │        └──────────────────────────────┘
+│ PK id           serial│        ※ mimic.edstays.stay_id 를 문자열로
+│ FK→patients.id        │           담는 임시 연결 키. FK 없음.
+│    arrival_time       │           (docs/clinical-record-persistence.md)
+│    triage_level  int  │
+│    chief_complaint    │        ┌──────────────────────────────┐
+│    status  varchar    │        │ public.kcd_codes             │
+│    created_at         │        │ PK id             serial     │
+└──┬────────┬────────┬──┘        │    code        varchar       │
+ N │      N │      N │           │    name_ko / name_en         │
+   │        │        │           └──────────────────────────────┘
+┌──▼──────┐ ┌▼──────────┐ ┌▼──────────────┐   현재 0행(미적재)
+│ vitals  │ │predictions│ │ records       │
+│ PK id   │ │ PK id     │ │ PK id         │
+│ FK→visits│ │ FK→visits │ │ FK→visits     │
+│ measured_at│ predicted_at│ record_type   │
+│ heart_rate│ risk_score │ │ content  text │
+│ respiratory_rate│ risk_level│ generated_by│
+│ systolic_bp│ prediction_horizon│ created_at│
+│ diastolic_bp│ risk_factors│ confirmed_at │
+│ temperature│           │ │               │
+│ spo2 / consciousness│   │ └───────────────┘
+└─────────┘ └───────────┘
+```
+
+`public.clinical_records` 와 `public.kcd_codes` 는 `database/init/*.sql` 이 아니라
+backend 기동 시 `Base.metadata.create_all` 이 만듭니다(§9.3).
+
+> ⚠ 로컬 DB 에는 `public.test_connection`(`id`, `message`) 이 남아 있습니다. 초기 연결
+> 확인용 잔재이며 애플리케이션이 사용하지 않습니다. 설계 대상이 아니므로 ERD 에서
+> 제외했고, 정리 대상으로만 적어 둡니다.
+
+> ⛔ `app.ed_record` 는 기록 영역 제외 결정으로 설계에서 삭제되었습니다. 이후 기록
+> 저장은 위의 `public.clinical_records` 로 구현되었습니다.
 
 ---
 
@@ -751,6 +896,31 @@ CREATE TABLE mimic.icustays (
     outtime        TIMESTAMP,
     los            DOUBLE PRECISION
 );
+
+-- 검사 결과. riskmodel 의 lab feature 36개가 여기서 나온다.
+-- 🔑 시간창으로 자르지 않는다(§7.7). itemid 화이트리스트도 걸지 않는다.
+-- hadm_id 에 FK 를 걸지 않는 이유도 §7.7 참조.
+CREATE TABLE mimic.labevents (
+    labevent_id BIGINT PRIMARY KEY,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    itemid      INTEGER   NOT NULL,
+    charttime   TIMESTAMP NOT NULL,   -- 채혈 시각
+    storetime   TIMESTAMP,            -- 결과 보고 시각. feature 는 이쪽을 쓴다
+    valuenum    DOUBLE PRECISION
+);
+
+-- ICU 활력징후. ED 퇴실 후 구간을 메우는 보조 원천이다(커버리지 낮음).
+-- itemid 목록은 artifacts/bundle.json["vital_itemids"] 가 정본이다.
+CREATE TABLE mimic.chartevents (
+    id          BIGSERIAL PRIMARY KEY,
+    icu_stay_id BIGINT    NOT NULL,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT    NOT NULL,
+    itemid      INTEGER   NOT NULL,
+    charttime   TIMESTAMP NOT NULL,
+    valuenum    DOUBLE PRECISION
+);
 ```
 
 > ⚠️ **이름 충돌 주의**: MIMIC-IV-ED의 `stay_id`와 MIMIC-IV-ICU의 `stay_id`는 **서로 다른 식별자 체계**입니다. ICU 측을 `icu_stay_id`로 명시적으로 분리했습니다.
@@ -832,7 +1002,27 @@ CREATE TABLE app.alert (
     acknowledged_at TIMESTAMP,
     acknowledged_by TEXT
 );
+
+-- 의료진 "재검토 완료" 확인 상태. (POST /api/ed/alerts/{stay_id}/acknowledge)
+--
+-- 🔑 경고 자체는 app.prediction 에서 조회 시점에 파생한다(app.alert 는 쓰지 않는다).
+--    여기 저장하는 것은 **의료진이 확인했다는 사실** 하나뿐이다.
+-- 🔑 PK 에 prediction_time 을 포함하는 이유: 확인은 "그 시점 예측에 대한 확인"이다.
+--    다음 예측이 생기면 최신 prediction_time 이 달라져 확인이 자동으로 풀린다.
+CREATE TABLE app.prediction_ack (
+    ed_stay_id           BIGINT    NOT NULL,
+    prediction_time      TIMESTAMP NOT NULL,   -- MIMIC 원본 시간축
+    acknowledged_at      TIMESTAMP NOT NULL DEFAULT now(),          -- 감사용 실제 시각
+    acknowledged_demo_at TIMESTAMP NOT NULL DEFAULT app.demo_now(), -- 유효성 판정은 이 값
+    acknowledged_by      TEXT,
+    created_at           TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (ed_stay_id, prediction_time)
+);
 ```
+
+> `acknowledged_demo_at` 이 데모 시각인 이유: 데모 시계를 되돌리면 그보다 나중에 한
+> 확인은 '아직 하지 않은 것'이 되어야 합니다. 기록을 지우지 않고 시간 기준으로만
+> 무효화하므로, 다시 앞으로 가면 되살아납니다.
 
 > ⛔ **`app.ed_record`는 설계에서 삭제되었습니다.** 기록 영역을 건드리지 않으므로 기록 저장 테이블을 만들지 않습니다.
 > 환자 목록의 "기록 상태"와 대시보드의 "기록 미완료"는 프론트 mock 값을 계속 사용합니다.
@@ -840,6 +1030,18 @@ CREATE TABLE app.alert (
 ### 9.3 `public` 스키마
 
 기존 `patients` / `visits` / `vitals` / `predictions` / `records` 5개 테이블은 **변경하지 않습니다.** 기존 CRUD API 계약을 그대로 유지합니다.
+
+**2026-09-01 추가** — 기록 영역이 구현되면서 두 테이블이 늘었습니다.
+
+| 테이블 | 용도 | 참고 |
+|---|---|---|
+| `public.clinical_records` | 응급진료기록 DRAFT/SIGNED 저장. `ed_stay_id` 를 임시 연결 키로 쓴다 | `docs/clinical-record-persistence.md` |
+| `public.kcd_codes` | KCD 진단코드 조회 (`GET /api/kcd/search`) | 적재는 `backend/scripts/import_kcd9.py` |
+
+> ⚠ **이 둘은 `database/init/*.sql` 이 만들지 않습니다.** backend 기동 시
+> `Base.metadata.create_all`(`backend/app/main.py`)이 생성합니다. init SQL 은 볼륨이 비어
+> 있을 때만 도는 반면 이쪽은 매 기동마다 확인되므로, 스키마를 손으로 맞출 때
+> 빠뜨리기 쉽습니다.
 
 ---
 
@@ -942,6 +1144,101 @@ SELECT id, stay_id, charttime,
 - 각 테이블 적재 후 행 수를 검증하고 로그로 남깁니다.
 - `load_full.py`(전체 적재)는 **별도 파일로 분리하며, 승인 없이 실행하지 않습니다** (R2).
 
+### 12.1 DB → DB 이관 — 프로젝트 테이블 재적재 (2026-09-02 추가)
+
+§12 는 **원본 CSV 가 있는 곳**(로컬)에서 쓰는 경로입니다. 서버에는 `MIMIC-DEMO/` 원본을
+두지 않으므로, 배포 환경에는 CSV 를 다시 돌리는 대신 **로컬에서 만들어진 결과를 그대로
+옮깁니다.** 코호트 선별(`app.cohort`)·데모 시간축(`app.demo_stay`)·이미 계산된
+예측(`app.prediction`)은 재현 대상이 아니라 이관 대상이기 때문입니다.
+
+`database/scripts/` 의 셸 스크립트 네 개가 이 경로를 담당합니다.
+
+| 파일 | 하는 일 | DB 변경 |
+|---|---|---|
+| `project_tables.sh` | 대상 테이블 화이트리스트 **18개**의 단일 정본. 나머지 셋이 이 파일만 읽습니다 | — (변수 정의만) |
+| `inspect_project_tables.sh` | 대상 테이블 존재·row 수·시퀀스·데모 상태 조회 | ❌ `SELECT` 만 |
+| `dump_project_tables.sh` | 로컬 DB → 재적재용 `backups/eron_project_<stamp>.sql.gz` + 매니페스트 생성 | ❌ 읽기 전용 |
+| `restore_project_tables.sh` | 대상 DB 에 그 SQL 을 적용 | ✅ **유일하게 DB 를 바꾸는 스크립트** |
+
+`oci_inspect.sql` 은 같은 조회를 파일 전송 없이 `ssh … psql < oci_inspect.sql` 로
+흘려보내기 위한 단독 SQL 입니다. 절차는 `docs/oci-deployment.md` 를 따릅니다.
+
+#### 화이트리스트 18개 — 순서가 곧 FK 부모 → 자식
+
+```text
+mimic.patients · mimic.admissions · mimic.edstays · mimic.triage · mimic.ed_vitalsign
+mimic.ed_diagnosis · mimic.icustays · mimic.chartevents · mimic.labevents
+app.bed · app.cohort · app.demo_clock · app.demo_stay · app.patient_alias
+app.prediction · app.prediction_ack · app.alert · app.bed_assignment
+```
+
+`pg_dump` 가 뽑는 `COPY` 순서와 같으므로 **FK 를 끈 채로 넣지 않습니다.** 순서나 정합성이
+어긋나면 제약이 걸려 전체가 롤백됩니다(부분 적용이 없습니다).
+
+의도적으로 제외한 것과 이유입니다.
+
+| 제외 | 이유 |
+|---|---|
+| `clinicalnlp.*` | 의료용어·KCD·정책·Vector. 서버에서만 적재하며 로컬에는 없습니다 |
+| `public.*` | backend CRUD 도메인(§9.3). 로컬은 스모크 테스트 행뿐이고, 서버에는 실제 `clinical_records` 가 있을 수 있어 **덮어쓰면 안 됩니다** |
+| `mimic_ed.*` | 코드가 참조하지 않는 초기 적재 잔재 |
+| `public.test_connection` | 초기 연결 확인용 잔재 (§8.3 주석) |
+
+#### 재적재 SQL 의 형태
+
+```sql
+BEGIN;
+  -- 대상 18개가 전부 있는지 먼저 확인(하나라도 없으면 예외 → 롤백)
+  TRUNCATE TABLE <18개 테이블만> RESTART IDENTITY;   -- CASCADE 를 쓰지 않는다
+  COPY ...   -- 부모 → 자식 순서, FK 제약을 켠 채로
+  setval(...)
+COMMIT;
+```
+
+**`CASCADE` 를 쓰지 않는 것이 핵심 안전장치입니다.** 화이트리스트 밖 테이블이 대상을
+참조하고 있으면 `TRUNCATE` 가 그 자리에서 실패하고 멈춥니다 — 다른 프로젝트 데이터를
+조용히 지우는 경로가 없습니다. 그래서 `dump`·`restore` 양쪽이 실행 전에
+`pg_constraint` 로 "밖에서 대상을 참조하는 FK" 를 먼저 조회하고, 하나라도 있으면
+사람이 판단하도록 중단합니다.
+
+스크립트가 **하지 않는 것**입니다. 코드에 존재하지 않습니다.
+
+```text
+DROP DATABASE / DROP SCHEMA / DROP TABLE / TRUNCATE ... CASCADE
+docker compose down -v / docker volume rm / PGDATA 초기화
+화이트리스트 밖 테이블에 대한 INSERT · UPDATE · DELETE · TRUNCATE
+```
+
+#### 매니페스트를 DB 가 아니라 덤프 파일에서 뽑는 이유
+
+행 수를 원본 DB 에 다시 물어보면, 재예측 스케줄러가 `pg_dump` 전후로
+`app.prediction` 에 INSERT 한 만큼 실제 적재량과 어긋납니다. 그래서 매니페스트는
+**덤프 안의 `COPY` 블록 행 수**를 세서 만듭니다 — 그 값이 곧 적재될 행 수입니다.
+`restore` 는 적용 후 이 매니페스트와 대조해 하나라도 다르면 실패로 처리합니다.
+
+같은 이유로 `restore` 는 대상 서버에 `eron-backend` 가 떠 있으면 경고하고 중지를
+권합니다(`docker compose stop backend` — 볼륨·데이터는 그대로입니다).
+
+#### 실측 행 수 (2026-09-02 · 로컬 `eron` DB)
+
+| 테이블 | 행 수 | 테이블 | 행 수 |
+|---|---:|---|---:|
+| `mimic.patients` | 34 | `app.bed` | 84 |
+| `mimic.admissions` | 173 | `app.bed_assignment` | 83 |
+| `mimic.edstays` | 180 | `app.cohort` | 83 |
+| `mimic.triage` | 83 | `app.demo_clock` | 1 |
+| `mimic.ed_vitalsign` | 665 | `app.demo_stay` | 83 |
+| `mimic.ed_diagnosis` | 191 | `app.patient_alias` | 83 |
+| `mimic.icustays` | 34 | `app.prediction` | 801 |
+| `mimic.chartevents` | 27,637 | `app.prediction_ack` | 0 |
+| `mimic.labevents` | 75,312 | `app.alert` | 0 |
+
+압축 후 약 1.1 MB 입니다. `app.alert` 가 0인 것은 정상입니다 — 경고는 조회 시점에
+`app.prediction` 에서 파생하며 이 테이블에 쓰지 않습니다(§9.2).
+
+> `backups/` 는 `.gitignore` 대상입니다. 덤프에는 MIMIC 유래 임상값이 그대로 들어 있으므로
+> **커밋하지 않고, 저장소 밖 경로로도 공개하지 않습니다** (§15).
+
 ---
 
 ## 13. 예상 성능 / 블로커
@@ -951,8 +1248,8 @@ SELECT id, stay_id, charttime,
 | Phase A 적재 시간 | ED 4파일 + patients + admissions + icustays ≈ 120 MB gz 스캔. **수 분 이내** |
 | Phase A DB 용량 | 인덱스 포함 **< 20 MB** |
 | API 응답 시간 | 83~300 stay 규모. 목록/상세 모두 **10 ms 이하** |
-| ~~**블로커 1 — labevents**~~ | **적재 완료 (2026-08-31).** 코호트 서브셋 9,272행 (§7.7). 이하 2026-08-28 기록: 15~30분으로 추정했으나 전량 스캔 실측 **116초**(데모 0.4초). 비용은 보류 사유가 아님. 미적재 사유는 **현 UI 에 lab 표시 영역이 없다**는 것뿐입니다 (§7.7) |
-| ~~**블로커 2 — chartevents**~~ | **적재 완료 (2026-08-31).** 코호트 서브셋 25,871행 (§7.7). `mental`(GCS)은 데이터는 있으나 API 미배선 — 별도 작업. 이하 2026-08-28 기록: 1시간+ 로 추정했으나 전량 스캔 실측 **215초**(데모 0.3초). `mental`(GCS)은 여전히 `null` 이지만, 적재를 막는 것은 비용이 아니라 UI 요구 부재입니다 (§7.7) |
+| ~~**블로커 1 — labevents**~~ | **적재 완료 (2026-08-31).** 코호트 34명의 **전체 이력 75,312행** (2026-09-01 에 시간창을 폐지했습니다 — §7.7. 최초 적재는 체류 구간으로 자른 9,272행이었습니다). 이하 2026-08-28 기록: 15~30분으로 추정했으나 전량 스캔 실측 **116초**(데모 0.4초). 비용은 보류 사유가 아님. 미적재 사유는 **현 UI 에 lab 표시 영역이 없다**는 것뿐입니다 (§7.7) |
+| ~~**블로커 2 — chartevents**~~ | **적재 완료 (2026-08-31).** 코호트 서브셋 **27,637행** (itemid whitelist 를 `bundle.json` 기준 16종으로 맞추며 25,871 → 27,637 로 늘었습니다 — §7.7). `mental`(GCS)은 데이터는 있으나 API 미배선 — 별도 작업. 이하 2026-08-28 기록: 1시간+ 로 추정했으나 전량 스캔 실측 **215초**(데모 0.3초). `mental`(GCS)은 여전히 `null` 이지만, 적재를 막는 것은 비용이 아니라 UI 요구 부재입니다 (§7.7) |
 | **블로커 8 — 데모 데이터의 라벨 부재** | 데모 데이터셋에는 `disposition='EXPIRED'` 가 **0건**이라 계층 D 가 존재하지 않고, acuity 5 도 0건입니다. 악화 라벨은 계층 A(ICU 이동) 32건만으로 구성됩니다 (§0-1) |
 | **블로커 3 — 모델 output 미확인** | 저장소에 모델·inference 코드 부재. **확정: 최소 필드 + `detail` JSONB로 진행.** 모델 스펙 확정 시 JSONB에서 실컬럼으로 승격 (R4) |
 | **블로커 4 — 프론트 미대응 필드** | `name`·`bed`·`devices`는 **D1/D2로 해소**(app 계층 데모). `mental`은 `null` 유지, `riskFactors`·`recommendations`는 모델 확정까지 빈 배열 (§3·§5) |
@@ -989,4 +1286,5 @@ SELECT id, stay_id, charttime,
 - `.gitignore`가 `*.csv`, `*.csv.gz`, `mimic/`, `data/`, `datasets/`를 이미 제외하고 있음을 확인했습니다. **원천 데이터는 커밋되지 않습니다.**
 - 코호트 정의는 `app.cohort` 테이블에 있습니다. stay_id·tier·acuity 등 선별 메타데이터만 담고 **임상값은 포함하지 않습니다**. 저장소에는 파일로 남지 않습니다.
 - 문서·로그·스크린샷에 실제 `subject_id`를 노출하지 않습니다.
+- `backups/` 의 덤프(`database/scripts/dump_project_tables.sh` 산출물)에는 MIMIC 유래 임상값이 그대로 들어 있습니다. `.gitignore` 대상이며 커밋하지 않습니다. 서버로는 `scp` 로만 전달하고, 적용 후 남겨두지 않습니다 (§12.1).
 - `.env`는 커밋하지 않으며, `.env.example`에는 키 이름만 둡니다.

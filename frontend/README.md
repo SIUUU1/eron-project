@@ -1334,16 +1334,6 @@ P-20260812-004 / 최수진 / 여 28세 / 발열 / KTAS 4 / 위험도 초록 / �
 
 하나의 그래프로 그려주되, HR, 수축기 혈압, 이완기 혈압, 산소포화도, 체온, AI 악화 확률 칼럼을 사용하고  각 칼럼의 그래프 색을 다르게 하여 그래프를 그려주고,  그래프 하단에 숫자로 보이게 해주는데 AI 악화 예측 추이가 맨 위에 보이도록 해주세요 (예시 화면 참고)
 
-This project was built with [Lovable](https://lovable.dev).
-
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/8d51328a-61ea-4e4c-8a66-d39dd60b1941).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
-
 ## Development
 
 Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).

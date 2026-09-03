@@ -3,6 +3,11 @@
 > 상태: **구현 완료**. 아래 계약은 실제로 동작하는 API 를 반영합니다.
 > 작성 2026-08-26 / 개정 2026-08-26 (rev.3 — 구현 결과 반영)
 > 진입점: `http://localhost:8080` (nginx) · Swagger 직접 접근: `http://localhost:8100/docs`
+>
+> ⚠ 본문은 **rev.3(2026-08-26) 시점의 8개 엔드포인트 계약**입니다. 그 이후 기록 영역과
+> 예측 실행 API 가 추가되어 현재는 33개입니다. 추가분은 §0-2 에 모아 두었고,
+> **항상 최신인 정본은 `/openapi.json`** 입니다 (운영: `https://eron.co.kr/openapi.json`).
+> 배포 주소는 `docs/oci-deployment.md` 를 참고하세요.
 
 ---
 
@@ -27,6 +32,59 @@
 | `mimic` FK | 테이블 DDL 에 인라인 | **적재 후 `03_constraints.sql` 로 부여** | COPY 적재 순서 의존을 없애면서 무결성은 유지 |
 
 **기록 영역은 어떤 형태로도 건드리지 않습니다.** `/records`, `/records/$patientId` 화면, `mock-data.ts`의 기록 관련 export, 기존 `backend/app/api/records.py`(별개 도메인) 모두 그대로 둡니다.
+
+---
+
+## 0-2. rev.3 이후 추가된 엔드포인트 (2026-09-02 기준)
+
+본문 §1 이후의 계약은 rev.3 당시 8개를 기준으로 쓰였습니다. 아래는 그 뒤에 추가된
+것들로, 상세 스키마는 `/openapi.json` 과 각 라우터를 정본으로 봅니다.
+
+### 응급진료기록 (기록 영역 — rev.3 에서는 범위 밖이었다)
+
+| 메서드 | 경로 | 용도 |
+|---|---|---|
+| GET · PUT | `/api/clinical-records/by-stay/{ed_stay_id}` | DRAFT/SIGNED 복원 · 반복 임시저장 |
+| POST | `/api/clinical-records/{record_id}/sign` | 최신 DRAFT 를 SIGNED 로 전환 |
+| POST | `/api/clinical-records/draft` | 대화 기록 → 초안 생성 (ClinicalNLP) |
+| POST | `/api/clinical-records/transcribe` | 음성 → Whisper 전사 |
+| POST | `/api/clinical-records/draft/audio` | 전사 + 초안 생성 통합 경로 (호환 유지) |
+
+저장 규칙과 상태 전이는 `docs/clinical-record-persistence.md` 를 따릅니다.
+이 세 POST 는 nginx 에서 각각 630s · 310s · 930s 의 proxy timeout 을 받습니다
+(`nginx/conf.d/eron-proxy.inc`). backend deadline 이 먼저 구조화된 504 를 반환하도록
+둔 여유이므로 임의로 줄이지 않습니다.
+
+### 진단코드
+
+| 메서드 | 경로 | 용도 |
+|---|---|---|
+| GET | `/api/kcd/search` | KCD 코드 검색 |
+
+> 현재 `public.kcd_codes` 가 비어 있고 약어 확장용 사전 자산도 배포되어 있지 않아
+> 빈 결과를 반환합니다. 500 이 아니라 `{"items": [], "total": 0}` 으로 degrade 합니다.
+
+### 경고 확인
+
+| 메서드 | 경로 | 용도 |
+|---|---|---|
+| POST | `/api/ed/alerts/{stay_id}/acknowledge` | 의료진 재검토 완료 표시 (`app.prediction_ack`) |
+
+### 기존 CRUD (rev.3 본문에서 다루지 않은 자체 도메인)
+
+`CLAUDE.md` 의 "기존 route prefix·응답 형태 유지" 규칙에 따라 그대로 유지되는
+`/api/patients` · `/api/visits` · `/api/vitals` · `/api/predictions` · `/api/records`
+계열입니다. §6 에서 설명한 대로 `/api/ed/*` 와는 **다른 자원**입니다.
+
+| 메서드 | 경로 |
+|---|---|
+| GET, PUT, DELETE | `/api/patients/{patient_id}` |
+| GET, POST | `/api/visits` |
+| GET, PUT, DELETE | `/api/visits/{visit_id}` |
+| GET | `/api/visits/patient/{patient_id}` |
+| GET, POST | `/api/visits/{visit_id}/vitals` · `/predictions` · `/records` |
+| GET, PUT, DELETE | `/api/vitals/{vital_id}` · `/api/records/{record_id}` |
+| GET | `/api/predictions/{prediction_id}` |
 
 ---
 
