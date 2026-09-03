@@ -168,7 +168,7 @@ test("Whisper 화자명은 화면 표시에서도 유지하고 누락된 화자�
     }),
     [
       { speaker: "SPEAKER_00", text: "첫 문장" },
-      { speaker: "화자 미확인", text: "둘째 문장" },
+      { speaker: "화자 미지정", text: "둘째 문장" },
     ],
   );
 });

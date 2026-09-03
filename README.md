@@ -20,7 +20,8 @@ segment는 대화 기록에 표시되고, 사용자가 초안 생성을 누르�
 컨테이너는 호스트 포트를 공개하지 않으므로 OCI ingress 규칙이 필요하지 않습니다.
 
 기록 화면의 녹음 시작·일시정지·재개·종료는 브라우저 `MediaRecorder`를 사용합니다.
-녹음을 종료하면 생성된 오디오를 `/api/clinical-records/transcribe`로 자동 전달합니다.
+녹음을 종료하면 미리듣기와 녹음 정보를 확인할 수 있으며, 사용자가 `이 녹음 사용`을
+선택한 경우에만 생성된 오디오를 `/api/clinical-records/transcribe`로 전달합니다.
 브라우저 마이크 권한은 `localhost` 또는 HTTPS 환경에서만 사용할 수 있으므로 OCI
 배포에서는 HTTPS가 필요합니다.
 

@@ -9,6 +9,19 @@ from typing import Any
 from .errors import ProviderTranscriptionError
 
 
+_KNOWN_NON_SPEECH_HALLUCINATIONS = {
+    "시청해주셔서감사합니다",
+    "시청해주셔서고맙습니다",
+    "구독과좋아요부탁드립니다",
+}
+
+
+def is_known_non_speech_hallucination(text: str) -> bool:
+    """Reject only common subtitle boilerplate, not uncertain clinical speech."""
+    normalized = "".join(character for character in text if character.isalnum()).lower()
+    return normalized in _KNOWN_NON_SPEECH_HALLUCINATIONS
+
+
 @dataclass(frozen=True)
 class GroqWhisperConfig:
     api_key: str
@@ -122,12 +135,15 @@ class GroqWhisperTranscriber:
         payload = self._as_dict(response)
         segments: list[dict[str, Any]] = []
         for index, segment in enumerate(payload.get("segments") or [], start=1):
+            text = str(segment.get("text", "")).strip()
+            if not text or is_known_non_speech_hallucination(text):
+                continue
             segments.append(
                 {
                     "id": f"seg_{index:04d}",
                     "start": round(float(segment["start"]), 3),
                     "end": round(float(segment["end"]), 3),
-                    "text": str(segment.get("text", "")).strip(),
+                    "text": text,
                     "avg_logprob": (
                         round(float(segment["avg_logprob"]), 4)
                         if segment.get("avg_logprob") is not None
@@ -144,7 +160,7 @@ class GroqWhisperTranscriber:
         if duration is None and segments:
             duration = segments[-1]["end"]
         return {
-            "text": str(payload.get("text", "")).strip(),
+            "text": " ".join(segment["text"] for segment in segments),
             "segments": segments,
             "language": payload.get("language") or self.config.language or "unknown",
             "language_probability": None,

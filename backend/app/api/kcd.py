@@ -54,6 +54,35 @@ def lookup_alias_terms(query: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for row in rows for value in row if value))
 
 
+# Colloquial organ names whose KCD master wording differs from a plain
+# "{organ}의 악성 신생물" substitution (verified against hira_kcd9.sqlite).
+_CANCER_ORGAN_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "대장": ("결장", "직장"),
+    "자궁": ("자궁경부", "자궁체부"),
+    "간": ("간", "간 및 간내 담관"),
+    "코": ("비강",),
+}
+
+
+def expand_common_kcd_terms(query: str) -> tuple[str, ...]:
+    """Expand common cancer names to the wording used by the KCD master."""
+    normalized = " ".join(query.strip().split())
+    expanded: list[str] = []
+
+    korean_cancer = re.fullmatch(r"([가-힣]{1,30})암", normalized)
+    if korean_cancer:
+        organ = korean_cancer.group(1)
+        for official_organ in _CANCER_ORGAN_SYNONYMS.get(organ, (organ,)):
+            expanded.append(f"{official_organ}의 악성 신생물")
+
+    english_cancer = re.fullmatch(r"(.+?)\s+cancer", normalized, flags=re.IGNORECASE)
+    if english_cancer:
+        organ = english_cancer.group(1).strip()
+        expanded.append(f"malignant neoplasm of {organ}")
+
+    return tuple(expanded)
+
+
 @router.get("/search", response_model=KcdSearchResponse)
 def search_kcd_codes(
     q: str = Query(min_length=1, max_length=100),
@@ -62,7 +91,9 @@ def search_kcd_codes(
 ):
     query = q.strip()
     normalized_code = re.sub(r"[^A-Za-z0-9]", "", query).upper()
-    aliases = lookup_alias_terms(query)
+    aliases = tuple(
+        dict.fromkeys((*lookup_alias_terms(query), *expand_common_kcd_terms(query)))
+    )
     terms = []
     for raw_term in re.split(r"\s+", query):
         term = re.sub(r"(의심|추정|증)$", "", raw_term)

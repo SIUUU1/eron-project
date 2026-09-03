@@ -4,6 +4,7 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
@@ -123,6 +124,30 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  // ?mobile=1 강제 진입점(예: /records?mobile=1): 사이드바·헤더 없이
+  // 녹음/기록 화면만 단독으로 보여준다. 휴대폰에서 곧장 녹음창으로 쓰기 위한 용도.
+  const isMobileCompact = useRouterState({
+    select: (s) =>
+      String((s.location.search as Record<string, unknown> | undefined)?.mobile) === "1",
+  });
+
+  if (isMobileCompact) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <div className="flex min-h-screen w-full flex-col bg-background">
+          <div className="flex items-center justify-center gap-2 bg-navy px-4 py-2 text-center text-xs text-navy-foreground/85">
+            <Info className="size-3.5 shrink-0" />본 시스템은 프로젝트 시연용이며 실제 의료 판단을
+            대신하지 않습니다.
+          </div>
+          <main className="min-w-0 flex-1 p-4">
+            {/* Required: nested routes render here. */}
+            <Outlet />
+          </main>
+        </div>
+        <Toaster position="top-right" />
+      </QueryClientProvider>
+    );
+  }
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -130,8 +155,8 @@ function RootComponent() {
         <AppSidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-center gap-2 bg-navy px-6 py-2 text-xs text-navy-foreground/85">
-            <Info className="size-3.5" />
-            본 시스템은 프로젝트 시연용이며 실제 의료 판단을 대신하지 않습니다.
+            <Info className="size-3.5" />본 시스템은 프로젝트 시연용이며 실제 의료 판단을 대신하지
+            않습니다.
           </div>
           <AppHeader />
           <main className="min-w-0 flex-1 p-6">

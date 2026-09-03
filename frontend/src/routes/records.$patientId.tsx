@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useRouterState } from "@tanstack/react-router";
 import {
   AlertCircle,
   ArrowLeft,
@@ -15,6 +15,7 @@ import {
   Pause,
   Plus,
   Save,
+  Send,
   Square,
   Stethoscope,
   Upload,
@@ -49,6 +50,9 @@ import type { PersistedClinicalRecord, WhisperDraftRequest } from "@/api/types";
 import {
   BrowserAudioRecorder,
   audioRecordingErrorMessage,
+  createAudioRecordingPreview,
+  settleAudioRecordingPreview,
+  type AudioRecordingPreview,
   type AudioRecorderState,
 } from "@/lib/browser-audio-recorder";
 import { FieldProvenancePanel } from "@/components/records/field-provenance-panel";
@@ -143,6 +147,15 @@ function statusOf(value: string): CheckStatus {
   return "complete";
 }
 
+function formatRecordingDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function displayAudioType(file: File): string {
+  return file.type || file.name.split(".").pop()?.toUpperCase() || "브라우저 기본 형식";
+}
+
 const StatusIcon = ({ status }: { status: CheckStatus }) =>
   status === "complete" ? (
     <CheckCircle2 className="size-4" />
@@ -161,6 +174,7 @@ function RecordWorkflowPage() {
   const recordQuery = useQuery({
     queryKey: ["clinical-record", patientId],
     queryFn: ({ signal }) => getPersistedClinicalRecord(patientId, signal),
+    refetchInterval: 5_000,
   });
 
   if (detailQuery.isPending || recordQuery.isPending) {
@@ -182,7 +196,9 @@ function RecordWorkflowPage() {
         <p className="text-sm text-muted-foreground">{queryError?.message}</p>
         <div className="flex gap-2">
           <Button asChild variant="outline">
-            <Link to="/records">목록으로</Link>
+            <Link to="/records" search={(prev) => prev}>
+              목록으로
+            </Link>
           </Button>
           <Button
             onClick={() => {
@@ -218,7 +234,13 @@ function RecordWorkflowPage() {
     },
   };
 
-  return <RecordWorkflow patient={patient} persisted={recordQuery.data} />;
+  return (
+    <RecordWorkflow
+      key={`${patient.id}:${recordQuery.data?.updated_at ?? "new"}`}
+      patient={patient}
+      persisted={recordQuery.data}
+    />
+  );
 }
 
 function RecordWorkflow({
@@ -228,6 +250,10 @@ function RecordWorkflow({
   patient: ReturnType<typeof createWorkflowPatient>;
   persisted: PersistedClinicalRecord | null;
 }) {
+  const isMobileCompact = useRouterState({
+    select: (state) =>
+      String((state.location.search as Record<string, unknown> | undefined)?.mobile) === "1",
+  });
   const queryClient = useQueryClient();
   const savedPayload = persisted?.record_payload;
   const savedRecordPayload = savedPayload?.record as EmergencyRecord | undefined;
@@ -239,17 +265,26 @@ function RecordWorkflow({
     : undefined;
   const savedStatuses = savedPayload?.field_statuses as Record<RecordFieldKey, CheckStatus> | null;
   const savedProvenance = (savedPayload?.field_provenance ?? {}) as FieldProvenanceMap;
+  const savedWhisperPayload = savedPayload?.whisper_payload ?? null;
   const initiallySigned = persisted?.status === "SIGNED";
   const [step, setStep] = useState(initiallySigned ? 4 : 1);
-  const [dialogue, setDialogue] = useState<DraftDialogueTurn[]>([]);
+  const [dialogue, setDialogue] = useState<DraftDialogueTurn[]>(
+    savedWhisperPayload ? whisperDraftToDialogue(savedWhisperPayload) : [],
+  );
   const [uploadedWhisperPayload, setUploadedWhisperPayload] = useState<WhisperDraftRequest | null>(
-    null,
+    savedWhisperPayload,
   );
   const [uploadedWhisperFileName, setUploadedWhisperFileName] = useState<string | null>(null);
   const [uploadedAudioFile, setUploadedAudioFile] = useState<File | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const [transcribingFileName, setTranscribingFileName] = useState<string | null>(null);
   const [recording, setRecording] = useState<AudioRecorderState>("idle");
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordedAudio, setRecordedAudio] = useState<AudioRecordingPreview | null>(null);
+  const [conversationSentAt, setConversationSentAt] = useState<string | null>(
+    savedPayload?.conversation_sent_at ?? null,
+  );
+  const [mobileWorkflowExpanded, setMobileWorkflowExpanded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(savedRecord ?? emptyRecord);
   const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>(savedProvenance);
@@ -305,14 +340,33 @@ function RecordWorkflow({
   const whisperFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioRecorderRef = useRef<BrowserAudioRecorder | null>(null);
+  const recordedAudioUrlRef = useRef<string | null>(null);
+  const transcribingRef = useRef(false);
+  const overwriteConfirmedRef = useRef(false);
+
+  const clearRecordedAudio = () => {
+    if (recordedAudio && recordedAudioUrlRef.current) {
+      settleAudioRecordingPreview(recordedAudio, true);
+    }
+    recordedAudioUrlRef.current = null;
+    setRecordedAudio(null);
+  };
 
   useEffect(
     () => () => {
       audioRecorderRef.current?.dispose();
       audioRecorderRef.current = null;
+      if (recordedAudioUrlRef.current) URL.revokeObjectURL(recordedAudioUrlRef.current);
+      recordedAudioUrlRef.current = null;
     },
     [],
   );
+
+  useEffect(() => {
+    if (recording !== "recording") return;
+    const timer = window.setInterval(() => setRecordingSeconds((seconds) => seconds + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [recording]);
 
   const statuses = useMemo(() => {
     const out = {} as Record<RecordFieldKey, CheckStatus>;
@@ -342,7 +396,7 @@ function RecordWorkflow({
   });
   const v = patient.vitals;
 
-  const persistDraft = async (showToast = true) => {
+  const persistDraft = async (showToast = true, sentAt = conversationSentAt) => {
     if (isSigned) {
       toast.error("인증 완료된 기록은 수정하거나 다시 저장할 수 없습니다.");
       return null;
@@ -356,6 +410,13 @@ function RecordWorkflow({
           field_provenance: fieldProvenance as Record<string, unknown>,
           generated,
           diagnosis_rule_outs: diagnosisRuleOuts,
+          ...(dialogue.length > 0
+            ? {
+                whisper_payload:
+                  uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue),
+              }
+            : {}),
+          ...(sentAt ? { conversation_sent_at: sentAt } : {}),
         },
         selected_kcd: selectedKcds,
         clinician_id: "DEMO-DR-001",
@@ -373,6 +434,15 @@ function RecordWorkflow({
     } finally {
       setSaving(false);
     }
+  };
+
+  const sendConversationToDesktop = async () => {
+    if (dialogue.length === 0 || saving || conversationSentAt) return;
+    const sentAt = new Date().toISOString();
+    const saved = await persistDraft(false, sentAt);
+    if (!saved) return;
+    setConversationSentAt(sentAt);
+    toast.success("대화 내용을 PC로 전송했습니다.");
   };
 
   const certifyRecord = async () => {
@@ -421,6 +491,7 @@ function RecordWorkflow({
       setGenerated(false);
       setChecked(false);
       setGenerationNotice(null);
+      setConversationSentAt(null);
       toast.success("Whisper JSON을 불러왔습니다.", {
         description: `${payload.segments.length}개 segment의 원문과 화자 정보를 유지합니다.`,
       });
@@ -431,15 +502,17 @@ function RecordWorkflow({
     }
   };
 
-  const transcribeAudioFile = async (file: File) => {
+  const transcribeAudioFile = async (file: File): Promise<boolean> => {
+    if (transcribingRef.current) return false;
     if (file.size === 0) {
       toast.error("빈 음성 파일은 사용할 수 없습니다.");
-      return;
+      return false;
     }
     if (file.size > 25 * 1024 * 1024) {
       toast.error("음성 파일은 25MB 이하여야 합니다.");
-      return;
+      return false;
     }
+    transcribingRef.current = true;
     setTranscribing(true);
     setTranscribingFileName(file.name);
     toast.info("음성 인식을 시작했습니다.", {
@@ -459,14 +532,18 @@ function RecordWorkflow({
       setGenerated(false);
       setChecked(false);
       setGenerationNotice(null);
+      setConversationSentAt(null);
       toast.success("음성 인식이 완료되었습니다.", {
         description: `${payload.segments.length}개 segment를 대화 기록에 표시했습니다.`,
       });
+      return true;
     } catch (error) {
       toast.error("음성 파일을 인식하지 못했습니다.", {
         description: clinicalAudioTranscriptionErrorMessage(error),
       });
+      return false;
     } finally {
+      transcribingRef.current = false;
       setTranscribing(false);
       setTranscribingFileName(null);
     }
@@ -482,11 +559,44 @@ function RecordWorkflow({
 
   const startRecording = async () => {
     if (recording === "recording" || generating || transcribing) return;
+    if (isSigned) {
+      toast.error("최종 인증된 기록은 새로 녹음할 수 없습니다.");
+      return;
+    }
     const resuming = recording === "paused";
+    const replacingSavedDraft = !resuming && hasSavedDraft && !overwriteConfirmedRef.current;
+    if (
+      replacingSavedDraft &&
+      !window.confirm(
+        "이미 임시저장된 기록이 있습니다. 새로 녹음하면 기존 임시저장 내용을 덮어씁니다. 새로 녹음하시겠습니까?",
+      )
+    ) {
+      return;
+    }
     try {
+      if (!resuming) {
+        clearRecordedAudio();
+        setRecordingSeconds(0);
+      }
       const recorder = audioRecorderRef.current ?? new BrowserAudioRecorder();
       audioRecorderRef.current = recorder;
       await recorder.start();
+      if (replacingSavedDraft) {
+        overwriteConfirmedRef.current = true;
+        setUploadedWhisperPayload(null);
+        setUploadedWhisperFileName(null);
+        setUploadedAudioFile(null);
+        setDialogue([]);
+        setRecord({ ...emptyRecord });
+        setFieldProvenance({});
+        setClinicalFieldStatuses(null);
+        setSelectedKcds([]);
+        setDiagnosisRuleOuts([]);
+        setGenerated(false);
+        setChecked(false);
+        setGenerationNotice(null);
+        setConversationSentAt(null);
+      }
       setRecording(recorder.state);
       toast.info(resuming ? "녹음을 재개했습니다." : "녹음을 시작했습니다.");
     } catch (error) {
@@ -514,7 +624,12 @@ function RecordWorkflow({
       const audio = await recorder.stop();
       setRecording("idle");
       audioRecorderRef.current = null;
-      await transcribeAudioFile(audio);
+      const preview = createAudioRecordingPreview(audio, recordingSeconds);
+      recordedAudioUrlRef.current = preview.objectUrl;
+      setRecordedAudio(preview);
+      toast.success("녹음이 완료되었습니다.", {
+        description: "미리듣기 후 사용할 녹음인지 선택해 주세요.",
+      });
     } catch (error) {
       toast.error("음성 녹음을 완료하지 못했습니다.", {
         description: audioRecordingErrorMessage(error),
@@ -524,6 +639,22 @@ function RecordWorkflow({
       audioRecorderRef.current = null;
       setRecording("idle");
     }
+  };
+
+  const useRecordedAudio = async () => {
+    if (!recordedAudio || transcribing) return;
+    const preview = settleAudioRecordingPreview(
+      recordedAudio,
+      await transcribeAudioFile(recordedAudio.file),
+    );
+    if (!preview) recordedAudioUrlRef.current = null;
+    setRecordedAudio(preview);
+  };
+
+  const cancelRecordedAudio = () => {
+    if (transcribing) return;
+    clearRecordedAudio();
+    setRecordingSeconds(0);
   };
 
   const generateRecord = async () => {
@@ -652,11 +783,276 @@ function RecordWorkflow({
     );
   };
 
+  if (isMobileCompact && (mobileWorkflowExpanded || isSigned)) {
+    return (
+      <div className="mx-auto w-full max-w-lg space-y-4 pb-8">
+        <div className="flex items-center justify-between gap-3">
+          {isSigned ? (
+            <Button asChild variant="ghost" size="sm" className="min-h-11 px-2">
+              <Link to="/records" search={(previous) => previous}>
+                <ArrowLeft className="size-4" /> 환자 변경
+              </Link>
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="min-h-11 px-2"
+              onClick={() => setMobileWorkflowExpanded(false)}
+            >
+              <ArrowLeft className="size-4" /> 녹음 화면
+            </Button>
+          )}
+          <Badge
+            variant="outline"
+            className={isSigned ? "bg-risk-stable-soft text-risk-stable" : "bg-mint-soft text-navy"}
+          >
+            {isSigned ? "최종 인증 완료" : "생성된 초안"}
+          </Badge>
+        </div>
+
+        <div className="rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <p className="truncate text-sm font-semibold">
+            {patient.name} · {patient.sex} {patient.age}세 · KTAS {patient.ktas} · {patient.id}
+          </p>
+          {isSigned ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {certifiedAt} 최종 인증되어 녹음 및 수정 기능을 표시하지 않습니다.
+            </p>
+          ) : null}
+        </div>
+
+        <Card className="overflow-hidden rounded-2xl">
+          <CardHeader className="border-b py-4">
+            <CardTitle className="text-lg">
+              {isSigned ? "최종 응급진료기록" : "생성된 응급진료기록 초안"}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="divide-y px-4 py-0">
+            {fieldOrder.map((key) => (
+              <div key={key} className="py-4">
+                <p className="mb-1 text-xs font-semibold text-muted-foreground">
+                  {recordFieldLabels[key]}
+                </p>
+                <p className="whitespace-pre-wrap break-words text-sm leading-6">
+                  {record[key]?.trim() || "미확인"}
+                </p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        {!isSigned ? (
+          <p className="px-1 text-xs leading-5 text-muted-foreground">
+            이 화면은 모바일 확인용입니다. 항목 수정, 누락 검사, KCD 코드 선택 및 최종 인증은
+            데스크톱 기록 화면에서 진행해 주세요.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (isMobileCompact && !mobileWorkflowExpanded) {
+    return (
+      <div className="mx-auto w-full max-w-lg space-y-4 pb-8">
+        <div className="flex items-center justify-between gap-3">
+          <Button asChild variant="ghost" size="sm" className="min-h-11 px-2">
+            <Link to="/records" search={(previous) => previous}>
+              <ArrowLeft className="size-4" /> 환자 변경
+            </Link>
+          </Button>
+          <Badge variant="outline" className="shrink-0 bg-mint-soft text-navy">
+            {generated ? "초안 생성 완료" : "녹음 대기"}
+          </Badge>
+        </div>
+
+        <div className="rounded-2xl bg-navy px-5 py-4 text-navy-foreground shadow-sm">
+          <p className="text-xs text-navy-foreground/70">선택한 환자</p>
+          <p className="mt-1 text-xl font-bold">{patient.name}</p>
+          <p className="mt-1 text-sm text-navy-foreground/80">
+            {patient.sex} {patient.age}세 · KTAS {patient.ktas} · {patient.id}
+          </p>
+        </div>
+
+        <Card className="overflow-hidden rounded-2xl">
+          <CardContent className="flex flex-col items-center gap-5 px-4 py-7 text-center">
+            <div>
+              <p className="text-lg font-bold">
+                {recording === "recording"
+                  ? "대화를 녹음하고 있습니다"
+                  : recording === "paused"
+                    ? "녹음이 일시정지되었습니다"
+                    : recordedAudio
+                      ? "녹음 내용을 확인해 주세요"
+                      : "환자와의 대화를 녹음하세요"}
+              </p>
+              <p className="tabular mt-2 text-4xl font-bold tracking-tight">
+                {formatRecordingDuration(recordingSeconds)}
+              </p>
+            </div>
+
+            {recording === "idle" && !recordedAudio ? (
+              <Button
+                className="size-28 rounded-full text-base shadow-lg"
+                onClick={startRecording}
+                disabled={transcribing || generating || isSigned}
+                aria-label="녹음 시작"
+              >
+                <Mic className="size-9" />
+                녹음 시작
+              </Button>
+            ) : null}
+
+            {recording === "recording" ? (
+              <div className="grid w-full grid-cols-2 gap-3">
+                <Button className="min-h-14" variant="outline" onClick={pauseRecording}>
+                  <Pause className="size-5" /> 일시정지
+                </Button>
+                <Button className="min-h-14" onClick={stopRecording}>
+                  <Square className="size-5" /> 녹음 종료
+                </Button>
+              </div>
+            ) : null}
+
+            {recording === "paused" ? (
+              <div className="grid w-full grid-cols-2 gap-3">
+                <Button className="min-h-14" onClick={startRecording}>
+                  <Mic className="size-5" /> 녹음 재개
+                </Button>
+                <Button className="min-h-14" variant="outline" onClick={stopRecording}>
+                  <Square className="size-5" /> 녹음 종료
+                </Button>
+              </div>
+            ) : null}
+
+            {recording !== "idle" ? (
+              <p className="text-xs text-muted-foreground">
+                화면을 잠그거나 다른 앱으로 전환하면 녹음이 중단될 수 있습니다.
+              </p>
+            ) : null}
+
+            {recordedAudio ? (
+              <div className="w-full space-y-4 text-left">
+                <audio
+                  className="h-12 w-full"
+                  controls
+                  preload="metadata"
+                  src={recordedAudio.objectUrl}
+                />
+                <p className="break-words text-xs text-muted-foreground">
+                  {displayAudioType(recordedAudio.file)} ·
+                  {` ${(recordedAudio.file.size / 1024).toFixed(1)}KB`}
+                </p>
+                <Button
+                  className="min-h-14 w-full text-base"
+                  onClick={useRecordedAudio}
+                  disabled={transcribing}
+                >
+                  {transcribing ? (
+                    <Loader2 className="size-5 animate-spin" />
+                  ) : (
+                    <Check className="size-5" />
+                  )}
+                  {transcribing ? "대화를 변환하고 있습니다" : "이 녹음 사용"}
+                </Button>
+                <div className="grid grid-cols-2 gap-3">
+                  <Button
+                    className="min-h-12"
+                    variant="outline"
+                    onClick={startRecording}
+                    disabled={transcribing}
+                  >
+                    <Mic className="size-4" /> 다시 녹음
+                  </Button>
+                  <Button
+                    className="min-h-12"
+                    variant="outline"
+                    onClick={cancelRecordedAudio}
+                    disabled={transcribing}
+                  >
+                    <X className="size-4" /> 취소
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {recording === "idle" && !recordedAudio && dialogue.length === 0 ? (
+              <>
+                <div className="flex w-full items-center gap-3 text-xs text-muted-foreground">
+                  <Separator className="flex-1" /> 또는 <Separator className="flex-1" />
+                </div>
+                <input
+                  ref={audioFileInputRef}
+                  type="file"
+                  accept="audio/*,.wav,.mp3,.m4a,.mp4,.webm,.ogg,.flac"
+                  className="hidden"
+                  onChange={loadAudioFile}
+                />
+                <Button
+                  className="min-h-12 w-full"
+                  variant="secondary"
+                  onClick={() => audioFileInputRef.current?.click()}
+                  disabled={transcribing}
+                >
+                  <Upload className="size-4" /> 기존 녹음 파일 선택
+                </Button>
+              </>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        {dialogue.length > 0 ? (
+          <Card className="rounded-2xl">
+            <CardHeader className="border-b py-3">
+              <CardTitle className="text-base">변환된 대화 · {dialogue.length}개</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-4">
+              <ScrollArea className="max-h-[50vh] min-h-48 rounded-lg border bg-secondary/30 p-3">
+                <ul className="space-y-3">
+                  {dialogue.map((turn, index) => (
+                    <li key={index} className="flex justify-end">
+                      <div className="max-w-[92%] rounded-xl bg-primary px-4 py-3 text-left text-primary-foreground shadow-sm">
+                        <p className="whitespace-pre-wrap break-words text-sm leading-6">{turn.text}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </ScrollArea>
+              <Button
+                className="min-h-14 w-full text-base"
+                onClick={() => void sendConversationToDesktop()}
+                disabled={saving || transcribing || Boolean(conversationSentAt)}
+              >
+                {saving ? (
+                  <Loader2 className="size-5 animate-spin" />
+                ) : conversationSentAt ? (
+                  <Check className="size-5" />
+                ) : (
+                  <Send className="size-5" />
+                )}
+                {saving
+                  ? "PC로 전송 중"
+                  : conversationSentAt
+                    ? "전송 완료"
+                    : "대화 내용 PC로 보내기"}
+              </Button>
+              {conversationSentAt ? (
+                <p className="text-center text-sm leading-6 text-muted-foreground">
+                  전송이 완료되었습니다. 나머지 응급진료기록 작성과 검토는 PC에서 진행해 주세요.
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm">
-          <Link to="/records">
+          <Link to="/records" search={(prev) => prev}>
             <ArrowLeft className="size-4" /> 환자 목록
           </Link>
         </Button>
@@ -760,7 +1156,7 @@ function RecordWorkflow({
 
       {/* STEP 1 */}
       {step === 1 && (
-        <div className="grid grid-cols-2 gap-5">
+        <div className="grid gap-5 md:grid-cols-2">
           <Card>
             <CardHeader className="border-b py-3">
               <CardTitle className="text-base">환자-의료진 대화 기록</CardTitle>
@@ -769,15 +1165,17 @@ function RecordWorkflow({
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
+                  className="min-h-11 flex-1 sm:flex-none"
                   variant={recording === "recording" ? "default" : "outline"}
                   onClick={startRecording}
-                  disabled={generating || transcribing || recording === "recording"}
+                  disabled={isSigned || generating || transcribing || recording === "recording"}
                 >
                   <Mic className="size-4" />
                   {recording === "paused" ? " 녹음 재개" : " 녹음 시작"}
                 </Button>
                 <Button
                   size="sm"
+                  className="min-h-11 flex-1 sm:flex-none"
                   variant="outline"
                   onClick={pauseRecording}
                   disabled={generating || transcribing || recording !== "recording"}
@@ -786,6 +1184,7 @@ function RecordWorkflow({
                 </Button>
                 <Button
                   size="sm"
+                  className="min-h-11 flex-1 sm:flex-none"
                   variant="outline"
                   onClick={stopRecording}
                   disabled={generating || transcribing || recording === "idle"}
@@ -801,6 +1200,7 @@ function RecordWorkflow({
                 />
                 <Button
                   size="sm"
+                  className="min-h-11 w-full sm:w-auto"
                   variant="secondary"
                   onClick={() => whisperFileInputRef.current?.click()}
                   disabled={generating || transcribing || recording !== "idle"}
@@ -816,6 +1216,7 @@ function RecordWorkflow({
                 />
                 <Button
                   size="sm"
+                  className="min-h-11 w-full sm:w-auto"
                   variant="secondary"
                   onClick={() => audioFileInputRef.current?.click()}
                   disabled={generating || transcribing || recording !== "idle"}
@@ -847,16 +1248,70 @@ function RecordWorkflow({
                 </p>
               ) : null}
               {recording !== "idle" && (
-                <p className="flex items-center gap-2 text-xs text-risk-critical">
+                <p className="flex flex-wrap items-center gap-2 text-xs text-risk-critical">
                   <span
                     className={`size-2 rounded-full bg-risk-critical ${
                       recording === "recording" ? "animate-pulse" : ""
                     }`}
                   />
-                  {recording === "recording" ? "녹음 중" : "녹음 일시정지"} · 녹음 종료 시 API1 음성
-                  인식을 자동으로 시작합니다.
+                  {recording === "recording" ? "녹음 중" : "녹음 일시정지"} ·
+                  {formatRecordingDuration(recordingSeconds)} · 종료 후 미리듣기에서 전송할 수
+                  있습니다.
                 </p>
               )}
+              {recording !== "idle" ? (
+                <p className="text-xs text-muted-foreground">
+                  화면 잠금 또는 브라우저가 백그라운드로 전환되면 녹음이 중단될 수 있습니다.
+                </p>
+              ) : null}
+              {recordedAudio ? (
+                <div className="space-y-3 rounded-md border bg-secondary/30 p-3">
+                  <audio
+                    className="h-11 w-full max-w-full"
+                    controls
+                    preload="metadata"
+                    src={recordedAudio.objectUrl}
+                  >
+                    이 브라우저에서는 오디오 미리듣기를 지원하지 않습니다.
+                  </audio>
+                  <p className="break-words text-xs text-muted-foreground">
+                    녹음 시간 {formatRecordingDuration(recordedAudio.durationSeconds)} · 파일 형식{" "}
+                    {displayAudioType(recordedAudio.file)} · 파일 크기{" "}
+                    {(recordedAudio.file.size / 1024).toFixed(1)}KB
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                    <Button className="min-h-11" onClick={useRecordedAudio} disabled={transcribing}>
+                      {transcribing ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Check className="size-4" />
+                      )}
+                      이 녹음 사용
+                    </Button>
+                    <Button
+                      className="min-h-11"
+                      variant="outline"
+                      onClick={startRecording}
+                      disabled={transcribing}
+                    >
+                      <Mic className="size-4" /> 다시 녹음
+                    </Button>
+                    <Button
+                      className="min-h-11"
+                      variant="outline"
+                      onClick={cancelRecordedAudio}
+                      disabled={transcribing}
+                    >
+                      <X className="size-4" /> 취소
+                    </Button>
+                  </div>
+                  {transcribing ? (
+                    <p className="text-xs text-muted-foreground">
+                      전송 실패 시 이 녹음은 유지되며 같은 파일로 다시 시도할 수 있습니다.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <ScrollArea className="h-[420px] rounded-md border bg-secondary/30 p-3">
                 {dialogue.length === 0 ? (
                   <p className="py-20 text-center text-sm text-muted-foreground">
@@ -1539,7 +1994,9 @@ function RecordWorkflow({
                 최종 기록 보기
               </Button>
               <Button asChild>
-                <Link to="/records">환자 목록으로</Link>
+                <Link to="/records" search={(prev) => prev}>
+                  환자 목록으로
+                </Link>
               </Button>
             </div>
           </CardContent>
