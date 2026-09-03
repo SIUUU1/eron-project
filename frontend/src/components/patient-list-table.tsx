@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Check, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -50,6 +50,15 @@ export function PatientListTable({
   base: "/monitoring" | "/records";
   rows: PatientRow[];
 }) {
+  const navigate = useNavigate();
+
+  // 행 클릭과 상세보기 버튼이 항상 같은 곳으로 가도록 이동 경로를 한 군데서 만든다.
+  const detailLink = (patientId: string) =>
+    ({ to: `${base}/$patientId`, params: { patientId } }) as const;
+
+  // 이동 동작은 같지만, 기록 화면에서는 버튼이 기록 작성 진입점으로 읽히도록 이름만 바꾼다.
+  const detailLabel = base === "/records" ? "기록작성" : "상세보기";
+
   return (
     <Table>
       <TableHeader>
@@ -76,7 +85,12 @@ export function PatientListTable({
       <TableBody>
         {rows.map((p) => (
           // 퇴실한 환자는 밝은 회색으로 구분한다
-          <TableRow key={p.id} className={`cursor-pointer ${p.discharge ? "bg-muted/60" : ""}`}>
+          <TableRow
+            key={p.id}
+            className={`cursor-pointer ${p.discharge ? "bg-muted/60" : ""}`}
+            // 행 어디를 눌러도 상세보기 버튼과 동일하게 동작한다
+            onClick={() => void navigate(detailLink(p.id))}
+          >
             <TableCell className="tabular font-mono text-xs">{p.id}</TableCell>
             <TableCell className="font-semibold">{p.name}</TableCell>
             <TableCell className="tabular">
@@ -146,10 +160,11 @@ export function PatientListTable({
                 {p.recordStatus ?? "-"}
               </span>
             </TableCell>
-            <TableCell>
+            {/* 버튼이 이미 이동을 처리하므로 행 클릭까지 겹쳐 실행되지 않게 막는다 */}
+            <TableCell onClick={(e) => e.stopPropagation()}>
               <Button asChild size="sm" variant="secondary">
-                <Link to={`${base}/$patientId`} params={{ patientId: p.id }}>
-                  상세보기 <ChevronRight className="size-3.5" />
+                <Link {...detailLink(p.id)}>
+                  {detailLabel} <ChevronRight className="size-3.5" />
                 </Link>
               </Button>
             </TableCell>
