@@ -9,12 +9,41 @@ from unittest.mock import patch
 from clinicalnlp_api3.service import (
     build_service_runtime,
     ConfigurationError,
+    ServiceRuntimeBundle,
     ServiceSettings,
     prepare_service,
 )
 
 
 class ClinicalNlpServiceBootstrapTests(unittest.TestCase):
+    def test_runtime_readiness_restarts_and_checks_the_umls_worker(self):
+        class SpanWorker:
+            def __init__(self):
+                self.ready = False
+                self.start_count = 0
+
+            def start(self):
+                self.start_count += 1
+
+            def status(self):
+                return {"ready": self.ready}
+
+            def close(self):
+                return None
+
+        worker = SpanWorker()
+        bundle = ServiceRuntimeBundle(
+            runtime=object(),
+            span_worker=worker,
+            vector_enabled=True,
+        )
+
+        self.assertFalse(bundle.is_ready())
+        self.assertEqual(worker.start_count, 1)
+        worker.ready = True
+        self.assertTrue(bundle.is_ready())
+        self.assertEqual(worker.start_count, 2)
+
     def test_umls_disabled_runtime_uses_only_official_raw_exact_fallback(self):
         settings = ServiceSettings.from_mapping(
             {

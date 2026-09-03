@@ -17,6 +17,14 @@ def _service_block(compose: str, service_name: str) -> str:
 
 
 class ClinicalNlpComposeManifestTests(unittest.TestCase):
+    def test_clinicalnlp_container_health_waits_for_runtime_readiness(self):
+        dockerfile = (
+            REPOSITORY_ROOT / "services" / "clinicalnlp" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("http://127.0.0.1:8765/ready", dockerfile)
+        self.assertIn("--start-period=240s", dockerfile)
+
     def test_clinicalnlp_is_an_internal_opt_in_service(self):
         compose = COMPOSE_PATH.read_text(encoding="utf-8").replace("\r\n", "\n")
         service = _service_block(compose, "clinicalnlp")

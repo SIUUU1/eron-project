@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .contracts import validate_whisper_payload
@@ -34,6 +34,7 @@ def create_http_server(
     runtime: Any | None,
     request_timeout_seconds: float,
     unavailable_reason: str = "startup",
+    readiness_probe: Callable[[], bool] | None = None,
 ) -> ClinicalNlpHttpServer:
     """Expose the draft runtime through the internal ClinicalNLP HTTP contract."""
 
@@ -45,6 +46,16 @@ def create_http_server(
         if unavailable_reason in {"configuration", "assets", "startup"}
         else "startup"
     )
+
+    def runtime_ready() -> bool:
+        if runtime is None:
+            return False
+        if readiness_probe is None:
+            return True
+        try:
+            return readiness_probe() is True
+        except Exception:
+            return False
 
     class ClinicalNlpHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -63,17 +74,28 @@ def create_http_server(
             self.wfile.write(body)
 
         def do_GET(self) -> None:
-            if urlparse(self.path).path != "/health":
-                self._json(404, {"error": "not_found"})
+            path = urlparse(self.path).path
+            if path == "/health":
+                ready = runtime is not None
+                payload = {
+                    "schema_version": "clinicalnlp-health-v1",
+                    "status": "ready" if ready else "unavailable",
+                }
+                if not ready:
+                    payload["reason"] = safe_unavailable_reason
+                self._json(200 if ready else 503, payload)
                 return
-            ready = runtime is not None
-            payload = {
-                "schema_version": "clinicalnlp-health-v1",
-                "status": "ready" if ready else "unavailable",
-            }
-            if not ready:
-                payload["reason"] = safe_unavailable_reason
-            self._json(200 if ready else 503, payload)
+            if path == "/ready":
+                ready = runtime_ready()
+                payload = {
+                    "schema_version": "clinicalnlp-readiness-v1",
+                    "status": "ready" if ready else "not_ready",
+                }
+                if not ready:
+                    payload["reason"] = safe_unavailable_reason
+                self._json(200 if ready else 503, payload)
+                return
+            self._json(404, {"error": "not_found"})
 
         def do_POST(self) -> None:
             if urlparse(self.path).path != "/v2/clinical-workflows":
@@ -85,6 +107,15 @@ def create_http_server(
                     {
                         "error": "clinicalnlp_unavailable",
                         "reason": safe_unavailable_reason,
+                    },
+                )
+                return
+            if not runtime_ready():
+                self._json(
+                    503,
+                    {
+                        "error": "clinicalnlp_unavailable",
+                        "reason": "startup",
                     },
                 )
                 return

@@ -95,6 +95,14 @@ only when worker status explicitly showed that the worker was not ready before
 the call. These timings may overlap earlier workflow stages because worker
 startup is asynchronous and must not be added together as an end-to-end total.
 
+The service exposes separate liveness and readiness checks. `/health` reports
+whether the HTTP draft runtime was constructed, while `/ready` returns success
+only after the optional UMLS worker is ready (or immediately when UMLS is
+disabled). Draft requests received during UMLS warm-up return a bounded 503
+instead of occupying the request for the worker timeout. The container health
+check uses `/ready` and gives the immutable scispaCy/UMLS assets a four-minute
+startup grace period.
+
 For a one-off local audit of the queries that actually reach pgvector, run the
 evaluation-only harness with an approved synthetic or de-identified Whisper
 JSON file:

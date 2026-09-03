@@ -221,6 +221,18 @@ class ServiceRuntimeBundle:
     vector_enabled: bool
     terminology_backend: str = "postgres"
 
+    def is_ready(self) -> bool:
+        if self.span_worker is None:
+            return True
+        try:
+            # start() is non-blocking and idempotent. Calling it here also
+            # allows a failed worker generation to recover on a later probe.
+            self.span_worker.start()
+            status = self.span_worker.status()
+        except Exception:
+            return False
+        return isinstance(status, Mapping) and status.get("ready") is True
+
     def close(self) -> None:
         if self.span_worker is not None:
             self.span_worker.close()
@@ -395,6 +407,7 @@ def prepare_service(values: Mapping[str, str]) -> PreparedService:
         settings.port,
         runtime=runtime_bundle.runtime,
         request_timeout_seconds=settings.request_timeout_seconds,
+        readiness_probe=runtime_bundle.is_ready,
     )
     return PreparedService(server=server, runtime_bundle=runtime_bundle)
 
@@ -404,13 +417,16 @@ def main() -> None:
     import os
 
     prepared = prepare_service(os.environ)
+    service_status = "unavailable"
+    if prepared.runtime_bundle is not None:
+        service_status = (
+            "ready" if prepared.runtime_bundle.is_ready() else "starting"
+        )
     print(
         json.dumps(
             {
                 "service": "clinicalnlp",
-                "status": (
-                    "ready" if prepared.runtime_bundle is not None else "unavailable"
-                ),
+                "status": service_status,
                 "host": prepared.server.server_address[0],
                 "port": prepared.server.server_port,
             },
