@@ -426,6 +426,8 @@ class LlamaServerMedicalQueryExpander:
                 retry_telemetry["direct_rate_limit_count"] = (
                     retry_telemetry.get("direct_rate_limit_count", 0) + 1
                 )
+            if isinstance(error, HTTPError) and error.code == 429:
+                raise
             if len(target_segment_ids) == 1:
                 return {}, [(target_segment_ids[0], error)]
         if retry_telemetry is not None:
@@ -1129,6 +1131,7 @@ class LlamaServerMedicalQueryExpander:
             "direct_rate_limit_count": 0,
         }
         translation_batches: list[dict[str, int | float]] = []
+        planned_batch_count = 0
 
         def translation_telemetry() -> dict[str, Any]:
             http_ms = float(provider_telemetry.get("http_elapsed_ms", 0.0))
@@ -1144,7 +1147,7 @@ class LlamaServerMedicalQueryExpander:
                     3,
                 ),
                 "translation_calls": translation_calls[0],
-                "translation_batch_count": len(translation_batches),
+                "translation_batch_count": planned_batch_count,
                 "translation_retry_split_count": retry_telemetry["split_count"],
                 "translation_rate_limit_count": rate_limit_count,
                 "translation_batches": [
@@ -1182,6 +1185,7 @@ class LlamaServerMedicalQueryExpander:
             translated_payloads: dict[str, dict[str, Any]] = {}
             failed_translations: list[tuple[str, Exception]] = []
             planned_batches = self._translation_batches(transport_segments)
+            planned_batch_count = len(planned_batches)
             for batch_index, (context_segments, target_ids) in enumerate(
                 planned_batches
             ):
@@ -1191,13 +1195,25 @@ class LlamaServerMedicalQueryExpander:
                 rate_limits_before = int(
                     provider_telemetry.get("rate_limit_count", 0)
                 ) + retry_telemetry["direct_rate_limit_count"]
-                translations, failures = self._request_translation_batch_with_retry(
-                    context_segments=context_segments,
-                    target_segment_ids=target_ids,
-                    call_counter=translation_calls,
-                    provider_telemetry=provider_telemetry,
-                    retry_telemetry=retry_telemetry,
-                )
+                rate_limit_error: HTTPError | None = None
+                try:
+                    translations, failures = (
+                        self._request_translation_batch_with_retry(
+                            context_segments=context_segments,
+                            target_segment_ids=target_ids,
+                            call_counter=translation_calls,
+                            provider_telemetry=provider_telemetry,
+                            retry_telemetry=retry_telemetry,
+                        )
+                    )
+                except HTTPError as error:
+                    if error.code != 429:
+                        raise
+                    rate_limit_error = error
+                    translations = {}
+                    failures = [
+                        (target_id, error) for target_id in target_ids
+                    ]
                 rate_limits_after = int(
                     provider_telemetry.get("rate_limit_count", 0)
                 ) + retry_telemetry["direct_rate_limit_count"]
@@ -1222,6 +1238,13 @@ class LlamaServerMedicalQueryExpander:
                 )
                 failed_translations.extend(failures)
                 translated_payloads.update(translations)
+                if rate_limit_error is not None:
+                    for _, remaining_ids in planned_batches[batch_index + 1 :]:
+                        failed_translations.extend(
+                            (target_id, rate_limit_error)
+                            for target_id in remaining_ids
+                        )
+                    break
         except Exception as error:
             return {
                 "status": "unavailable",

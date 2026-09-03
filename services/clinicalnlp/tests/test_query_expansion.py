@@ -3,6 +3,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from clinicalnlp_api3.pipeline import run_api3
@@ -508,6 +509,148 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             ["seg_0001", "seg_0003"],
         )
         self.assertEqual(result["error_code"], "PartialTranslationFailure")
+
+    def test_rate_limit_does_not_bisect_or_start_later_batches(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"원문 {index}",
+            }
+            for index in range(1, 7)
+        ]
+
+        class ThreeBatchExpander(LlamaServerMedicalQueryExpander):
+            def _translation_batches(self, transport_segments):
+                return [
+                    (
+                        transport_segments[start : start + 2],
+                        [
+                            item["segment_id"]
+                            for item in transport_segments[start : start + 2]
+                        ],
+                    )
+                    for start in range(0, 6, 2)
+                ]
+
+        class RateLimitedClient:
+            def __init__(self):
+                self.target_batches = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                self.target_batches.append(user_payload["target_segment_ids"])
+                raise HTTPError(
+                    "http://unused.local/api/chat",
+                    429,
+                    "synthetic rate limit",
+                    hdrs=None,
+                    fp=None,
+                )
+
+        client = RateLimitedClient()
+        result = ThreeBatchExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(client.target_batches, [["t0001", "t0002"]])
+        self.assertEqual(
+            result["failed_segment_ids"],
+            [f"seg_{index:04d}" for index in range(1, 7)],
+        )
+        self.assertEqual(result["_telemetry"]["translation_batch_count"], 3)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_retry_split_count"], 0)
+        self.assertEqual(result["_telemetry"]["translation_rate_limit_count"], 1)
+        self.assertEqual(len(result["_telemetry"]["translation_batches"]), 1)
+
+    def test_rate_limit_after_success_preserves_completed_batch(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"원문 {index}",
+            }
+            for index in range(1, 7)
+        ]
+
+        class ThreeBatchExpander(LlamaServerMedicalQueryExpander):
+            def _translation_batches(self, transport_segments):
+                return [
+                    (
+                        transport_segments[start : start + 2],
+                        [
+                            item["segment_id"]
+                            for item in transport_segments[start : start + 2]
+                        ],
+                    )
+                    for start in range(0, 6, 2)
+                ]
+
+        class SecondBatchRateLimitedClient:
+            def __init__(self):
+                self.target_batches = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_ids = user_payload["target_segment_ids"]
+                self.target_batches.append(target_ids)
+                if "t0003" in target_ids:
+                    raise HTTPError(
+                        "http://unused.local/api/chat",
+                        429,
+                        "synthetic rate limit",
+                        hdrs=None,
+                        fp=None,
+                    )
+                return {
+                    "translations": {
+                        target_id: {
+                            "translated_text_en": f"Translation {target_id}",
+                            "medical_terms": [],
+                        }
+                        for target_id in target_ids
+                    }
+                }
+
+        client = SecondBatchRateLimitedClient()
+        result = ThreeBatchExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "available")
+        self.assertTrue(result["partial"])
+        self.assertEqual(
+            client.target_batches,
+            [["t0001", "t0002"], ["t0003", "t0004"]],
+        )
+        self.assertEqual(
+            [item["segment_id"] for item in result["translated_segments"]],
+            ["seg_0001", "seg_0002"],
+        )
+        self.assertEqual(
+            result["failed_segment_ids"],
+            ["seg_0003", "seg_0004", "seg_0005", "seg_0006"],
+        )
 
     def test_translates_each_whole_segment_with_compact_output(self):
         text = "코프와 스프텀이 증가했습니다. 오늘 날씨는 맑습니다."

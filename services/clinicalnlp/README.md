@@ -79,6 +79,9 @@ Translation batch telemetry also reports the planned batch count, target/context
 segment counts, elapsed time, response-error bisections, failed segments, and
 HTTP 429 responses. These fields only observe the existing sequential batching
 behavior and do not change token budgeting, retries, or translation results.
+After the provider retry is exhausted, HTTP 429 stops later translation batches
+without response-error bisection; translations completed earlier are preserved
+as a partial result instead of multiplying rate-limited requests.
 
 Medical retrieval telemetry is diagnostic and additive. Collection metrics
 report vector batch, query, SQL statement, accepted-candidate, empty-query, and
