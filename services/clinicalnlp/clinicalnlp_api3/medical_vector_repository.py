@@ -30,6 +30,27 @@ _COLLECTION_ORDER = {
     for index, collection in enumerate(MEDICAL_VECTOR_COLLECTIONS)
 }
 _ASCII_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_POSTGRES_VECTOR_PARTITIONS = {
+    "drug_terms": (
+        (
+            "ingredient",
+            "v.collection_name='drug_terms' AND v.entity_type='ingredient'",
+        ),
+        (
+            "product",
+            "v.collection_name='drug_terms' AND v.entity_type='product'",
+        ),
+    ),
+    "procedure_terms": (
+        ("all", "v.collection_name='procedure_terms'"),
+    ),
+    "anatomy_terms": (
+        ("all", "v.collection_name='anatomy_terms'"),
+    ),
+    "emergency_terms": (
+        ("all", "v.collection_name='emergency_terms'"),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,12 +376,15 @@ class PostgresMedicalVectorRepository:
                          JOIN clinicalnlp.source_releases dr
                            ON dr.release_id=c.source_release_id
                         WHERE v.vector_release_id=vr.release_id
+                          AND v.is_active
                           AND dr.is_active
                           AND dr.source_kind='MEDICAL_DICTIONARY'
                           AND dr.content_hash=
                               vr.metadata->>'dictionary_source_sha256'
-                          AND c.collection_name=
+                          AND v.collection_name=
                               vr.metadata->>'collection'
+                          AND c.collection_name=v.collection_name
+                          AND c.entity_type IS NOT DISTINCT FROM v.entity_type
                    )
                  ORDER BY source_id
                 """,
@@ -461,12 +485,8 @@ class PostgresMedicalVectorRepository:
                 collection_query_counts[collection] = len(indexes)
                 candidate_indexes: set[int] = set()
                 candidate_count = 0
-                partitions = (
-                    ("ingredient", "product")
-                    if collection == "drug_terms"
-                    else (None,)
-                )
-                for entity_type in partitions:
+                partitions = _POSTGRES_VECTOR_PARTITIONS[collection]
+                for partition_name, partition_predicate in partitions:
                     vector_literals = [
                         "[" + ",".join(
                             format(float(value), ".9g")
@@ -476,48 +496,49 @@ class PostgresMedicalVectorRepository:
                     ]
                     partition_started = time.perf_counter()
                     rows = self._execute(
-                        """
+                        f"""
                         WITH queries AS (
                             SELECT *
                               FROM unnest(%s::integer[], %s::text[])
                                    AS q(query_index, embedding_text)
                         )
-                        SELECT q.query_index, hit.entity_id, hit.source_text,
-                               hit.canonical_en, hit.similarity
+                        SELECT q.query_index, c.entity_id, hit.source_text,
+                               c.canonical_en, 1 - hit.distance AS similarity
                           FROM queries q
                           CROSS JOIN LATERAL (
-                              SELECT c.entity_id, v.source_text, c.canonical_en,
-                                     1 - (v.embedding <=>
-                                          q.embedding_text::vector(256)) similarity
+                              SELECT v.vector_release_id, v.concept_pk,
+                                     v.collection_name, v.entity_type,
+                                     v.source_text,
+                                     v.embedding <=>
+                                         q.embedding_text::vector(256) AS distance
                                 FROM clinicalnlp.medical_vectors v
-                                JOIN clinicalnlp.source_releases vr
-                                  ON vr.release_id=v.vector_release_id
-                                JOIN clinicalnlp.medical_concepts c
-                                  ON c.concept_pk=v.concept_pk
-                                JOIN clinicalnlp.source_releases dr
-                                  ON dr.release_id=c.source_release_id
-                               WHERE vr.is_active AND vr.source_kind='VECTOR'
-                                 AND vr.source_id=%s
-                                 AND dr.is_active
-                                 AND dr.source_kind='MEDICAL_DICTIONARY'
-                                 AND c.collection_name=%s
-                                 AND (%s::text IS NULL OR c.entity_type=%s)
+                               WHERE v.is_active
+                                 AND {partition_predicate}
                                ORDER BY v.embedding <=>
                                         q.embedding_text::vector(256)
                                LIMIT %s
                           ) hit
+                          JOIN clinicalnlp.source_releases vr
+                            ON vr.release_id=hit.vector_release_id
+                           AND vr.is_active AND vr.source_kind='VECTOR'
+                           AND vr.source_id=%s
+                          JOIN clinicalnlp.medical_concepts c
+                            ON c.concept_pk=hit.concept_pk
+                           AND c.collection_name=hit.collection_name
+                           AND c.entity_type IS NOT DISTINCT FROM
+                               hit.entity_type
+                          JOIN clinicalnlp.source_releases dr
+                            ON dr.release_id=c.source_release_id
+                           AND dr.is_active
+                           AND dr.source_kind='MEDICAL_DICTIONARY'
                         """,
                         (
                             indexes,
                             vector_literals,
-                            f"medical_vector:{collection}",
-                            collection,
-                            entity_type,
-                            entity_type,
                             int(limit),
+                            f"medical_vector:{collection}",
                         ),
                     )
-                    partition_name = entity_type or "all"
                     partition_elapsed_ms[(collection, partition_name)] = (
                         time.perf_counter() - partition_started
                     ) * 1000

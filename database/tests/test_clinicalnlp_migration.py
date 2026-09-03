@@ -132,9 +132,9 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             self._query(
                 "SELECT count(*) FROM clinicalnlp.schema_migrations "
-                "WHERE version IN ('001', '002', '003', '004')"
+                "WHERE version IN ('001', '002', '003', '004', '005')"
             ),
-            "4",
+            "5",
         )
         self.assertEqual(
             self._query(
@@ -165,6 +165,30 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
             ),
             "2",
         )
+        self.assertEqual(
+            self._query(
+                "SELECT string_agg(column_name, ',' ORDER BY column_name) "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'clinicalnlp' "
+                "AND table_name = 'medical_vectors' "
+                "AND column_name IN ('collection_name', 'entity_type', 'is_active')"
+            ),
+            "collection_name,entity_type,is_active",
+        )
+        self.assertEqual(
+            self._query(
+                "SELECT count(*) FROM pg_indexes "
+                "WHERE schemaname = 'clinicalnlp' "
+                "AND indexname IN ("
+                "'ix_clinicalnlp_vectors_drug_ingredient_hnsw', "
+                "'ix_clinicalnlp_vectors_drug_product_hnsw', "
+                "'ix_clinicalnlp_vectors_procedure_hnsw', "
+                "'ix_clinicalnlp_vectors_anatomy_hnsw', "
+                "'ix_clinicalnlp_vectors_emergency_hnsw'"
+                ")"
+            ),
+            "5",
+        )
 
     def test_runner_applies_and_verifies_an_existing_database(self) -> None:
         process = subprocess.run(
@@ -182,7 +206,7 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(process.stdout),
             {
-                "migration": "004",
+                "migration": "005",
                 "schema": "clinicalnlp",
                 "status": "ready",
                 "table_count": 15,

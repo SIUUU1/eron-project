@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-09-03T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+  <diagram id="eron-clinical-record-current" name="ERD - 현재 구현">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="ER:ON 응급진료기록 ERD (현재 구현 기준)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=26;fontStyle=1;fontColor=#172033;" vertex="1" parent="1">
+          <mxGeometry x="50" y="25" width="900" height="42" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="AS-IS · 응급실 방문 / 기록 임시·인증 저장 / KCD 검색" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=13;fontColor=#5B6475;" vertex="1" parent="1">
+          <mxGeometry x="50" y="68" width="700" height="28" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ed" value="&lt;b&gt;mimic.edstays&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5B6475&quot;&gt;응급실 방문&lt;/font&gt;&lt;hr&gt;&lt;b&gt;PK&lt;/b&gt; stay_id : bigint&lt;br&gt;subject_id : bigint NOT NULL&lt;br&gt;hadm_id : bigint&lt;br&gt;intime : timestamp NOT NULL&lt;br&gt;outtime : timestamp&lt;br&gt;gender : char(1)&lt;br&gt;race : text&lt;br&gt;arrival_transport : text&lt;br&gt;disposition : text" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingTop=16;spacingLeft=16;spacingRight=16;strokeColor=#3B6EA8;strokeWidth=2;fillColor=#F4F8FC;fontColor=#172033;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="215" width="330" height="390" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="record" value="&lt;b&gt;public.clinical_records&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5B6475&quot;&gt;응급진료기록&lt;/font&gt;&lt;hr&gt;&lt;b&gt;PK&lt;/b&gt; id : integer&lt;br&gt;&lt;b&gt;UK&lt;/b&gt; ed_stay_id : varchar(50)&lt;br&gt;status : varchar(16) NOT NULL&lt;br&gt;record_payload : json NOT NULL&lt;br&gt;selected_kcd : json&lt;br&gt;clinician_id : varchar(50) NOT NULL&lt;br&gt;clinician_name : varchar(100) NOT NULL&lt;br&gt;created_at : timestamptz NOT NULL&lt;br&gt;updated_at : timestamptz NOT NULL&lt;br&gt;signed_by : varchar(50)&lt;br&gt;signed_at : timestamptz" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingTop=16;spacingLeft=16;spacingRight=16;strokeColor=#27836B;strokeWidth=2;fillColor=#F1FAF7;fontColor=#172033;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="525" y="145" width="395" height="535" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kcd" value="&lt;b&gt;public.kcd_codes&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5B6475&quot;&gt;KCD 상병코드 검색 마스터&lt;/font&gt;&lt;hr&gt;&lt;b&gt;PK&lt;/b&gt; id : integer&lt;br&gt;code : varchar(16) NOT NULL&lt;br&gt;name_ko : varchar(500) NOT NULL&lt;br&gt;name_en : varchar(500)" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingTop=16;spacingLeft=16;spacingRight=16;strokeColor=#C27927;strokeWidth=2;fillColor=#FFF8EF;fontColor=#172033;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1065" y="265" width="300" height="255" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ed-record" value="stay_id ↔ ed_stay_id&#xa;1 : 0..1 · 논리 연결, FK 없음" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 6;strokeWidth=2;strokeColor=#697386;fontColor=#4B5565;fontSize=12;labelBackgroundColor=#FFFFFF;endArrow=ERone;endFill=0;startArrow=ERmandOne;startFill=0;" edge="1" parent="1" source="ed" target="record">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="record-kcd" value="selected_kcd JSON&#xa;N : M · 논리 연결, FK 없음" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 6;strokeWidth=2;strokeColor=#697386;fontColor=#4B5565;fontSize=12;labelBackgroundColor=#FFFFFF;endArrow=ERmany;endFill=0;startArrow=ERmany;startFill=0;" edge="1" parent="1" source="record" target="kcd">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;범례&lt;/b&gt;　PK 기본키　 UK 고유키　 점선 = 애플리케이션의 논리 관계(물리 FK 없음)" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacingLeft=14;strokeColor=#D5DAE3;fillColor=#F7F8FA;fontColor=#3D4655;fontSize=12;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="735" width="840" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note" value="현재 구조: 방문당 기록 최대 1건 · 상태 DRAFT/SIGNED · 인증 후 변경 금지는 API 계층에서 보장" style="text;html=1;strokeColor=none;fillColor=none;align=right;verticalAlign=middle;fontSize=11;fontColor=#5B6475;" vertex="1" parent="1">
+          <mxGeometry x="900" y="740" width="465" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+

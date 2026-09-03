@@ -306,10 +306,12 @@ def _import_collection(
             cursor.execute(
                 """
                 INSERT INTO clinicalnlp.medical_vectors(
-                    vector_release_id, concept_pk, source_text,
-                    embedding, model_version, payload
+                    vector_release_id, concept_pk, collection_name,
+                    entity_type, is_active, source_text, embedding,
+                    model_version, payload
                 )
-                SELECT %s, c.concept_pk, s.source_text,
+                SELECT %s, c.concept_pk, c.collection_name,
+                       c.entity_type, FALSE, s.source_text,
                        s.embedding_text::vector(256), %s,
                        s.payload_text::jsonb
                   FROM stage_medical_vectors s
@@ -355,9 +357,31 @@ def _import_collection(
             )
             cursor.execute(
                 """
+                UPDATE clinicalnlp.medical_vectors v
+                   SET is_active=FALSE
+                  FROM clinicalnlp.source_releases vr
+                 WHERE vr.release_id=v.vector_release_id
+                   AND vr.source_kind='VECTOR'
+                   AND vr.source_id=%s
+                   AND v.vector_release_id<>%s
+                   AND v.is_active
+                """,
+                (release.source_id, vector_release_id),
+            )
+            cursor.execute(
+                """
                 UPDATE clinicalnlp.source_releases
                    SET is_active=TRUE
                  WHERE release_id=%s
+                """,
+                (vector_release_id,),
+            )
+            cursor.execute(
+                """
+                UPDATE clinicalnlp.medical_vectors
+                   SET is_active=TRUE
+                 WHERE vector_release_id=%s
+                   AND NOT is_active
                 """,
                 (vector_release_id,),
             )

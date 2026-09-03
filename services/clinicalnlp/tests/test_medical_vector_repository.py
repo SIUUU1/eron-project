@@ -30,16 +30,26 @@ class _PostgresVectorFixture(PostgresMedicalVectorRepository):
             }
         )
         self.version = "postgres-vector:test"
+        self.executed_sql: list[str] = []
 
     @contextmanager
     def request_session(self):
         yield self
 
     def _execute(self, sql, parameters):
+        self.executed_sql.append(sql)
         indexes = parameters[0]
-        collection = parameters[3]
+        collection = next(
+            value
+            for value in self._active_collections
+            if f"v.collection_name='{value}'" in sql
+        )
         if collection == "drug_terms":
-            entity_type = parameters[4]
+            entity_type = (
+                "ingredient"
+                if "v.entity_type='ingredient'" in sql
+                else "product"
+            )
             entity_id = (
                 "drug:ingredient:1"
                 if entity_type == "ingredient"
@@ -54,6 +64,44 @@ class _PostgresVectorFixture(PostgresMedicalVectorRepository):
 
 
 class PostgresMedicalVectorTelemetryTests(unittest.TestCase):
+    def test_search_filters_the_vector_partition_before_concept_join(self):
+        repository = _PostgresVectorFixture()
+
+        repository.search_many(
+            (("amlodipine", frozenset({"drug_terms"})),),
+            limit=5,
+        )
+
+        self.assertEqual(len(repository.executed_sql), 2)
+        ingredient_sql, product_sql = repository.executed_sql
+        self.assertIn("v.is_active", ingredient_sql)
+        self.assertIn("v.collection_name='drug_terms'", ingredient_sql)
+        self.assertIn("v.entity_type='ingredient'", ingredient_sql)
+        self.assertIn("v.entity_type='product'", product_sql)
+        self.assertNotIn("AND c.collection_name=%s", ingredient_sql)
+        self.assertNotIn("OR c.entity_type=%s", ingredient_sql)
+        self.assertNotIn("AND c.collection_name=%s", product_sql)
+        self.assertNotIn("OR c.entity_type=%s", product_sql)
+
+    def test_search_limits_ann_partition_before_metadata_joins(self):
+        repository = _PostgresVectorFixture()
+
+        repository.search_many(
+            (("cough", frozenset({"emergency_terms"})),),
+            limit=5,
+        )
+
+        self.assertEqual(len(repository.executed_sql), 1)
+        sql = repository.executed_sql[0]
+        ann_partition = sql.split("CROSS JOIN LATERAL (", 1)[1].split(
+            ") hit", 1
+        )[0]
+        self.assertNotIn("JOIN clinicalnlp.medical_concepts", ann_partition)
+        self.assertNotIn("JOIN clinicalnlp.source_releases", ann_partition)
+        self.assertIn("LIMIT %s", ann_partition)
+        self.assertIn("JOIN clinicalnlp.medical_concepts c", sql)
+        self.assertIn("JOIN clinicalnlp.source_releases vr", sql)
+
     def test_search_reports_time_and_statement_count_by_collection(self):
         repository = _PostgresVectorFixture()
 
