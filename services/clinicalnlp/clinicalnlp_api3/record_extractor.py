@@ -111,6 +111,12 @@ class _LeanTelemetry:
             "regeneration_count": 0,
             "network_retry_count": 0,
             "failed_segment_count": 0,
+            "http_elapsed_ms": 0.0,
+            "provider_total_ms": 0.0,
+            "provider_load_ms": 0.0,
+            "provider_prompt_eval_ms": 0.0,
+            "provider_eval_ms": 0.0,
+            "unattributed_http_ms": 0.0,
         }
 
     def add_call(self, diagnostics: dict[str, Any] | None = None) -> None:
@@ -136,6 +142,21 @@ class _LeanTelemetry:
                 value = diagnostics.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     self.values[key] += value
+            for key in (
+                "http_elapsed_ms",
+                "provider_total_ms",
+                "provider_load_ms",
+                "provider_prompt_eval_ms",
+                "provider_eval_ms",
+                "unattributed_http_ms",
+            ):
+                value = diagnostics.get(key)
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
+                    self.values[key] += float(value)
 
     def increment(self, key: str, amount: int = 1) -> None:
         with self._lock:
@@ -494,6 +515,7 @@ class LlamaServerClinicalExtractor:
     ) -> dict[str, Any]:
         """Generate one validated Compact v3 clinical record."""
 
+        started = time.perf_counter()
         base_prompt = self.prompt_path.read_text(encoding="utf-8")
         extraction_rules = base_prompt.split("Value V is", 1)[0].rstrip()
         output_contract = self.compact_output_prompt_path.read_text(
@@ -517,6 +539,11 @@ class LlamaServerClinicalExtractor:
             required_type=dict,
             output_label="Compact v3 clinical record",
         )[0]
+        diagnostics: dict[str, Any] = {}
+        diagnostics_reader = getattr(self.llm_client, "last_diagnostics", None)
+        if callable(diagnostics_reader):
+            value = diagnostics_reader()
+            diagnostics = value if isinstance(value, dict) else {}
         return {
             "prompt_version": COMPACT_PROMPT_VERSION,
             "record": generated,
@@ -525,6 +552,10 @@ class LlamaServerClinicalExtractor:
                 segment_ids=segment_ids,
                 candidate_snapshots=candidate_snapshots,
             ),
+            "generation": {
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                **diagnostics,
+            },
         }
 
     @staticmethod

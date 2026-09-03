@@ -3993,6 +3993,33 @@ def run_clinical_workflow(
         "translation_calls": telemetry_count(
             query_expansion_telemetry.get("translation_calls", 0)
         ),
+        "translation_provider_calls": telemetry_count(
+            query_expansion_telemetry.get("translation_provider_calls", 0)
+        ),
+        "translation_network_retries": telemetry_count(
+            query_expansion_telemetry.get("translation_network_retries", 0)
+        ),
+        "translation_http_ms": telemetry_number(
+            query_expansion_telemetry.get("translation_http_ms", 0.0)
+        ),
+        "translation_provider_ms": telemetry_number(
+            query_expansion_telemetry.get("translation_provider_ms", 0.0)
+        ),
+        "translation_provider_load_ms": telemetry_number(
+            query_expansion_telemetry.get("translation_provider_load_ms", 0.0)
+        ),
+        "translation_prompt_eval_ms": telemetry_number(
+            query_expansion_telemetry.get("translation_prompt_eval_ms", 0.0)
+        ),
+        "translation_token_eval_ms": telemetry_number(
+            query_expansion_telemetry.get("translation_token_eval_ms", 0.0)
+        ),
+        "translation_unattributed_http_ms": telemetry_number(
+            query_expansion_telemetry.get(
+                "translation_unattributed_http_ms",
+                0.0,
+            )
+        ),
         "umls_ms": 0.0,
         "dictionary_ms": 0.0,
         "vector_ms": 0.0,
@@ -4008,6 +4035,14 @@ def run_clinical_workflow(
         "vector_emergency_terms_ms": 0.0,
         "vector_emergency_terms_statement_count": 0,
         "clinical_extraction_ms": 0.0,
+        "clinical_llm_provider_calls": 0,
+        "clinical_llm_network_retries": 0,
+        "clinical_llm_http_ms": 0.0,
+        "clinical_llm_provider_ms": 0.0,
+        "clinical_llm_provider_load_ms": 0.0,
+        "clinical_llm_prompt_eval_ms": 0.0,
+        "clinical_llm_token_eval_ms": 0.0,
+        "clinical_llm_unattributed_http_ms": 0.0,
     }
     errors: list[dict[str, str]] = []
     if query_expansion.get("status") == "unavailable":
@@ -4272,6 +4307,30 @@ def run_clinical_workflow(
         telemetry["clinical_extraction_ms"] = round(
             clinical_record_stage_ms + finalization_ms,
             3,
+        )
+
+    generation_telemetry = (
+        compact_primary_result.get("generation")
+        if isinstance(compact_primary_result, dict)
+        and isinstance(compact_primary_result.get("generation"), dict)
+        else {}
+    )
+    telemetry["clinical_llm_provider_calls"] = telemetry_count(
+        generation_telemetry.get("provider_call_count", 0)
+    )
+    telemetry["clinical_llm_network_retries"] = telemetry_count(
+        generation_telemetry.get("network_retry_count", 0)
+    )
+    for target_key, source_key in (
+        ("clinical_llm_http_ms", "http_elapsed_ms"),
+        ("clinical_llm_provider_ms", "provider_total_ms"),
+        ("clinical_llm_provider_load_ms", "provider_load_ms"),
+        ("clinical_llm_prompt_eval_ms", "provider_prompt_eval_ms"),
+        ("clinical_llm_token_eval_ms", "provider_eval_ms"),
+        ("clinical_llm_unattributed_http_ms", "unattributed_http_ms"),
+    ):
+        telemetry[target_key] = telemetry_number(
+            generation_telemetry.get(source_key, 0.0)
         )
 
     api3_status = (api3_document.get("metadata") or {}).get("processing_status")

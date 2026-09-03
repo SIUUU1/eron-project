@@ -68,6 +68,14 @@ PostgreSQL releases are ready. Missing optional UMLS assets use the bounded
 n-gram fallback. Telemetry values diagnose latency only; they are not confidence
 scores and cannot change validation decisions.
 
+Draft responses separate Ollama latency for both translation and clinical
+generation. The `translation_*` and `clinical_llm_*` metrics include provider
+call/retry counts, client-observed `http_ms`, and Ollama-reported `provider_ms`,
+`provider_load_ms`, `prompt_eval_ms`, and `token_eval_ms`. The corresponding
+`unattributed_http_ms` is the non-negative difference between client HTTP time
+and Ollama `total_duration`; it can include transport, remote queueing, response
+transfer, and client parsing, so it must not be interpreted as TLS time alone.
+
 ## One-time PostgreSQL import
 
 Apply the versioned schema first:

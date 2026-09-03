@@ -52,6 +52,17 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
                     }
                 }
 
+            def last_diagnostics(self):
+                return {
+                    "provider_call_count": 1,
+                    "network_retry_count": 0,
+                    "http_elapsed_ms": 120.0,
+                    "provider_total_ms": 100.0,
+                    "provider_load_ms": 2.0,
+                    "provider_prompt_eval_ms": 30.0,
+                    "provider_eval_ms": 60.0,
+                }
+
         result = LlamaServerMedicalQueryExpander(
             "http://unused.local",
             llm_client=TranslationClient(),
@@ -61,6 +72,13 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "available")
         self.assertEqual(result["_telemetry"]["translation_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_provider_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_http_ms"], 120.0)
+        self.assertEqual(result["_telemetry"]["translation_provider_ms"], 100.0)
+        self.assertEqual(
+            result["_telemetry"]["translation_unattributed_http_ms"],
+            20.0,
+        )
         self.assertEqual(
             [item["search_terms_en"][0] for item in result["items"]],
             ["cough", "sputum production", "dyspnea"],

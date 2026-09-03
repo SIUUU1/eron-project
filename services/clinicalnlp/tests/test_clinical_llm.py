@@ -56,6 +56,20 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
                     if isinstance(response_item, dict)
                     else "stop"
                 )
+                duration_metrics = (
+                    {
+                        key: response_item[key]
+                        for key in (
+                            "total_duration",
+                            "load_duration",
+                            "prompt_eval_duration",
+                            "eval_duration",
+                        )
+                        if key in response_item
+                    }
+                    if isinstance(response_item, dict)
+                    else {}
+                )
                 body = json.dumps(
                     {
                         "model": "gemma4:31b",
@@ -64,6 +78,7 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
                         "done_reason": done_reason,
                         "prompt_eval_count": 12,
                         "eval_count": 5,
+                        **duration_metrics,
                     }
                 ).encode("utf-8")
                 self.send_response(200)
@@ -110,6 +125,51 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         initial_system_prompt = captured[0]["payload"]["messages"][0]["content"]
         self.assertIn("JSON Schema", initial_system_prompt)
         self.assertIn('"required":["ok"]', initial_system_prompt)
+
+    def test_reports_provider_and_http_duration_diagnostics(self):
+        server, thread, _ = self._serve(
+            [
+                {
+                    "content": '{"ok": true}',
+                    "total_duration": 10_000_000,
+                    "load_duration": 1_000_000,
+                    "prompt_eval_duration": 3_000_000,
+                    "eval_duration": 5_000_000,
+                }
+            ]
+        )
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=_OK_RESPONSE_FORMAT,
+                output_label="test output",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        diagnostics = client.last_diagnostics()
+        self.assertEqual(diagnostics["provider_call_count"], 1)
+        self.assertEqual(diagnostics["provider_total_ms"], 10.0)
+        self.assertEqual(diagnostics["provider_load_ms"], 1.0)
+        self.assertEqual(diagnostics["provider_prompt_eval_ms"], 3.0)
+        self.assertEqual(diagnostics["provider_eval_ms"], 5.0)
+        self.assertGreaterEqual(diagnostics["http_elapsed_ms"], 0.0)
+        self.assertEqual(
+            diagnostics["unattributed_http_ms"],
+            max(
+                0.0,
+                diagnostics["http_elapsed_ms"]
+                - diagnostics["provider_total_ms"],
+            ),
+        )
 
     def test_repairs_schema_invalid_output_at_most_once(self):
         server, thread, captured = self._serve(

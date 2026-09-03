@@ -28,6 +28,18 @@ class _SyntheticQueryExpander:
             "items": [],
             "partial": False,
             "failed_segment_ids": [],
+            "_telemetry": {
+                "translation_ms": 150.0,
+                "translation_calls": 1,
+                "translation_provider_calls": 1,
+                "translation_network_retries": 0,
+                "translation_http_ms": 140.0,
+                "translation_provider_ms": 120.0,
+                "translation_provider_load_ms": 3.0,
+                "translation_prompt_eval_ms": 30.0,
+                "translation_token_eval_ms": 80.0,
+                "translation_unattributed_http_ms": 20.0,
+            },
         }
 
 
@@ -108,6 +120,16 @@ class _SyntheticClinicalExtractor:
                 "processing_status": "completed",
                 "issues": [],
             },
+            "generation": {
+                "provider_call_count": 2,
+                "network_retry_count": 1,
+                "http_elapsed_ms": 140.0,
+                "provider_total_ms": 120.0,
+                "provider_load_ms": 4.0,
+                "provider_prompt_eval_ms": 30.0,
+                "provider_eval_ms": 80.0,
+                "unattributed_http_ms": 20.0,
+            },
         }
 
 
@@ -168,6 +190,14 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             {
                 "translation_ms",
                 "translation_calls",
+                "translation_provider_calls",
+                "translation_network_retries",
+                "translation_http_ms",
+                "translation_provider_ms",
+                "translation_provider_load_ms",
+                "translation_prompt_eval_ms",
+                "translation_token_eval_ms",
+                "translation_unattributed_http_ms",
                 "umls_ms",
                 "dictionary_ms",
                 "vector_ms",
@@ -183,6 +213,14 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "vector_emergency_terms_ms",
                 "vector_emergency_terms_statement_count",
                 "clinical_extraction_ms",
+                "clinical_llm_provider_calls",
+                "clinical_llm_network_retries",
+                "clinical_llm_http_ms",
+                "clinical_llm_provider_ms",
+                "clinical_llm_provider_load_ms",
+                "clinical_llm_prompt_eval_ms",
+                "clinical_llm_token_eval_ms",
+                "clinical_llm_unattributed_http_ms",
             },
         )
         self.assertTrue(
@@ -190,6 +228,13 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 isinstance(value, (int, float)) and value >= 0
                 for value in result["telemetry"].values()
             )
+        )
+        self.assertEqual(result["telemetry"]["translation_provider_calls"], 1)
+        self.assertEqual(result["telemetry"]["translation_http_ms"], 140.0)
+        self.assertEqual(result["telemetry"]["translation_provider_ms"], 120.0)
+        self.assertEqual(
+            result["telemetry"]["translation_unattributed_http_ms"],
+            20.0,
         )
         self.assertEqual(result["telemetry"]["vector_drug_terms_ms"], 12.5)
         self.assertEqual(
@@ -343,6 +388,14 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
         self.assertEqual(
             result["audit"]["references"]["compact_record_path"],
             "$.compact_v3_primary.record",
+        )
+        self.assertEqual(result["telemetry"]["clinical_llm_provider_calls"], 2)
+        self.assertEqual(result["telemetry"]["clinical_llm_network_retries"], 1)
+        self.assertEqual(result["telemetry"]["clinical_llm_http_ms"], 140.0)
+        self.assertEqual(result["telemetry"]["clinical_llm_provider_ms"], 120.0)
+        self.assertEqual(
+            result["telemetry"]["clinical_llm_unattributed_http_ms"],
+            20.0,
         )
 
     def test_lean_primary_projects_sparse_fields_without_legacy_generation_status(self):

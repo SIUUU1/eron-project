@@ -23,6 +23,14 @@ _ENGLISH_QUERY_RE = re.compile(
 )
 _ENGLISH_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’/-]*")
 _HANGUL_RE = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
+_PROVIDER_COUNT_METRICS = ("provider_call_count", "network_retry_count")
+_PROVIDER_DURATION_METRICS = (
+    "http_elapsed_ms",
+    "provider_total_ms",
+    "provider_load_ms",
+    "provider_prompt_eval_ms",
+    "provider_eval_ms",
+)
 _TRANSLATION_SEARCH_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
     "did", "do", "does", "for", "from", "had", "has", "have", "he",
@@ -41,6 +49,26 @@ _GENERIC_COURSE_ONLY_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+
+
+def _accumulate_provider_diagnostics(
+    target: dict[str, int | float],
+    diagnostics: Any,
+) -> None:
+    if not isinstance(diagnostics, dict):
+        return
+    for key in _PROVIDER_COUNT_METRICS:
+        value = diagnostics.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            target[key] = int(target.get(key, 0)) + value
+    for key in _PROVIDER_DURATION_METRICS:
+        value = diagnostics.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            target[key] = float(target.get(key, 0.0)) + float(value)
 
 _SYSTEM_PROMPT = """You are a medical search-query preprocessor, not a clinical decision maker.
 Read the whole supplied Korean+English mixed dialogue. Find only spans that may express a medical concept in these domains: symptom/sign, disease/diagnosis, drug, allergy, anatomy, test/procedure/surgery, vital/numeric, or device.
@@ -348,14 +376,29 @@ class LlamaServerMedicalQueryExpander:
         context_segments: list[dict[str, str]],
         target_segment_ids: list[str],
         call_counter: list[int] | None = None,
+        provider_telemetry: dict[str, int | float] | None = None,
     ) -> tuple[dict[str, dict[str, Any]], list[tuple[str, Exception]]]:
         def request(ids: list[str]) -> dict[str, dict[str, Any]]:
             if call_counter is not None:
                 call_counter[0] += 1
-            return self._request_compact_translation(
-                context_segments=context_segments,
-                target_segment_ids=ids,
-            )
+            try:
+                return self._request_compact_translation(
+                    context_segments=context_segments,
+                    target_segment_ids=ids,
+                )
+            finally:
+                diagnostics_reader = getattr(
+                    self.llm_client,
+                    "last_diagnostics",
+                    None,
+                )
+                if provider_telemetry is not None and callable(
+                    diagnostics_reader
+                ):
+                    _accumulate_provider_diagnostics(
+                        provider_telemetry,
+                        diagnostics_reader(),
+                    )
 
         try:
             return (
@@ -377,6 +420,7 @@ class LlamaServerMedicalQueryExpander:
                     context_segments=context_segments,
                     target_segment_ids=target_ids,
                     call_counter=call_counter,
+                    provider_telemetry=provider_telemetry,
                 )
             )
             translations.update(partial_translations)
@@ -1054,6 +1098,47 @@ class LlamaServerMedicalQueryExpander:
         }
         translation_started = time.perf_counter()
         translation_calls = [0]
+        provider_telemetry: dict[str, int | float] = {}
+
+        def translation_telemetry() -> dict[str, int | float]:
+            http_ms = float(provider_telemetry.get("http_elapsed_ms", 0.0))
+            provider_ms = float(
+                provider_telemetry.get("provider_total_ms", 0.0)
+            )
+            return {
+                "translation_ms": round(
+                    (time.perf_counter() - translation_started) * 1000,
+                    3,
+                ),
+                "translation_calls": translation_calls[0],
+                "translation_provider_calls": int(
+                    provider_telemetry.get("provider_call_count", 0)
+                ),
+                "translation_network_retries": int(
+                    provider_telemetry.get("network_retry_count", 0)
+                ),
+                "translation_http_ms": round(http_ms, 3),
+                "translation_provider_ms": round(provider_ms, 3),
+                "translation_provider_load_ms": round(
+                    float(provider_telemetry.get("provider_load_ms", 0.0)),
+                    3,
+                ),
+                "translation_prompt_eval_ms": round(
+                    float(
+                        provider_telemetry.get("provider_prompt_eval_ms", 0.0)
+                    ),
+                    3,
+                ),
+                "translation_token_eval_ms": round(
+                    float(provider_telemetry.get("provider_eval_ms", 0.0)),
+                    3,
+                ),
+                "translation_unattributed_http_ms": round(
+                    max(0.0, http_ms - provider_ms),
+                    3,
+                ),
+            }
+
         try:
             translated_payloads: dict[str, dict[str, Any]] = {}
             failed_translations: list[tuple[str, Exception]] = []
@@ -1064,6 +1149,7 @@ class LlamaServerMedicalQueryExpander:
                     context_segments=context_segments,
                     target_segment_ids=target_ids,
                     call_counter=translation_calls,
+                    provider_telemetry=provider_telemetry,
                 )
                 failed_translations.extend(failures)
                 translated_payloads.update(translations)
@@ -1075,13 +1161,7 @@ class LlamaServerMedicalQueryExpander:
                 "translated_segments": [],
                 "items": [],
                 "error_code": self._error_code(error),
-                "_telemetry": {
-                    "translation_ms": round(
-                        (time.perf_counter() - translation_started) * 1000,
-                        3,
-                    ),
-                    "translation_calls": translation_calls[0],
-                },
+                "_telemetry": translation_telemetry(),
             }
         if not translated_payloads and failed_translations:
             return {
@@ -1095,13 +1175,7 @@ class LlamaServerMedicalQueryExpander:
                     for target_id, _ in failed_translations
                 ],
                 "error_code": self._error_code(failed_translations[0][1]),
-                "_telemetry": {
-                    "translation_ms": round(
-                        (time.perf_counter() - translation_started) * 1000,
-                        3,
-                    ),
-                    "translation_calls": translation_calls[0],
-                },
+                "_telemetry": translation_telemetry(),
             }
         translated_segments, items = self._sanitize_full_translation(
             {
@@ -1124,13 +1198,7 @@ class LlamaServerMedicalQueryExpander:
                 "translated_segments": [],
                 "items": [],
                 "error_code": "InvalidModelResponse",
-                "_telemetry": {
-                    "translation_ms": round(
-                        (time.perf_counter() - translation_started) * 1000,
-                        3,
-                    ),
-                    "translation_calls": translation_calls[0],
-                },
+                "_telemetry": translation_telemetry(),
             }
         partial = bool(failed_translations)
         return {
@@ -1149,13 +1217,7 @@ class LlamaServerMedicalQueryExpander:
                 if partial
                 else {}
             ),
-            "_telemetry": {
-                "translation_ms": round(
-                    (time.perf_counter() - translation_started) * 1000,
-                    3,
-                ),
-                "translation_calls": translation_calls[0],
-            },
+            "_telemetry": translation_telemetry(),
         }
 
 

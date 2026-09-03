@@ -25,6 +25,16 @@ class _ChatResult:
     done_reason: str | None
     eval_count: int | None
     prompt_eval_count: int | None
+    provider_total_ms: float = 0.0
+    provider_load_ms: float = 0.0
+    provider_prompt_eval_ms: float = 0.0
+    provider_eval_ms: float = 0.0
+
+
+def _duration_ms(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return 0.0
+    return float(value) / 1_000_000
 
 
 def _json_objects(content: str) -> list[dict[str, Any]]:
@@ -253,6 +263,11 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             "input_tokens": 0,
             "output_tokens": 0,
             "done_reason": None,
+            "http_elapsed_ms": 0.0,
+            "provider_total_ms": 0.0,
+            "provider_load_ms": 0.0,
+            "provider_prompt_eval_ms": 0.0,
+            "provider_eval_ms": 0.0,
         }
 
     def _diag(self) -> dict[str, Any]:
@@ -263,7 +278,13 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         return value
 
     def last_diagnostics(self) -> dict[str, Any]:
-        return dict(self._diag())
+        diagnostics = dict(self._diag())
+        diagnostics["unattributed_http_ms"] = max(
+            0.0,
+            float(diagnostics.get("http_elapsed_ms") or 0.0)
+            - float(diagnostics.get("provider_total_ms") or 0.0),
+        )
+        return diagnostics
 
     def _chat_once(
         self,
@@ -312,6 +333,12 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             prompt_eval_count=(
                 prompt_eval_count if isinstance(prompt_eval_count, int) else None
             ),
+            provider_total_ms=_duration_ms(result.get("total_duration")),
+            provider_load_ms=_duration_ms(result.get("load_duration")),
+            provider_prompt_eval_ms=_duration_ms(
+                result.get("prompt_eval_duration")
+            ),
+            provider_eval_ms=_duration_ms(result.get("eval_duration")),
         )
 
     def _chat(
@@ -337,6 +364,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                     raise TimeoutError("clinical LLM request deadline exceeded")
                 request_timeout = min(self.timeout, remaining)
             diagnostics["provider_call_count"] += 1
+            request_started = time.perf_counter()
             try:
                 result = self._chat_once(messages, timeout=request_timeout)
             except HTTPError as error:
@@ -350,7 +378,24 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 diagnostics["input_tokens"] += result.prompt_eval_count or 0
                 diagnostics["output_tokens"] += result.eval_count or 0
                 diagnostics["done_reason"] = result.done_reason
+                for key in (
+                    "provider_total_ms",
+                    "provider_load_ms",
+                    "provider_prompt_eval_ms",
+                    "provider_eval_ms",
+                ):
+                    value = getattr(result, key, 0.0)
+                    if (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and value >= 0
+                    ):
+                        diagnostics[key] += float(value)
                 return result
+            finally:
+                diagnostics["http_elapsed_ms"] += (
+                    time.perf_counter() - request_started
+                ) * 1000
             diagnostics["network_retry_count"] += 1
             time.sleep(random.uniform(0.05, 0.15))
         raise RuntimeError("unreachable provider retry state")
