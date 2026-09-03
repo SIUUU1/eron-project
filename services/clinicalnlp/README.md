@@ -84,6 +84,23 @@ lookups, vector fallbacks, UMLS surface/canonical queries, semantic fallbacks,
 and n-gram fallbacks. These counters observe the current retrieval behavior;
 they do not alter ranking, limits, routing, or candidate confirmation.
 
+For a one-off local audit of the queries that actually reach pgvector, run the
+evaluation-only harness with an approved synthetic or de-identified Whisper
+JSON file:
+
+```sh
+docker compose --profile clinical run --rm --no-deps \
+  -v "$PWD/services/clinicalnlp:/app:ro" \
+  -v "/absolute/path/to/whisper.json:/evaluation/input.json:ro" \
+  clinicalnlp python scripts/evaluate_vector_fallback.py \
+  --input /evaluation/input.json
+```
+
+The default report includes only query hashes, lengths, routed collections,
+candidate counts, and empty-result flags. `--full-trace` additionally exports
+query text and candidate IDs and must be used only for an explicitly approved
+evaluation export. Neither mode changes retrieval or the generated draft.
+
 ## One-time PostgreSQL import
 
 Apply the versioned schema first:
