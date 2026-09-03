@@ -54,8 +54,9 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
 
             def last_diagnostics(self):
                 return {
-                    "provider_call_count": 1,
-                    "network_retry_count": 0,
+                    "provider_call_count": 2,
+                    "network_retry_count": 1,
+                    "rate_limit_count": 1,
                     "http_elapsed_ms": 120.0,
                     "provider_total_ms": 100.0,
                     "provider_load_ms": 2.0,
@@ -72,7 +73,13 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "available")
         self.assertEqual(result["_telemetry"]["translation_calls"], 1)
-        self.assertEqual(result["_telemetry"]["translation_provider_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_provider_calls"], 2)
+        self.assertEqual(result["_telemetry"]["translation_network_retries"], 1)
+        self.assertEqual(result["_telemetry"]["translation_rate_limit_count"], 1)
+        self.assertEqual(
+            result["_telemetry"]["translation_batches"][0]["rate_limit_count"],
+            1,
+        )
         self.assertEqual(result["_telemetry"]["translation_http_ms"], 120.0)
         self.assertEqual(result["_telemetry"]["translation_provider_ms"], 100.0)
         self.assertEqual(
@@ -327,6 +334,30 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertEqual(len(captured["payloads"]), 1)
         self.assertEqual(result["_telemetry"]["translation_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_batch_count"], 1)
+        self.assertEqual(result["_telemetry"]["translation_retry_split_count"], 0)
+        self.assertEqual(result["_telemetry"]["translation_rate_limit_count"], 0)
+        self.assertEqual(
+            result["_telemetry"]["translation_batches"],
+            [
+                {
+                    "batch_index": 0,
+                    "target_segment_count": 5,
+                    "context_segment_count": 5,
+                    "request_count": 1,
+                    "retry_split_count": 0,
+                    "rate_limit_count": 0,
+                    "failed_segment_count": 0,
+                    "elapsed_ms": result["_telemetry"]["translation_batches"][0][
+                        "elapsed_ms"
+                    ],
+                }
+            ],
+        )
+        self.assertGreaterEqual(
+            result["_telemetry"]["translation_batches"][0]["elapsed_ms"],
+            0,
+        )
         self.assertGreaterEqual(result["_telemetry"]["translation_ms"], 0)
         for payload in captured["payloads"]:
             supplied = json.loads(payload["messages"][1]["content"])
@@ -370,6 +401,14 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "available")
         self.assertEqual(len(result["translated_segments"]), 8)
         self.assertGreater(result["_telemetry"]["translation_calls"], 1)
+        self.assertGreater(result["_telemetry"]["translation_batch_count"], 1)
+        self.assertEqual(
+            sum(
+                batch["target_segment_count"]
+                for batch in result["_telemetry"]["translation_batches"]
+            ),
+            8,
+        )
         requested_ids = [
             target_id
             for payload in captured["payloads"]
@@ -422,6 +461,16 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["_telemetry"]["translation_calls"], 5)
+        self.assertEqual(result["_telemetry"]["translation_batch_count"], 1)
+        self.assertEqual(result["_telemetry"]["translation_retry_split_count"], 2)
+        self.assertEqual(
+            result["_telemetry"]["translation_batches"][0]["request_count"],
+            5,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_batches"][0]["retry_split_count"],
+            2,
+        )
 
     def test_single_segment_failure_preserves_other_batch_translations(self):
         segments = [

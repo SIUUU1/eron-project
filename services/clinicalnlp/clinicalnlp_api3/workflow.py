@@ -3924,6 +3924,39 @@ def run_clinical_workflow(
     def telemetry_count(value: object) -> int:
         return value if type(value) is int and value >= 0 else 0
 
+    def translation_batch_details(
+        value: object,
+    ) -> list[dict[str, int | float]]:
+        if not isinstance(value, list):
+            return []
+        details: list[dict[str, int | float]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            details.append(
+                {
+                    "batch_index": telemetry_count(item.get("batch_index")),
+                    "target_segment_count": telemetry_count(
+                        item.get("target_segment_count")
+                    ),
+                    "context_segment_count": telemetry_count(
+                        item.get("context_segment_count")
+                    ),
+                    "request_count": telemetry_count(item.get("request_count")),
+                    "retry_split_count": telemetry_count(
+                        item.get("retry_split_count")
+                    ),
+                    "rate_limit_count": telemetry_count(
+                        item.get("rate_limit_count")
+                    ),
+                    "failed_segment_count": telemetry_count(
+                        item.get("failed_segment_count")
+                    ),
+                    "elapsed_ms": telemetry_number(item.get("elapsed_ms")),
+                }
+            )
+        return details
+
     validated_segments = validate_whisper_payload(whisper_payload)
     covered_spans: list[dict[str, Any]] = []
     staged_extract_record = getattr(clinical_extractor, "extract_record", None)
@@ -3992,6 +4025,18 @@ def run_clinical_workflow(
         ),
         "translation_calls": telemetry_count(
             query_expansion_telemetry.get("translation_calls", 0)
+        ),
+        "translation_batch_count": telemetry_count(
+            query_expansion_telemetry.get("translation_batch_count", 0)
+        ),
+        "translation_retry_split_count": telemetry_count(
+            query_expansion_telemetry.get("translation_retry_split_count", 0)
+        ),
+        "translation_rate_limit_count": telemetry_count(
+            query_expansion_telemetry.get("translation_rate_limit_count", 0)
+        ),
+        "translation_batches": translation_batch_details(
+            query_expansion_telemetry.get("translation_batches")
         ),
         "translation_provider_calls": telemetry_count(
             query_expansion_telemetry.get("translation_provider_calls", 0)

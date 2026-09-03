@@ -258,6 +258,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         self._diagnostics.value = {
             "provider_call_count": 0,
             "network_retry_count": 0,
+            "rate_limit_count": 0,
             "repair_count": 0,
             "regeneration_count": 0,
             "input_tokens": 0,
@@ -368,6 +369,8 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             try:
                 result = self._chat_once(messages, timeout=request_timeout)
             except HTTPError as error:
+                if error.code == 429:
+                    diagnostics["rate_limit_count"] += 1
                 transient = error.code == 429 or 500 <= error.code <= 599
                 if not transient or attempt:
                     raise

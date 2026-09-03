@@ -6,6 +6,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .clinical_llm import ClinicalLlmClient, OllamaCloudClinicalLlmClient
@@ -23,7 +24,11 @@ _ENGLISH_QUERY_RE = re.compile(
 )
 _ENGLISH_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’/-]*")
 _HANGUL_RE = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
-_PROVIDER_COUNT_METRICS = ("provider_call_count", "network_retry_count")
+_PROVIDER_COUNT_METRICS = (
+    "provider_call_count",
+    "network_retry_count",
+    "rate_limit_count",
+)
 _PROVIDER_DURATION_METRICS = (
     "http_elapsed_ms",
     "provider_total_ms",
@@ -377,6 +382,7 @@ class LlamaServerMedicalQueryExpander:
         target_segment_ids: list[str],
         call_counter: list[int] | None = None,
         provider_telemetry: dict[str, int | float] | None = None,
+        retry_telemetry: dict[str, int] | None = None,
     ) -> tuple[dict[str, dict[str, Any]], list[tuple[str, Exception]]]:
         def request(ids: list[str]) -> dict[str, dict[str, Any]]:
             if call_counter is not None:
@@ -406,8 +412,26 @@ class LlamaServerMedicalQueryExpander:
                 [],
             )
         except Exception as error:
+            diagnostics_reader = getattr(
+                self.llm_client,
+                "last_diagnostics",
+                None,
+            )
+            if (
+                retry_telemetry is not None
+                and isinstance(error, HTTPError)
+                and error.code == 429
+                and not callable(diagnostics_reader)
+            ):
+                retry_telemetry["direct_rate_limit_count"] = (
+                    retry_telemetry.get("direct_rate_limit_count", 0) + 1
+                )
             if len(target_segment_ids) == 1:
                 return {}, [(target_segment_ids[0], error)]
+        if retry_telemetry is not None:
+            retry_telemetry["split_count"] = (
+                retry_telemetry.get("split_count", 0) + 1
+            )
         midpoint = len(target_segment_ids) // 2
         translations: dict[str, dict[str, Any]] = {}
         failures: list[tuple[str, Exception]] = []
@@ -421,6 +445,7 @@ class LlamaServerMedicalQueryExpander:
                     target_segment_ids=target_ids,
                     call_counter=call_counter,
                     provider_telemetry=provider_telemetry,
+                    retry_telemetry=retry_telemetry,
                 )
             )
             translations.update(partial_translations)
@@ -1099,18 +1124,32 @@ class LlamaServerMedicalQueryExpander:
         translation_started = time.perf_counter()
         translation_calls = [0]
         provider_telemetry: dict[str, int | float] = {}
+        retry_telemetry = {
+            "split_count": 0,
+            "direct_rate_limit_count": 0,
+        }
+        translation_batches: list[dict[str, int | float]] = []
 
-        def translation_telemetry() -> dict[str, int | float]:
+        def translation_telemetry() -> dict[str, Any]:
             http_ms = float(provider_telemetry.get("http_elapsed_ms", 0.0))
             provider_ms = float(
                 provider_telemetry.get("provider_total_ms", 0.0)
             )
+            rate_limit_count = int(
+                provider_telemetry.get("rate_limit_count", 0)
+            ) + retry_telemetry["direct_rate_limit_count"]
             return {
                 "translation_ms": round(
                     (time.perf_counter() - translation_started) * 1000,
                     3,
                 ),
                 "translation_calls": translation_calls[0],
+                "translation_batch_count": len(translation_batches),
+                "translation_retry_split_count": retry_telemetry["split_count"],
+                "translation_rate_limit_count": rate_limit_count,
+                "translation_batches": [
+                    dict(batch) for batch in translation_batches
+                ],
                 "translation_provider_calls": int(
                     provider_telemetry.get("provider_call_count", 0)
                 ),
@@ -1142,14 +1181,44 @@ class LlamaServerMedicalQueryExpander:
         try:
             translated_payloads: dict[str, dict[str, Any]] = {}
             failed_translations: list[tuple[str, Exception]] = []
-            for context_segments, target_ids in self._translation_batches(
-                transport_segments
+            planned_batches = self._translation_batches(transport_segments)
+            for batch_index, (context_segments, target_ids) in enumerate(
+                planned_batches
             ):
+                batch_started = time.perf_counter()
+                calls_before = translation_calls[0]
+                splits_before = retry_telemetry["split_count"]
+                rate_limits_before = int(
+                    provider_telemetry.get("rate_limit_count", 0)
+                ) + retry_telemetry["direct_rate_limit_count"]
                 translations, failures = self._request_translation_batch_with_retry(
                     context_segments=context_segments,
                     target_segment_ids=target_ids,
                     call_counter=translation_calls,
                     provider_telemetry=provider_telemetry,
+                    retry_telemetry=retry_telemetry,
+                )
+                rate_limits_after = int(
+                    provider_telemetry.get("rate_limit_count", 0)
+                ) + retry_telemetry["direct_rate_limit_count"]
+                translation_batches.append(
+                    {
+                        "batch_index": batch_index,
+                        "target_segment_count": len(target_ids),
+                        "context_segment_count": len(context_segments),
+                        "request_count": translation_calls[0] - calls_before,
+                        "retry_split_count": (
+                            retry_telemetry["split_count"] - splits_before
+                        ),
+                        "rate_limit_count": (
+                            rate_limits_after - rate_limits_before
+                        ),
+                        "failed_segment_count": len(failures),
+                        "elapsed_ms": round(
+                            (time.perf_counter() - batch_started) * 1000,
+                            3,
+                        ),
+                    }
                 )
                 failed_translations.extend(failures)
                 translated_payloads.update(translations)

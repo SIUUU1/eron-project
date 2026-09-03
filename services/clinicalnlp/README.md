@@ -75,6 +75,10 @@ call/retry counts, client-observed `http_ms`, and Ollama-reported `provider_ms`,
 `unattributed_http_ms` is the non-negative difference between client HTTP time
 and Ollama `total_duration`; it can include transport, remote queueing, response
 transfer, and client parsing, so it must not be interpreted as TLS time alone.
+Translation batch telemetry also reports the planned batch count, target/context
+segment counts, elapsed time, response-error bisections, failed segments, and
+HTTP 429 responses. These fields only observe the existing sequential batching
+behavior and do not change token budgeting, retries, or translation results.
 
 Medical retrieval telemetry is diagnostic and additive. Collection metrics
 report vector batch, query, SQL statement, accepted-candidate, empty-query, and

@@ -31,6 +31,21 @@ class _SyntheticQueryExpander:
             "_telemetry": {
                 "translation_ms": 150.0,
                 "translation_calls": 1,
+                "translation_batch_count": 1,
+                "translation_retry_split_count": 0,
+                "translation_rate_limit_count": 0,
+                "translation_batches": [
+                    {
+                        "batch_index": 0,
+                        "target_segment_count": 1,
+                        "context_segment_count": 1,
+                        "request_count": 1,
+                        "retry_split_count": 0,
+                        "rate_limit_count": 0,
+                        "failed_segment_count": 0,
+                        "elapsed_ms": 140.0,
+                    }
+                ],
                 "translation_provider_calls": 1,
                 "translation_network_retries": 0,
                 "translation_http_ms": 140.0,
@@ -239,6 +254,10 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             {
                 "translation_ms",
                 "translation_calls",
+                "translation_batch_count",
+                "translation_retry_split_count",
+                "translation_rate_limit_count",
+                "translation_batches",
                 "translation_provider_calls",
                 "translation_network_retries",
                 "translation_http_ms",
@@ -320,8 +339,24 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(
                 isinstance(value, (int, float)) and value >= 0
-                for value in result["telemetry"].values()
+                for key, value in result["telemetry"].items()
+                if key != "translation_batches"
             )
+        )
+        self.assertEqual(
+            result["telemetry"]["translation_batches"],
+            [
+                {
+                    "batch_index": 0,
+                    "target_segment_count": 1,
+                    "context_segment_count": 1,
+                    "request_count": 1,
+                    "retry_split_count": 0,
+                    "rate_limit_count": 0,
+                    "failed_segment_count": 0,
+                    "elapsed_ms": 140.0,
+                }
+            ],
         )
         self.assertEqual(result["telemetry"]["translation_provider_calls"], 1)
         self.assertEqual(result["telemetry"]["umls_ms"], 30.0)

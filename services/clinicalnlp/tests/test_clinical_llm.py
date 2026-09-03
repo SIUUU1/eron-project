@@ -4,7 +4,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from clinicalnlp_api3.clinical_llm import (
     ClinicalLlmLengthLimit,
@@ -259,6 +259,47 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         self.assertEqual(reservations, [1])
         self.assertEqual(client.last_diagnostics()["provider_call_count"], 2)
         self.assertEqual(client.last_diagnostics()["network_retry_count"], 1)
+
+    def test_rate_limit_response_is_counted_separately_from_network_retries(self):
+        class RateLimitedOnceClient(OllamaCloudClinicalLlmClient):
+            attempts = 0
+
+            def _chat_once(self, messages, *, timeout=None):
+                del messages, timeout
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise HTTPError(
+                        "http://unused.local/api/chat",
+                        429,
+                        "synthetic rate limit",
+                        hdrs=None,
+                        fp=None,
+                    )
+                return SimpleNamespace(
+                    content='{"ok": true}',
+                    done_reason="stop",
+                    eval_count=5,
+                    prompt_eval_count=12,
+                )
+
+        client = RateLimitedOnceClient(
+            "http://unused.local",
+            model_name="gemma4:31b",
+            api_key="test-secret",
+        )
+
+        self.assertEqual(
+            client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=_OK_RESPONSE_FORMAT,
+                output_label="test output",
+            ),
+            {"ok": True},
+        )
+        self.assertEqual(client.last_diagnostics()["provider_call_count"], 2)
+        self.assertEqual(client.last_diagnostics()["network_retry_count"], 1)
+        self.assertEqual(client.last_diagnostics()["rate_limit_count"], 1)
 
     def test_expired_deadline_stops_before_provider_request(self):
         class NoRequestClient(OllamaCloudClinicalLlmClient):
