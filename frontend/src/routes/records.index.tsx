@@ -24,13 +24,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 export const Route = createFileRoute("/records/")({
   head: () => ({
     meta: [
-      { title: "AI 진료기록 및 누락 검사 · ER-GUARD AI" },
       {
         name: "description",
         content:
           "대화 기반 응급진료기록 작성부터 누락 검사, KCD 코드 추천, 의사 인증까지 이어지는 워크플로우.",
       },
-      { property: "og:title", content: "AI 진료기록 및 누락 검사 · ER-GUARD AI" },
+      { property: "og:title", content: "AI 진료기록 및 누락 검사 · ER:ON(이로운)" },
       {
         property: "og:description",
         content: "기록 작성 → 누락 검사 → 진단코드 → 최종 기록 → 인증 저장 워크플로우.",

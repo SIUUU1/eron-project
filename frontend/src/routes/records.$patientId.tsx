@@ -95,15 +95,14 @@ import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
   head: ({ params }) => {
-    const title = `환자 ${params.patientId} AI 응급진료기록 · ER-GUARD AI`;
+    const ogTitle = `환자 ${params.patientId} AI 응급진료기록 · ER:ON(이로운)`;
     return {
       meta: [
-        { title },
         {
           name: "description",
           content: "대화 기반 응급진료기록 작성, 누락 검사, KCD 코드 추천 및 의사 인증 워크플로우.",
         },
-        { property: "og:title", content: title },
+        { property: "og:title", content: ogTitle },
       ],
     };
   },
