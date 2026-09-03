@@ -1006,7 +1006,10 @@ function RecordWorkflow({
               <CardTitle className="text-base">변환된 대화 · {dialogue.length}개</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-4">
-              <ScrollArea className="max-h-[50vh] min-h-48 rounded-lg border bg-secondary/30 p-3">
+              <div
+                className="max-h-[50dvh] min-h-48 overflow-y-scroll overscroll-contain touch-pan-y rounded-lg border bg-secondary/30 p-3"
+                style={{ WebkitOverflowScrolling: "touch", scrollbarGutter: "stable" }}
+              >
                 <ul className="space-y-3">
                   {dialogue.map((turn, index) => (
                     <li key={index} className="flex justify-end">
@@ -1016,7 +1019,7 @@ function RecordWorkflow({
                     </li>
                   ))}
                 </ul>
-              </ScrollArea>
+              </div>
               <Button
                 className="min-h-14 w-full text-base"
                 onClick={() => void sendConversationToDesktop()}
