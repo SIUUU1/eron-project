@@ -11,7 +11,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { dashboardKeys, getAlerts } from "@/api/dashboard";
@@ -29,6 +29,7 @@ import {
   type DemoClock,
 } from "@/api/demo-clock";
 import { runPredictions } from "@/api/ed-stays";
+import { invalidateDemoTimeQueries, invalidatePredictionQueries } from "@/api/refresh";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { currentUser } from "@/lib/mock-data";
@@ -62,6 +63,12 @@ function useDisplayClock(clock: DemoClock | undefined, fetchedAt: number | undef
   return now;
 }
 
+/**
+ * 시계 조작 한 건.
+ * `predictAfter` 는 앞으로 갈 때만 true 다 — 되감기·배속·초기화는 재계산하지 않는다.
+ */
+type ClockAction = { run: () => Promise<DemoClock>; predictAfter?: boolean };
+
 export function AppHeader() {
   const queryClient = useQueryClient();
 
@@ -84,12 +91,57 @@ export function AppHeader() {
   const clock = clockQuery.data;
   const now = useDisplayClock(clock, clockQuery.dataUpdatedAt || undefined);
 
+  /**
+   * 예측 갱신을 백그라운드로 돌린다. **시계 이동은 이걸 기다리지 않는다.**
+   *
+   * 예측 동안 시계 버튼이 잠기지 않으므로 연타로 /predictions/run 이 겹칠 수 있다.
+   * 실행 중이면 재실행을 1회만 예약해 두고, 끝난 뒤 이어서 한 번 더 돈다.
+   * (어떤 슬롯을 계산할지는 요청 시점에 백엔드가 정하므로 마지막 실행이 최신 시각을 덮는다.)
+   */
+  const runningRef = useRef(false);
+  const rerunQueuedRef = useRef(false);
+
+  const startPredictionRun = useCallback(() => {
+    if (runningRef.current) {
+      rerunQueuedRef.current = true;
+      return;
+    }
+    runningRef.current = true;
+
+    const cycle = (): Promise<void> =>
+      runPredictions()
+        // 예측이 끝난 뒤에야 예측·경보 관련 쿼리를 받는다(활력징후는 다시 읽지 않는다).
+        .then(() => invalidatePredictionQueries(queryClient))
+        .catch(() => {
+          // 예측 서비스가 꺼져 있어도 시계 이동은 성공한 것이다.
+          // 스케줄러가 다음 주기에 같은 일을 하므로 화면만 알린다.
+          toast.warning("예측 갱신은 다음 주기에 반영됩니다.");
+        })
+        .then(() => {
+          if (!rerunQueuedRef.current) return;
+          rerunQueuedRef.current = false;
+          return cycle();
+        });
+
+    void cycle().finally(() => {
+      runningRef.current = false;
+    });
+  }, [queryClient]);
+
   // 시계를 움직이면 화면 전체가 새 시각 기준으로 다시 그려져야 한다.
-  // 시계 이동 → (앞으로 갈 때만) 재예측 → 무효화 까지 한 mutation 안에서 순차로 끝낸다.
-  // 그래야 버튼이 그동안 비활성으로 남아 요청이 겹치지 않는다.
+  // ⚠ 순서가 핵심이다. 시계 → 시간축 데이터 → (앞으로 갈 때만) 예측 순으로 시작하고,
+  //   예측은 await 하지 않는다. 예측이 느려도 환자·활력징후·병상은 먼저 화면에 뜬다.
+  //   기본 데이터 요청을 예측 POST 보다 **먼저** 발사하는 것도 의도된 것이다.
   const mutate = useMutation({
-    mutationFn: (run: () => Promise<DemoClock>) => run(),
-    onSuccess: () => void queryClient.invalidateQueries(),
+    mutationFn: ({ run }: ClockAction) => run(),
+    onSuccess: async (next, { predictAfter }) => {
+      // POST 응답이 곧 새 시계다. /clock 을 다시 GET 하지 않고 헤더를 즉시 바꾼다.
+      queryClient.setQueryData(demoClockKeys.clock, next);
+      // 갱신이 실패해도 "시계를 바꾸지 못했습니다" 로 보이면 안 된다 — 시계는 이미 바뀌었다.
+      // (개별 쿼리의 실패는 각 화면이 자기 에러 상태로 보여준다.)
+      await invalidateDemoTimeQueries(queryClient).catch(() => undefined);
+      if (predictAfter) startPredictionRun();
+    },
     onError: (e: Error) =>
       toast.error("데모 시계를 바꾸지 못했습니다.", { description: e.message }),
   });
@@ -102,19 +154,7 @@ export function AppHeader() {
    * ⚠ 어떤 환자를 계산할지는 백엔드가 정한다(due · 15분 슬롯). 프론트는 판단하지 않는다.
    */
   const step = (hours: number) =>
-    mutate.mutate(async () => {
-      const next = await advanceDemoClock(hours);
-      if (hours > 0) {
-        try {
-          await runPredictions();
-        } catch {
-          // 예측 서비스가 꺼져 있어도 시계 이동은 성공한 것이다.
-          // 스케줄러가 다음 주기에 같은 일을 하므로 화면만 알린다.
-          toast.warning("예측 갱신은 다음 주기에 반영됩니다.");
-        }
-      }
-      return next;
-    });
+    mutate.mutate({ run: () => advanceDemoClock(hours), predictAfter: hours > 0 });
 
   const nextSpeed = () => {
     const i = SPEED_CYCLE.indexOf((clock?.speed ?? 1) as (typeof SPEED_CYCLE)[number]);
@@ -180,7 +220,7 @@ export function AppHeader() {
             disabled={mutate.isPending}
             onClick={() => {
               const v = nextSpeed();
-              mutate.mutate(() => setDemoSpeed(v));
+              mutate.mutate({ run: () => setDemoSpeed(v) });
             }}
           >
             <Gauge className="size-3.5" /> {speedLabel(clock?.speed ?? 1)}
@@ -190,7 +230,7 @@ export function AppHeader() {
             variant="ghost"
             className="h-7 px-2 text-xs"
             disabled={mutate.isPending || !clock?.is_shifted}
-            onClick={() => mutate.mutate(resetDemoClock)}
+            onClick={() => mutate.mutate({ run: resetDemoClock })}
           >
             <RotateCcw className="size-3.5" />
           </Button>

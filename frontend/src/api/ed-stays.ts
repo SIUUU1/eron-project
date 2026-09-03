@@ -53,6 +53,10 @@ export function runPredictions(signal?: AbortSignal) {
 }
 
 export const edStayKeys = {
+  /** 접두사 무효화용 루트 — 목록은 필터 객체가 키에 들어가 조합이 여럿이다. */
+  lists: ["ed", "stays"] as const,
+  /** 접두사 무효화용 루트 — detail·vitals·predictions 가 모두 이 아래에 있다. */
+  stays: ["ed", "stay"] as const,
   list: (q: EdStayQuery) => ["ed", "stays", q] as const,
   detail: (stayId: string) => ["ed", "stay", stayId] as const,
   vitals: (stayId: string) => ["ed", "stay", stayId, "vitals"] as const,

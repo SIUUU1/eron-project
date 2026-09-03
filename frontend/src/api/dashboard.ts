@@ -57,5 +57,7 @@ export const dashboardKeys = {
   beds: ["ed", "dashboard", "beds"] as const,
   alerts: (band?: RiskBandApi, latestOnly?: boolean) =>
     ["ed", "alerts", band ?? "all", latestOnly ? "latest" : "all"] as const,
+  /** 접두사 무효화용 — band/latestOnly 조합이 여럿이라 루트로 한 번에 건드린다. */
+  alertsRoot: ["ed", "alerts"] as const,
   reassess: ["ed", "reassess"] as const,
 };
