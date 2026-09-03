@@ -403,8 +403,25 @@ class QueryResolutionTelemetry:
     search_cache_hit_count: int = 0
     routed_query_count: int = 0
     routing_conflict_count: int = 0
+    exact_search_batch_count: int = 0
+    exact_search_query_count: int = 0
+    exact_search_hit_count: int = 0
+    vector_fallback_batch_count: int = 0
+    vector_fallback_query_count: int = 0
+    vector_fallback_hit_count: int = 0
+    vector_fallback_empty_count: int = 0
+    umls_surface_query_count: int = 0
+    umls_canonical_query_count: int = 0
+    semantic_fallback_query_count: int = 0
+    ngram_fallback_query_count: int = 0
     vector_collection_ms: tuple[tuple[str, float], ...] = ()
     vector_collection_statement_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_batch_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_query_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_candidate_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_empty_query_counts: tuple[tuple[str, int], ...] = ()
+    vector_partition_ms: tuple[tuple[str, str, float], ...] = ()
+    vector_partition_result_counts: tuple[tuple[str, str, int], ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -427,6 +444,17 @@ class QueryResolutionTelemetry:
             ("search_cache_hit_count", self.search_cache_hit_count),
             ("routed_query_count", self.routed_query_count),
             ("routing_conflict_count", self.routing_conflict_count),
+            ("exact_search_batch_count", self.exact_search_batch_count),
+            ("exact_search_query_count", self.exact_search_query_count),
+            ("exact_search_hit_count", self.exact_search_hit_count),
+            ("vector_fallback_batch_count", self.vector_fallback_batch_count),
+            ("vector_fallback_query_count", self.vector_fallback_query_count),
+            ("vector_fallback_hit_count", self.vector_fallback_hit_count),
+            ("vector_fallback_empty_count", self.vector_fallback_empty_count),
+            ("umls_surface_query_count", self.umls_surface_query_count),
+            ("umls_canonical_query_count", self.umls_canonical_query_count),
+            ("semantic_fallback_query_count", self.semantic_fallback_query_count),
+            ("ngram_fallback_query_count", self.ngram_fallback_query_count),
         ):
             if type(value) is not int or value < 0:
                 raise InvalidQueryResolutionError(
@@ -459,6 +487,61 @@ class QueryResolutionTelemetry:
             if type(value) is not int or value < 0:
                 raise InvalidQueryResolutionError(
                     "vector collection statement count must be a non-negative integer"
+                )
+        for name, values in (
+            ("vector_collection_batch_counts", self.vector_collection_batch_counts),
+            ("vector_collection_query_counts", self.vector_collection_query_counts),
+            ("vector_collection_candidate_counts", self.vector_collection_candidate_counts),
+            ("vector_collection_empty_query_counts", self.vector_collection_empty_query_counts),
+        ):
+            seen: set[str] = set()
+            for collection, value in values:
+                if collection not in vector_collections or collection in seen:
+                    raise InvalidQueryResolutionError(
+                        f"{name} must contain unique vector collections"
+                    )
+                seen.add(collection)
+                if type(value) is not int or value < 0:
+                    raise InvalidQueryResolutionError(
+                        f"{name} values must be non-negative integers"
+                    )
+        allowed_partitions = frozenset(
+            {
+                ("drug_terms", "ingredient"),
+                ("drug_terms", "product"),
+                ("procedure_terms", "all"),
+                ("anatomy_terms", "all"),
+                ("emergency_terms", "all"),
+            }
+        )
+        seen_partition_ms: set[tuple[str, str]] = set()
+        for collection, partition, value in self.vector_partition_ms:
+            key = (collection, partition)
+            if key not in allowed_partitions or key in seen_partition_ms:
+                raise InvalidQueryResolutionError(
+                    "vector_partition_ms must contain unique supported partitions"
+                )
+            seen_partition_ms.add(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise InvalidQueryResolutionError(
+                    "vector partition time must be a finite non-negative number"
+                )
+        seen_partition_counts: set[tuple[str, str]] = set()
+        for collection, partition, value in self.vector_partition_result_counts:
+            key = (collection, partition)
+            if key not in allowed_partitions or key in seen_partition_counts:
+                raise InvalidQueryResolutionError(
+                    "vector_partition_result_counts must contain unique supported partitions"
+                )
+            seen_partition_counts.add(key)
+            if type(value) is not int or value < 0:
+                raise InvalidQueryResolutionError(
+                    "vector partition result count must be a non-negative integer"
                 )
 
 

@@ -4026,14 +4026,45 @@ def run_clinical_workflow(
         "exact_statement_count": 0,
         "vector_statement_count": 0,
         "search_cache_hit_count": 0,
+        "exact_search_batch_count": 0,
+        "exact_search_query_count": 0,
+        "exact_search_hit_count": 0,
+        "vector_fallback_batch_count": 0,
+        "vector_fallback_query_count": 0,
+        "vector_fallback_hit_count": 0,
+        "vector_fallback_empty_count": 0,
+        "umls_surface_query_count": 0,
+        "umls_canonical_query_count": 0,
+        "semantic_fallback_query_count": 0,
+        "ngram_fallback_query_count": 0,
         "vector_drug_terms_ms": 0.0,
         "vector_drug_terms_statement_count": 0,
+        "vector_drug_terms_batch_count": 0,
+        "vector_drug_terms_query_count": 0,
+        "vector_drug_terms_candidate_count": 0,
+        "vector_drug_terms_empty_query_count": 0,
+        "vector_drug_terms_ingredient_ms": 0.0,
+        "vector_drug_terms_ingredient_result_count": 0,
+        "vector_drug_terms_product_ms": 0.0,
+        "vector_drug_terms_product_result_count": 0,
         "vector_procedure_terms_ms": 0.0,
         "vector_procedure_terms_statement_count": 0,
+        "vector_procedure_terms_batch_count": 0,
+        "vector_procedure_terms_query_count": 0,
+        "vector_procedure_terms_candidate_count": 0,
+        "vector_procedure_terms_empty_query_count": 0,
         "vector_anatomy_terms_ms": 0.0,
         "vector_anatomy_terms_statement_count": 0,
+        "vector_anatomy_terms_batch_count": 0,
+        "vector_anatomy_terms_query_count": 0,
+        "vector_anatomy_terms_candidate_count": 0,
+        "vector_anatomy_terms_empty_query_count": 0,
         "vector_emergency_terms_ms": 0.0,
         "vector_emergency_terms_statement_count": 0,
+        "vector_emergency_terms_batch_count": 0,
+        "vector_emergency_terms_query_count": 0,
+        "vector_emergency_terms_candidate_count": 0,
+        "vector_emergency_terms_empty_query_count": 0,
         "clinical_extraction_ms": 0.0,
         "clinical_llm_provider_calls": 0,
         "clinical_llm_network_retries": 0,
@@ -4139,6 +4170,22 @@ def run_clinical_workflow(
                 telemetry["search_cache_hit_count"] = telemetry_count(
                     getattr(resolution_telemetry, "search_cache_hit_count", 0)
                 )
+                for name in (
+                    "exact_search_batch_count",
+                    "exact_search_query_count",
+                    "exact_search_hit_count",
+                    "vector_fallback_batch_count",
+                    "vector_fallback_query_count",
+                    "vector_fallback_hit_count",
+                    "vector_fallback_empty_count",
+                    "umls_surface_query_count",
+                    "umls_canonical_query_count",
+                    "semantic_fallback_query_count",
+                    "ngram_fallback_query_count",
+                ):
+                    telemetry[name] = telemetry_count(
+                        getattr(resolution_telemetry, name, 0)
+                    )
                 collection_ms = dict(
                     getattr(resolution_telemetry, "vector_collection_ms", ())
                 )
@@ -4146,6 +4193,34 @@ def run_clinical_workflow(
                     getattr(
                         resolution_telemetry,
                         "vector_collection_statement_counts",
+                        (),
+                    )
+                )
+                collection_batch_counts = dict(
+                    getattr(
+                        resolution_telemetry,
+                        "vector_collection_batch_counts",
+                        (),
+                    )
+                )
+                collection_query_counts = dict(
+                    getattr(
+                        resolution_telemetry,
+                        "vector_collection_query_counts",
+                        (),
+                    )
+                )
+                collection_candidate_counts = dict(
+                    getattr(
+                        resolution_telemetry,
+                        "vector_collection_candidate_counts",
+                        (),
+                    )
+                )
+                collection_empty_query_counts = dict(
+                    getattr(
+                        resolution_telemetry,
+                        "vector_collection_empty_query_counts",
                         (),
                     )
                 )
@@ -4162,6 +4237,45 @@ def run_clinical_workflow(
                         f"vector_{collection}_statement_count"
                     ] = telemetry_count(
                         collection_statement_counts.get(collection, 0)
+                    )
+                    for metric_name, values in (
+                        ("batch_count", collection_batch_counts),
+                        ("query_count", collection_query_counts),
+                        ("candidate_count", collection_candidate_counts),
+                        ("empty_query_count", collection_empty_query_counts),
+                    ):
+                        telemetry[f"vector_{collection}_{metric_name}"] = (
+                            telemetry_count(values.get(collection, 0))
+                        )
+                partition_ms = {
+                    (collection, partition): elapsed_ms
+                    for collection, partition, elapsed_ms in getattr(
+                        resolution_telemetry,
+                        "vector_partition_ms",
+                        (),
+                    )
+                }
+                partition_result_counts = {
+                    (collection, partition): count
+                    for collection, partition, count in getattr(
+                        resolution_telemetry,
+                        "vector_partition_result_counts",
+                        (),
+                    )
+                }
+                for partition in ("ingredient", "product"):
+                    telemetry[f"vector_drug_terms_{partition}_ms"] = (
+                        telemetry_number(
+                            partition_ms.get(("drug_terms", partition), 0.0)
+                        )
+                    )
+                    telemetry[
+                        f"vector_drug_terms_{partition}_result_count"
+                    ] = telemetry_count(
+                        partition_result_counts.get(
+                            ("drug_terms", partition),
+                            0,
+                        )
                     )
             if query_resolution.mode != "shadow":
                 resolved_candidates_by_segment = projected_candidates_by_segment

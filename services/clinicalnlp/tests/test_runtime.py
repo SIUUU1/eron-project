@@ -142,6 +142,14 @@ class _SyntheticMedicalQueryResolver:
             telemetry=QueryResolutionTelemetry(
                 vector_ms=20.0,
                 vector_statement_count=3,
+                exact_search_batch_count=2,
+                exact_search_query_count=3,
+                exact_search_hit_count=1,
+                vector_fallback_batch_count=1,
+                vector_fallback_query_count=1,
+                vector_fallback_hit_count=1,
+                umls_surface_query_count=1,
+                umls_canonical_query_count=1,
                 vector_collection_ms=(
                     ("drug_terms", 12.5),
                     ("emergency_terms", 7.5),
@@ -149,6 +157,32 @@ class _SyntheticMedicalQueryResolver:
                 vector_collection_statement_counts=(
                     ("drug_terms", 2),
                     ("emergency_terms", 1),
+                ),
+                vector_collection_batch_counts=(
+                    ("drug_terms", 1),
+                    ("emergency_terms", 1),
+                ),
+                vector_collection_query_counts=(
+                    ("drug_terms", 1),
+                    ("emergency_terms", 1),
+                ),
+                vector_collection_candidate_counts=(
+                    ("drug_terms", 2),
+                    ("emergency_terms", 1),
+                ),
+                vector_collection_empty_query_counts=(
+                    ("drug_terms", 0),
+                    ("emergency_terms", 0),
+                ),
+                vector_partition_ms=(
+                    ("drug_terms", "ingredient", 6.0),
+                    ("drug_terms", "product", 6.0),
+                    ("emergency_terms", "all", 7.5),
+                ),
+                vector_partition_result_counts=(
+                    ("drug_terms", "ingredient", 1),
+                    ("drug_terms", "product", 1),
+                    ("emergency_terms", "all", 1),
                 ),
             ),
         )
@@ -204,14 +238,45 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "exact_statement_count",
                 "vector_statement_count",
                 "search_cache_hit_count",
+                "exact_search_batch_count",
+                "exact_search_query_count",
+                "exact_search_hit_count",
+                "vector_fallback_batch_count",
+                "vector_fallback_query_count",
+                "vector_fallback_hit_count",
+                "vector_fallback_empty_count",
+                "umls_surface_query_count",
+                "umls_canonical_query_count",
+                "semantic_fallback_query_count",
+                "ngram_fallback_query_count",
                 "vector_drug_terms_ms",
                 "vector_drug_terms_statement_count",
+                "vector_drug_terms_batch_count",
+                "vector_drug_terms_query_count",
+                "vector_drug_terms_candidate_count",
+                "vector_drug_terms_empty_query_count",
+                "vector_drug_terms_ingredient_ms",
+                "vector_drug_terms_ingredient_result_count",
+                "vector_drug_terms_product_ms",
+                "vector_drug_terms_product_result_count",
                 "vector_procedure_terms_ms",
                 "vector_procedure_terms_statement_count",
+                "vector_procedure_terms_batch_count",
+                "vector_procedure_terms_query_count",
+                "vector_procedure_terms_candidate_count",
+                "vector_procedure_terms_empty_query_count",
                 "vector_anatomy_terms_ms",
                 "vector_anatomy_terms_statement_count",
+                "vector_anatomy_terms_batch_count",
+                "vector_anatomy_terms_query_count",
+                "vector_anatomy_terms_candidate_count",
+                "vector_anatomy_terms_empty_query_count",
                 "vector_emergency_terms_ms",
                 "vector_emergency_terms_statement_count",
+                "vector_emergency_terms_batch_count",
+                "vector_emergency_terms_query_count",
+                "vector_emergency_terms_candidate_count",
+                "vector_emergency_terms_empty_query_count",
                 "clinical_extraction_ms",
                 "clinical_llm_provider_calls",
                 "clinical_llm_network_retries",
@@ -247,6 +312,16 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             result["telemetry"]["vector_emergency_terms_statement_count"],
+            1,
+        )
+        self.assertEqual(result["telemetry"]["exact_search_query_count"], 3)
+        self.assertEqual(result["telemetry"]["vector_fallback_query_count"], 1)
+        self.assertEqual(result["telemetry"]["vector_drug_terms_batch_count"], 1)
+        self.assertEqual(result["telemetry"]["vector_drug_terms_query_count"], 1)
+        self.assertEqual(result["telemetry"]["vector_drug_terms_candidate_count"], 2)
+        self.assertEqual(result["telemetry"]["vector_drug_terms_ingredient_ms"], 6.0)
+        self.assertEqual(
+            result["telemetry"]["vector_drug_terms_product_result_count"],
             1,
         )
 

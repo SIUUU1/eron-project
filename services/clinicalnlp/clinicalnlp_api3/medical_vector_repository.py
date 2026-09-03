@@ -46,6 +46,12 @@ class VectorIdentityBatch:
     statement_count: int
     collection_elapsed_ms: tuple[tuple[str, float], ...] = ()
     collection_statement_counts: tuple[tuple[str, int], ...] = ()
+    collection_batch_counts: tuple[tuple[str, int], ...] = ()
+    collection_query_counts: tuple[tuple[str, int], ...] = ()
+    collection_candidate_counts: tuple[tuple[str, int], ...] = ()
+    collection_empty_query_counts: tuple[tuple[str, int], ...] = ()
+    partition_elapsed_ms: tuple[tuple[str, str, float], ...] = ()
+    partition_result_counts: tuple[tuple[str, str, int], ...] = ()
 
 
 class MedicalVectorRepository(Protocol):
@@ -430,27 +436,37 @@ class PostgresMedicalVectorRepository:
         statement_count = 0
         collection_elapsed_ms: dict[str, float] = {}
         collection_statement_counts: dict[str, int] = {}
+        collection_batch_counts: dict[str, int] = {}
+        collection_query_counts: dict[str, int] = {}
+        collection_candidate_counts: dict[str, int] = {}
+        collection_empty_query_counts: dict[str, int] = {}
+        partition_elapsed_ms: dict[tuple[str, str], float] = {}
+        partition_result_counts: dict[tuple[str, str], int] = {}
         with self.request_session():
             for collection in MEDICAL_VECTOR_COLLECTIONS:
                 collection_started = time.perf_counter()
                 collection_statement_count = 0
+                indexes = [
+                    index
+                    for index, (query_text, selected) in enumerate(normalized)
+                    if query_text
+                    and collection in selected
+                    and collection not in skipped.get(index, frozenset())
+                    and query_vectors[index] is not None
+                    and query_vectors[index].any()
+                ]
+                if not indexes:
+                    continue
+                collection_batch_counts[collection] = 1
+                collection_query_counts[collection] = len(indexes)
+                candidate_indexes: set[int] = set()
+                candidate_count = 0
                 partitions = (
                     ("ingredient", "product")
                     if collection == "drug_terms"
                     else (None,)
                 )
                 for entity_type in partitions:
-                    indexes = [
-                        index
-                        for index, (query_text, selected) in enumerate(normalized)
-                        if query_text
-                        and collection in selected
-                        and collection not in skipped.get(index, frozenset())
-                        and query_vectors[index] is not None
-                        and query_vectors[index].any()
-                    ]
-                    if not indexes:
-                        continue
                     vector_literals = [
                         "[" + ",".join(
                             format(float(value), ".9g")
@@ -458,6 +474,7 @@ class PostgresMedicalVectorRepository:
                         ) + "]"
                         for index in indexes
                     ]
+                    partition_started = time.perf_counter()
                     rows = self._execute(
                         """
                         WITH queries AS (
@@ -500,6 +517,11 @@ class PostgresMedicalVectorRepository:
                             int(limit),
                         ),
                     )
+                    partition_name = entity_type or "all"
+                    partition_elapsed_ms[(collection, partition_name)] = (
+                        time.perf_counter() - partition_started
+                    ) * 1000
+                    partition_result_counts[(collection, partition_name)] = len(rows)
                     statement_count += 1
                     collection_statement_count += 1
                     for index, entity_id, source_text, canonical_en, similarity in rows:
@@ -518,12 +540,18 @@ class PostgresMedicalVectorRepository:
                             str(entity_id),
                             min(1.0, max(0.0, score)),
                         ))
+                        candidate_indexes.add(int(index))
+                        candidate_count += 1
                 if collection_statement_count:
                     collection_elapsed_ms[collection] = (
                         time.perf_counter() - collection_started
                     ) * 1000
                     collection_statement_counts[collection] = (
                         collection_statement_count
+                    )
+                    collection_candidate_counts[collection] = candidate_count
+                    collection_empty_query_counts[collection] = (
+                        len(indexes) - len(candidate_indexes)
                     )
         return VectorIdentityBatch(
             identities=_sorted_identities(output),
@@ -538,6 +566,46 @@ class PostgresMedicalVectorRepository:
                 (collection, collection_statement_counts[collection])
                 for collection in MEDICAL_VECTOR_COLLECTIONS
                 if collection in collection_statement_counts
+            ),
+            collection_batch_counts=tuple(
+                (collection, collection_batch_counts[collection])
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_batch_counts
+            ),
+            collection_query_counts=tuple(
+                (collection, collection_query_counts[collection])
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_query_counts
+            ),
+            collection_candidate_counts=tuple(
+                (collection, collection_candidate_counts[collection])
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_candidate_counts
+            ),
+            collection_empty_query_counts=tuple(
+                (collection, collection_empty_query_counts[collection])
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                if collection in collection_empty_query_counts
+            ),
+            partition_elapsed_ms=tuple(
+                (
+                    collection,
+                    partition,
+                    round(partition_elapsed_ms[(collection, partition)], 3),
+                )
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                for partition in ("ingredient", "product", "all")
+                if (collection, partition) in partition_elapsed_ms
+            ),
+            partition_result_counts=tuple(
+                (
+                    collection,
+                    partition,
+                    partition_result_counts[(collection, partition)],
+                )
+                for collection in MEDICAL_VECTOR_COLLECTIONS
+                for partition in ("ingredient", "product", "all")
+                if (collection, partition) in partition_result_counts
             ),
         )
 

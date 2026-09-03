@@ -39,8 +39,14 @@ class _PostgresVectorFixture(PostgresMedicalVectorRepository):
         indexes = parameters[0]
         collection = parameters[3]
         if collection == "drug_terms":
+            entity_type = parameters[4]
+            entity_id = (
+                "drug:ingredient:1"
+                if entity_type == "ingredient"
+                else "drug:product:1"
+            )
             return [
-                (indexes[0], "drug:ingredient:1", "amlodipine", "amlodipine", 0.9)
+                (indexes[0], entity_id, "amlodipine", "amlodipine", 0.9)
             ]
         if collection == "emergency_terms":
             return [(indexes[0], "emergency:1", "cough", "cough", 0.9)]
@@ -55,20 +61,58 @@ class PostgresMedicalVectorTelemetryTests(unittest.TestCase):
             (
                 ("cough", frozenset({"emergency_terms"})),
                 ("amlodipine", frozenset({"drug_terms"})),
+                ("unknown procedure", frozenset({"procedure_terms"})),
             ),
             limit=5,
         )
 
         self.assertEqual(
             result.collection_statement_counts,
-            (("drug_terms", 2), ("emergency_terms", 1)),
+            (("drug_terms", 2), ("procedure_terms", 1), ("emergency_terms", 1)),
         )
         self.assertEqual(
             tuple(collection for collection, _ in result.collection_elapsed_ms),
-            ("drug_terms", "emergency_terms"),
+            ("drug_terms", "procedure_terms", "emergency_terms"),
         )
         self.assertTrue(
             all(elapsed_ms >= 0 for _, elapsed_ms in result.collection_elapsed_ms)
+        )
+        self.assertEqual(
+            result.collection_batch_counts,
+            (("drug_terms", 1), ("procedure_terms", 1), ("emergency_terms", 1)),
+        )
+        self.assertEqual(
+            result.collection_query_counts,
+            (("drug_terms", 1), ("procedure_terms", 1), ("emergency_terms", 1)),
+        )
+        self.assertEqual(
+            result.collection_candidate_counts,
+            (("drug_terms", 2), ("procedure_terms", 0), ("emergency_terms", 1)),
+        )
+        self.assertEqual(
+            result.collection_empty_query_counts,
+            (("drug_terms", 0), ("procedure_terms", 1), ("emergency_terms", 0)),
+        )
+        self.assertEqual(
+            tuple(
+                (collection, partition)
+                for collection, partition, _ in result.partition_elapsed_ms
+            ),
+            (
+                ("drug_terms", "ingredient"),
+                ("drug_terms", "product"),
+                ("procedure_terms", "all"),
+                ("emergency_terms", "all"),
+            ),
+        )
+        self.assertEqual(
+            result.partition_result_counts,
+            (
+                ("drug_terms", "ingredient", 1),
+                ("drug_terms", "product", 1),
+                ("procedure_terms", "all", 0),
+                ("emergency_terms", "all", 1),
+            ),
         )
 
 

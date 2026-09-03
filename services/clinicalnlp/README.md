@@ -76,6 +76,14 @@ call/retry counts, client-observed `http_ms`, and Ollama-reported `provider_ms`,
 and Ollama `total_duration`; it can include transport, remote queueing, response
 transfer, and client parsing, so it must not be interpreted as TLS time alone.
 
+Medical retrieval telemetry is diagnostic and additive. Collection metrics
+report vector batch, query, SQL statement, accepted-candidate, empty-query, and
+elapsed-time totals. The drug lane also reports `ingredient` and `product` SQL
+time and raw result counts separately. Search-stage counters distinguish exact
+lookups, vector fallbacks, UMLS surface/canonical queries, semantic fallbacks,
+and n-gram fallbacks. These counters observe the current retrieval behavior;
+they do not alter ranking, limits, routing, or candidate confirmation.
+
 ## One-time PostgreSQL import
 
 Apply the versioned schema first:

@@ -529,6 +529,15 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(resolution.candidates), 1)
+        self.assertEqual(resolution.telemetry.exact_search_batch_count, 1)
+        self.assertEqual(resolution.telemetry.exact_search_query_count, 2)
+        self.assertEqual(resolution.telemetry.exact_search_hit_count, 0)
+        self.assertEqual(resolution.telemetry.vector_fallback_batch_count, 1)
+        self.assertEqual(resolution.telemetry.vector_fallback_query_count, 1)
+        self.assertEqual(resolution.telemetry.vector_fallback_hit_count, 1)
+        self.assertEqual(resolution.telemetry.vector_fallback_empty_count, 0)
+        self.assertEqual(resolution.telemetry.umls_surface_query_count, 1)
+        self.assertEqual(resolution.telemetry.umls_canonical_query_count, 1)
 
     def test_dictionary_delegates_vector_search_through_repository_seam(self):
         class RecordingVectorRepository:
@@ -558,6 +567,12 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
                     statement_count=1,
                     collection_elapsed_ms=(("emergency_terms", 4.0),),
                     collection_statement_counts=(("emergency_terms", 1),),
+                    collection_batch_counts=(("emergency_terms", 1),),
+                    collection_query_counts=(("emergency_terms", 1),),
+                    collection_candidate_counts=(("emergency_terms", 1),),
+                    collection_empty_query_counts=(("emergency_terms", 0),),
+                    partition_elapsed_ms=(("emergency_terms", "all", 3.75),),
+                    partition_result_counts=(("emergency_terms", "all", 1),),
                 )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -585,6 +600,30 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
         self.assertEqual(
             batch.vector_collection_statement_counts,
             (("emergency_terms", 1),),
+        )
+        self.assertEqual(
+            batch.vector_collection_batch_counts,
+            (("emergency_terms", 1),),
+        )
+        self.assertEqual(
+            batch.vector_collection_query_counts,
+            (("emergency_terms", 1),),
+        )
+        self.assertEqual(
+            batch.vector_collection_candidate_counts,
+            (("emergency_terms", 1),),
+        )
+        self.assertEqual(
+            batch.vector_collection_empty_query_counts,
+            (("emergency_terms", 0),),
+        )
+        self.assertEqual(
+            batch.vector_partition_ms,
+            (("emergency_terms", "all", 3.75),),
+        )
+        self.assertEqual(
+            batch.vector_partition_result_counts,
+            (("emergency_terms", "all", 1),),
         )
         self.assertEqual(len(vectors.calls), 1)
 
@@ -921,6 +960,12 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
             resolution.candidates[0].dictionary_match.retrieval_score,
             1.0,
         )
+        self.assertEqual(resolution.telemetry.exact_search_batch_count, 1)
+        self.assertEqual(resolution.telemetry.exact_search_query_count, 2)
+        self.assertEqual(resolution.telemetry.exact_search_hit_count, 1)
+        self.assertEqual(resolution.telemetry.vector_fallback_batch_count, 0)
+        self.assertEqual(resolution.telemetry.umls_surface_query_count, 1)
+        self.assertEqual(resolution.telemetry.umls_canonical_query_count, 1)
 
     def test_exact_canonical_suppresses_surface_vector_search(self):
         with tempfile.TemporaryDirectory() as directory:

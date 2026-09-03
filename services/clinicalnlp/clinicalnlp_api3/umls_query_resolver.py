@@ -111,6 +111,12 @@ class _DictionarySearchBatch:
     vector_statement_count: int
     vector_collection_ms: tuple[tuple[str, float], ...] = ()
     vector_collection_statement_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_batch_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_query_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_candidate_counts: tuple[tuple[str, int], ...] = ()
+    vector_collection_empty_query_counts: tuple[tuple[str, int], ...] = ()
+    vector_partition_ms: tuple[tuple[str, str, float], ...] = ()
+    vector_partition_result_counts: tuple[tuple[str, str, int], ...] = ()
 
 
 @dataclass(slots=True)
@@ -862,6 +868,12 @@ class VerifiedClinicalDictionary:
                 vector_statements = 0
                 vector_collection_ms: tuple[tuple[str, float], ...] = ()
                 vector_collection_statement_counts: tuple[tuple[str, int], ...] = ()
+                vector_collection_batch_counts: tuple[tuple[str, int], ...] = ()
+                vector_collection_query_counts: tuple[tuple[str, int], ...] = ()
+                vector_collection_candidate_counts: tuple[tuple[str, int], ...] = ()
+                vector_collection_empty_query_counts: tuple[tuple[str, int], ...] = ()
+                vector_partition_ms: tuple[tuple[str, str, float], ...] = ()
+                vector_partition_result_counts: tuple[tuple[str, str, int], ...] = ()
             else:
                 (
                     vector_identities,
@@ -869,6 +881,12 @@ class VerifiedClinicalDictionary:
                     vector_statements,
                     vector_collection_ms,
                     vector_collection_statement_counts,
+                    vector_collection_batch_counts,
+                    vector_collection_query_counts,
+                    vector_collection_candidate_counts,
+                    vector_collection_empty_query_counts,
+                    vector_partition_ms,
+                    vector_partition_result_counts,
                 ) = self._vector_query_identities_many(
                     normalized,
                     limit=max(MAX_CANDIDATES_PER_QUERY * 4, bounded_limit * 4),
@@ -923,6 +941,12 @@ class VerifiedClinicalDictionary:
             vector_statement_count=vector_statements,
             vector_collection_ms=vector_collection_ms,
             vector_collection_statement_counts=vector_collection_statement_counts,
+            vector_collection_batch_counts=vector_collection_batch_counts,
+            vector_collection_query_counts=vector_collection_query_counts,
+            vector_collection_candidate_counts=vector_collection_candidate_counts,
+            vector_collection_empty_query_counts=vector_collection_empty_query_counts,
+            vector_partition_ms=vector_partition_ms,
+            vector_partition_result_counts=vector_partition_result_counts,
         )
 
     def _vector_query_identities_many(
@@ -937,6 +961,12 @@ class VerifiedClinicalDictionary:
         int,
         tuple[tuple[str, float], ...],
         tuple[tuple[str, int], ...],
+        tuple[tuple[str, int], ...],
+        tuple[tuple[str, int], ...],
+        tuple[tuple[str, int], ...],
+        tuple[tuple[str, int], ...],
+        tuple[tuple[str, str, float], ...],
+        tuple[tuple[str, str, int], ...],
     ]:
         batch = self._vector_repository.search_many(
             requests,
@@ -956,6 +986,12 @@ class VerifiedClinicalDictionary:
             batch.statement_count,
             batch.collection_elapsed_ms,
             batch.collection_statement_counts,
+            batch.collection_batch_counts,
+            batch.collection_query_counts,
+            batch.collection_candidate_counts,
+            batch.collection_empty_query_counts,
+            batch.partition_elapsed_ms,
+            batch.partition_result_counts,
         )
 
 
@@ -1025,11 +1061,43 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
         search_cache_hit_count = 0
         routed_query_count = 0
         routing_conflict_count = 0
+        exact_search_batch_count = 0
+        exact_search_query_count = 0
+        exact_search_hit_count = 0
+        vector_fallback_batch_count = 0
+        vector_fallback_query_count = 0
+        vector_fallback_hit_count = 0
+        vector_fallback_empty_count = 0
+        umls_surface_query_count = 0
+        umls_canonical_query_count = 0
+        semantic_fallback_query_count = 0
         vector_collection_ms = {
             collection: 0.0 for collection in _VECTOR_COLLECTIONS
         }
         vector_collection_statement_counts = {
             collection: 0 for collection in _VECTOR_COLLECTIONS
+        }
+        vector_collection_batch_counts = {
+            collection: 0 for collection in _VECTOR_COLLECTIONS
+        }
+        vector_collection_query_counts = {
+            collection: 0 for collection in _VECTOR_COLLECTIONS
+        }
+        vector_collection_candidate_counts = {
+            collection: 0 for collection in _VECTOR_COLLECTIONS
+        }
+        vector_collection_empty_query_counts = {
+            collection: 0 for collection in _VECTOR_COLLECTIONS
+        }
+        vector_partition_ms = {
+            ("drug_terms", "ingredient"): 0.0,
+            ("drug_terms", "product"): 0.0,
+            ("procedure_terms", "all"): 0.0,
+            ("anatomy_terms", "all"): 0.0,
+            ("emergency_terms", "all"): 0.0,
+        }
+        vector_partition_result_counts = {
+            key: 0 for key in vector_partition_ms
         }
         search_cache: dict[
             tuple[str, frozenset[str] | None, bool, bool],
@@ -1112,6 +1180,10 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
             nonlocal dictionary_ms, vector_ms
             nonlocal exact_statement_count, vector_statement_count
             nonlocal search_cache_hit_count
+            nonlocal exact_search_batch_count, exact_search_query_count
+            nonlocal exact_search_hit_count
+            nonlocal vector_fallback_batch_count, vector_fallback_query_count
+            nonlocal vector_fallback_hit_count, vector_fallback_empty_count
             if not requests:
                 return ()
             request_keys = tuple(
@@ -1189,6 +1261,37 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                             vector_collection_statement_counts[collection] += int(
                                 statement_count
                             )
+                    for attribute, accumulator in (
+                        ("vector_collection_batch_counts", vector_collection_batch_counts),
+                        ("vector_collection_query_counts", vector_collection_query_counts),
+                        (
+                            "vector_collection_candidate_counts",
+                            vector_collection_candidate_counts,
+                        ),
+                        (
+                            "vector_collection_empty_query_counts",
+                            vector_collection_empty_query_counts,
+                        ),
+                    ):
+                        for collection, count in getattr(batch, attribute, ()):
+                            if collection in accumulator:
+                                accumulator[collection] += int(count)
+                    for collection, partition, elapsed_ms in getattr(
+                        batch,
+                        "vector_partition_ms",
+                        (),
+                    ):
+                        key = (collection, partition)
+                        if key in vector_partition_ms:
+                            vector_partition_ms[key] += float(elapsed_ms)
+                    for collection, partition, count in getattr(
+                        batch,
+                        "vector_partition_result_counts",
+                        (),
+                    ):
+                        key = (collection, partition)
+                        if key in vector_partition_result_counts:
+                            vector_partition_result_counts[key] += int(count)
                     values_by_request = getattr(batch, "matches", ())
                     if len(values_by_request) != len(missing_requests):
                         missing_values = tuple(() for _ in missing_requests)
@@ -1208,6 +1311,16 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                                 missing_requests,
                             )
                         )
+            if exact_only:
+                exact_search_batch_count += 1
+                exact_search_query_count += len(missing_values)
+                exact_search_hit_count += sum(bool(value) for value in missing_values)
+            elif skip_exact:
+                vector_fallback_batch_count += 1
+                vector_fallback_query_count += len(missing_values)
+                hit_count = sum(bool(value) for value in missing_values)
+                vector_fallback_hit_count += hit_count
+                vector_fallback_empty_count += len(missing_values) - hit_count
             search_cache.update(zip(missing_keys, missing_values))
             return tuple(
                 search_cache.get(key, ())
@@ -1407,20 +1520,23 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         # generic adjective such as "yellow" into an unrelated
                         # medication candidate.
                         continue
-                    query_variants: list[str] = []
+                    query_variants: list[tuple[str, str]] = []
                     surface_query = str(
                         source_span.get("surface_query") or ""
                     ).strip()
-                    for value in (
-                        surface_query,
-                        str(top_concept["canonical_name"]).strip(),
+                    for query_kind, value in (
+                        ("surface", surface_query),
+                        (
+                            "canonical",
+                            str(top_concept["canonical_name"]).strip(),
+                        ),
                     ):
                         if not value:
                             continue
                         if value.casefold() not in {
-                            query.casefold() for query in query_variants
+                            query.casefold() for _, query in query_variants
                         }:
-                            query_variants.append(value)
+                            query_variants.append((query_kind, value))
 
                     verified_matches: dict[
                         tuple[str, str], LocalDictionaryMatch
@@ -1428,7 +1544,7 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     search_requests: list[
                         tuple[str, frozenset[str] | None]
                     ] = []
-                    for query in query_variants:
+                    for query_kind, query in query_variants:
                         if segment_budget <= 0 or document_budget <= 0:
                             break
                         segment_budget -= 1
@@ -1436,6 +1552,10 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         umls_query_count += 1
                         if segment.collection_hints is not None:
                             routed_query_count += 1
+                        if query_kind == "surface":
+                            umls_surface_query_count += 1
+                        else:
+                            umls_canonical_query_count += 1
                         search_requests.append((query, allowed_collections))
                     # Unknown semantic types must not fan out into every vector
                     # collection. Exact lookup remains a bounded safety net,
@@ -1459,8 +1579,9 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     ):
                         fallback_requests = tuple(
                             (query, fallback_collections)
-                            for query in query_variants[:len(search_requests)]
+                            for _, query in query_variants[:len(search_requests)]
                         )
+                        semantic_fallback_query_count += len(fallback_requests)
                         fallback_exact_matches = safe_search_many(
                             fallback_requests,
                             exact_only=True,
@@ -1656,6 +1777,17 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                 search_cache_hit_count=search_cache_hit_count,
                 routed_query_count=routed_query_count,
                 routing_conflict_count=routing_conflict_count,
+                exact_search_batch_count=exact_search_batch_count,
+                exact_search_query_count=exact_search_query_count,
+                exact_search_hit_count=exact_search_hit_count,
+                vector_fallback_batch_count=vector_fallback_batch_count,
+                vector_fallback_query_count=vector_fallback_query_count,
+                vector_fallback_hit_count=vector_fallback_hit_count,
+                vector_fallback_empty_count=vector_fallback_empty_count,
+                umls_surface_query_count=umls_surface_query_count,
+                umls_canonical_query_count=umls_canonical_query_count,
+                semantic_fallback_query_count=semantic_fallback_query_count,
+                ngram_fallback_query_count=ngram_query_count,
                 vector_collection_ms=tuple(
                     (collection, round(vector_collection_ms[collection], 3))
                     for collection in _VECTOR_COLLECTIONS
@@ -1666,6 +1798,38 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         vector_collection_statement_counts[collection],
                     )
                     for collection in _VECTOR_COLLECTIONS
+                ),
+                vector_collection_batch_counts=tuple(
+                    (collection, vector_collection_batch_counts[collection])
+                    for collection in _VECTOR_COLLECTIONS
+                ),
+                vector_collection_query_counts=tuple(
+                    (collection, vector_collection_query_counts[collection])
+                    for collection in _VECTOR_COLLECTIONS
+                ),
+                vector_collection_candidate_counts=tuple(
+                    (
+                        collection,
+                        vector_collection_candidate_counts[collection],
+                    )
+                    for collection in _VECTOR_COLLECTIONS
+                ),
+                vector_collection_empty_query_counts=tuple(
+                    (
+                        collection,
+                        vector_collection_empty_query_counts[collection],
+                    )
+                    for collection in _VECTOR_COLLECTIONS
+                ),
+                vector_partition_ms=tuple(
+                    (collection, partition, round(elapsed_ms, 3))
+                    for (collection, partition), elapsed_ms
+                    in vector_partition_ms.items()
+                ),
+                vector_partition_result_counts=tuple(
+                    (collection, partition, count)
+                    for (collection, partition), count
+                    in vector_partition_result_counts.items()
                 ),
             ),
         )
