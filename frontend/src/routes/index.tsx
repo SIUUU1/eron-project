@@ -21,17 +21,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { bedStatusMeta, incompleteRecords } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "응급실 현황 · ER-GUARD AI" },
       {
         name: "description",
         content: "전체 병상 현황판과 실시간 AI 경고를 한 화면에서 확인하는 응급실 현황 대시보드.",
       },
-      { property: "og:title", content: "응급실 현황 · ER-GUARD AI" },
+      { property: "og:title", content: "응급실 현황 · ER:ON(이로운)" },
       {
         property: "og:description",
         content: "전체 병상 현황판과 실시간 AI 경고를 확인하는 응급실 현황 대시보드.",
@@ -194,18 +194,6 @@ function DashboardPage() {
         </div>
       </div>
 
-      <p className="flex items-center gap-1.5 rounded-md border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
-        <Info className="size-3.5 shrink-0" />
-        환자·활력징후는 MIMIC-IV 실데이터입니다. 병상 배치는 데모 값이며,
-        {/* 로딩 중(beds === undefined)에는 근거를 단정하지 않는다 */}
-        {beds
-          ? beds.summary.pending > 0
-            ? ` 병상 색상은 AI 예측 기준이며, 첫 예측 전인 ${beds.summary.pending}병상은 흰색(예측 대기)입니다.`
-            : " 병상 색상은 AI 예측 기준입니다."
-          : ""}
-        &nbsp;기록 미완료 항목은 아직 mock 데이터입니다.
-      </p>
-
       <div className="grid grid-cols-5 gap-4">
         {summaryCards.map((c) => (
           <Card key={c.label}>
@@ -352,6 +340,28 @@ function DashboardPage() {
             <CardHeader className="border-b py-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Bell className="size-4 text-mint" /> 실시간 AI 경고
+                {/* 안내문구는 항상 노출하지 않고 이 아이콘에 hover 했을 때만 띄운다 */}
+                <TooltipProvider delayDuration={100}>
+                  <Tooltip>
+                    <TooltipTrigger
+                      type="button"
+                      aria-label="실시간 AI 경고 안내"
+                      className="-ml-1 rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <Info className="size-3.5" />
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="top"
+                      align="start"
+                      collisionPadding={12}
+                      className="max-w-xs text-[11px] font-normal leading-relaxed"
+                    >
+                      지금 🔴 재평가 필요 상태인 재실 환자만 표시합니다(등급·확률은 최신 예측 기준).
+                      시각은 경보가 켜진 시점이며, 문구는 예측에 기여한 신호로 임상적 인과관계가
+                      아닙니다.
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <Badge variant="outline" className={`ml-auto ${bandMeta.red.badge}`}>
                   <span className={`mr-1 size-1.5 rounded-full ${bandMeta.red.dot}`} />
                   {bandMeta.red.label}
@@ -437,10 +447,6 @@ function DashboardPage() {
                   </ul>
                 )}
               </div>
-              <p className="border-t px-4 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                지금 🔴 재평가 필요 상태인 재실 환자만 표시합니다(등급·확률은 최신 예측 기준).
-                시각은 경보가 켜진 시점이며, 문구는 예측에 기여한 신호로 임상적 인과관계가 아닙니다.
-              </p>
             </CardContent>
           </Card>
 
