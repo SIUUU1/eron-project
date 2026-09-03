@@ -128,6 +128,8 @@ export interface PersistedClinicalRecord {
     field_statuses?: Record<string, string> | null;
     field_provenance?: Record<string, unknown>;
     generated?: boolean;
+    whisper_payload?: WhisperDraftRequest;
+    conversation_sent_at?: string;
   };
   selected_kcd:
     | Array<{ code: string; name: string; is_rule_out?: boolean }>

@@ -78,7 +78,7 @@ export function whisperDraftToDialogue(request: WhisperDraftRequest): DraftDialo
     speaker:
       typeof segment.speaker === "string" && segment.speaker.length > 0
         ? segment.speaker
-        : "화자 미확인",
+        : "화자 미지정",
     text: segment.text,
   }));
 }
@@ -430,6 +430,12 @@ export function workflowDraftToFieldProvenance(
   const segments = new Map(
     workflow.api3.segments.map((segment) => [String(segment.id), segment]),
   );
+  const translations = new Map(
+    (workflow.query_expansion?.translated_segments ?? []).map((segment) => [
+      String(segment.segment_id),
+      segment.translated_text_en,
+    ]),
+  );
   const output: FieldProvenanceMap = {};
   const fields = workflow.draft.fields as unknown as Record<string, ClinicalDraftField>;
 
@@ -461,7 +467,7 @@ export function workflowDraftToFieldProvenance(
         segment?.start ?? fallback?.evidence_start,
         segment?.end ?? fallback?.evidence_end,
       ),
-      speaker: segment?.speaker?.trim() || "화자 미확인",
+      speaker: segment?.speaker?.trim() || "화자 미지정",
       raw,
       corrected,
       ...(translated ? { translated } : {}),

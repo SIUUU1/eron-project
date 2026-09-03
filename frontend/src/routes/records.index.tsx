@@ -1,11 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouterState } from "@tanstack/react-router";
 import { AlertCircle } from "lucide-react";
 import { useState } from "react";
 
 import { dischargeLabel, formatDateTime, sexLabel, toPercent, toRiskLevel } from "@/api/display";
 import { edStayKeys, getEdStays } from "@/api/ed-stays";
 import type { EdStayListItem } from "@/api/types";
+import { PatientListMobile } from "@/components/patient-list-mobile";
 import { PatientListTable, type PatientRow } from "@/components/patient-list-table";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,8 +78,16 @@ function pageWindow(current: number, last: number): number[] {
 }
 
 function RecordsListPage() {
+  const isMobileCompact = useRouterState({
+    select: (s) =>
+      String((s.location.search as Record<string, unknown> | undefined)?.mobile) === "1",
+  });
   const [page, setPage] = useState(1);
-  const query = { page, pageSize: PAGE_SIZE, sort: "acuity_mix" as const };
+  const query = {
+    page,
+    pageSize: PAGE_SIZE,
+    sort: "acuity_mix" as const,
+  };
 
   const { data, isPending, isError, error, refetch, isPlaceholderData } = useQuery({
     queryKey: edStayKeys.list(query),
@@ -132,13 +141,17 @@ function RecordsListPage() {
             </p>
           ) : (
             <div className={isPlaceholderData ? "opacity-60 transition-opacity" : undefined}>
-              <PatientListTable base="/records" rows={data.items.map(toRow)} />
+              {isMobileCompact ? (
+                <PatientListMobile base="/records" rows={data.items.map(toRow)} />
+              ) : (
+                <PatientListTable base="/records" rows={data.items.map(toRow)} />
+              )}
             </div>
           )}
         </CardContent>
       </Card>
 
-      {data && lastPage > 1 && (
+      {!isMobileCompact && data && lastPage > 1 && (
         <Pagination>
           <PaginationContent>
             <PaginationItem>
