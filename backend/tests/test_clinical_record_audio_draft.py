@@ -107,6 +107,8 @@ class ClinicalRecordAudioDraftApiTests(unittest.TestCase):
 
         def stt_upstream(request: httpx2.Request) -> httpx2.Response:
             if request.method == "POST":
+                self.assertIn(b'filename="recording.m4a"', request.content)
+                self.assertIn(b"Content-Type: audio/mp4", request.content)
                 return httpx2.Response(
                     202,
                     json={
@@ -141,7 +143,7 @@ class ClinicalRecordAudioDraftApiTests(unittest.TestCase):
         with TestClient(app) as client:
             response = client.post(
                 "/api/clinical-records/transcribe",
-                files={"audio": ("synthetic.wav", b"synthetic-audio", "audio/wav")},
+                files={"audio": ("recording.m4a", b"synthetic-audio", "audio/mp4")},
             )
 
         self.assertEqual(response.status_code, 200)

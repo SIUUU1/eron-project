@@ -63,6 +63,14 @@ class WhisperApiContractTests(unittest.TestCase):
             ".webm",
         )
 
+    def test_iphone_mp4_and_m4a_content_types_are_supported(self):
+        self.assertEqual(safe_audio_suffix("recording.m4a", "audio/mp4"), ".m4a")
+        self.assertEqual(safe_audio_suffix("recording", "audio/x-m4a"), ".m4a")
+
+    def test_mobile_audio_suffix_falls_back_to_a_supported_content_type(self):
+        self.assertEqual(safe_audio_suffix("recording.audio", "audio/mp4"), ".m4a")
+        self.assertEqual(safe_audio_suffix("recording.audio", "audio/webm"), ".webm")
+
     def test_transcription_does_not_require_an_internal_api_key(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

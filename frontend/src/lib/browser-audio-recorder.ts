@@ -26,7 +26,49 @@ export interface MediaRecorderLike {
 
 export interface AudioRecordingPlatform {
   openMicrophone(): Promise<AudioStreamLike>;
-  createMediaRecorder(stream: AudioStreamLike): MediaRecorderLike;
+  isMimeTypeSupported(mimeType: string): boolean;
+  createMediaRecorder(stream: AudioStreamLike, options?: { mimeType: string }): MediaRecorderLike;
+}
+
+export interface AudioRecordingPreview {
+  file: File;
+  objectUrl: string;
+  durationSeconds: number;
+}
+
+interface ObjectUrlPlatform {
+  createObjectURL(blob: Blob): string;
+  revokeObjectURL(url: string): void;
+}
+
+export function createAudioRecordingPreview(
+  file: File,
+  durationSeconds: number,
+  objectUrls: ObjectUrlPlatform = URL,
+): AudioRecordingPreview {
+  return { file, durationSeconds, objectUrl: objectUrls.createObjectURL(file) };
+}
+
+export function settleAudioRecordingPreview(
+  preview: AudioRecordingPreview,
+  transcriptionSucceeded: boolean,
+  objectUrls: ObjectUrlPlatform = URL,
+): AudioRecordingPreview | null {
+  if (!transcriptionSucceeded) return preview;
+  objectUrls.revokeObjectURL(preview.objectUrl);
+  return null;
+}
+
+export const AUDIO_RECORDING_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/mp4",
+  "audio/ogg;codecs=opus",
+] as const;
+
+export function selectAudioRecordingMimeType(
+  isSupported: (mimeType: string) => boolean,
+): string | undefined {
+  return AUDIO_RECORDING_MIME_TYPES.find(isSupported);
 }
 
 export class AudioRecordingUnsupportedError extends Error {
@@ -88,15 +130,23 @@ function browserAudioRecordingPlatform(): AudioRecordingPlatform {
 
   return {
     openMicrophone: () => navigator.mediaDevices.getUserMedia({ audio: true }),
-    createMediaRecorder: (stream) => new MediaRecorder(stream as MediaStream),
+    isMimeTypeSupported: (mimeType) =>
+      typeof MediaRecorder.isTypeSupported === "function" &&
+      MediaRecorder.isTypeSupported(mimeType),
+    createMediaRecorder: (stream, options) =>
+      options
+        ? new MediaRecorder(stream as MediaStream, options)
+        : new MediaRecorder(stream as MediaStream),
   };
 }
 
-function extensionForMimeType(mimeType: string): string {
+export function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes("mp4")) return "m4a";
   if (mimeType.includes("ogg")) return "ogg";
   if (mimeType.includes("mpeg")) return "mp3";
-  return "webm";
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("webm")) return "webm";
+  return "audio";
 }
 
 export class BrowserAudioRecorder {
@@ -124,7 +174,13 @@ export class BrowserAudioRecorder {
 
     const stream = await this.#platform.openMicrophone();
     try {
-      const recorder = this.#platform.createMediaRecorder(stream);
+      const selectedMimeType = selectAudioRecordingMimeType((mimeType) =>
+        this.#platform.isMimeTypeSupported(mimeType),
+      );
+      const recorder = this.#platform.createMediaRecorder(
+        stream,
+        selectedMimeType ? { mimeType: selectedMimeType } : undefined,
+      );
       this.#stream = stream;
       this.#recorder = recorder;
       this.#chunks = [];
@@ -153,7 +209,7 @@ export class BrowserAudioRecorder {
 
     return new Promise<File>((resolve, reject) => {
       recorder.onstop = () => {
-        const mimeType = recorder.mimeType || "audio/webm";
+        const mimeType = recorder.mimeType || this.#chunks.find((chunk) => chunk.type)?.type || "";
         const audio = new File(
           this.#chunks,
           `eron-recording-${Date.now()}.${extensionForMimeType(mimeType)}`,
