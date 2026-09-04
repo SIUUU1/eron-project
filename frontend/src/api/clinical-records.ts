@@ -37,6 +37,8 @@ const recordFieldKeyByClinicalId: Record<string, RecordFieldKey> = {
 
 export interface DraftDialogueTurn {
   speaker: string;
+  segmentId: string;
+  timestamp: string;
   text: string;
 }
 
@@ -104,6 +106,8 @@ export function whisperDraftToDialogue(request: WhisperDraftRequest): DraftDialo
       typeof segment.speaker === "string" && segment.speaker.length > 0
         ? segment.speaker
         : "화자 미지정",
+    segmentId: String(segment.id),
+    timestamp: evidenceTimestamp(segment.start, segment.end),
     text: segment.text,
   }));
 }

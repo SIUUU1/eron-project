@@ -115,7 +115,6 @@ export function FieldProvenancePanel({
                     {evidence.segmentId}
                   </span>
                   <span>{evidence.timestamp}</span>
-                  <span>{evidence.speaker}</span>
                 </div>
                 <dl className="mt-2 grid gap-1.5 text-xs">
                   <div className="grid grid-cols-[62px_1fr] gap-2">
