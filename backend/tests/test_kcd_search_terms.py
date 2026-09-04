@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -111,6 +112,37 @@ class KcdSearchTests(unittest.TestCase):
                         name_ko="상세불명의 흉통",
                         name_en="Chest pain, unspecified",
                     ),
+                    KcdCode(code="R81", name_ko="당뇨", name_en="Glycosuria"),
+                    KcdCode(
+                        code="E109",
+                        name_ko="합병증을 동반하지 않은 1형 당뇨병",
+                        name_en="Type 1 diabetes mellitus, without complications",
+                    ),
+                    KcdCode(
+                        code="E119",
+                        name_ko="합병증을 동반하지 않은 2형 당뇨병",
+                        name_en="Type 2 diabetes mellitus, without complications",
+                    ),
+                    KcdCode(
+                        code="E149",
+                        name_ko="합병증을 동반하지 않은 당뇨병 NOS",
+                        name_en="Diabetes NOS, without complications",
+                    ),
+                    KcdCode(
+                        code="E1163",
+                        name_ko="저혈당을 동반한 2형 당뇨병",
+                        name_en="Type 2 diabetes mellitus, with hypoglycemia",
+                    ),
+                    KcdCode(
+                        code="I713",
+                        name_ko="파열된 복부대동맥동맥류",
+                        name_en="Abdominal aortic aneurysm, ruptured",
+                    ),
+                    KcdCode(
+                        code="C73",
+                        name_ko="갑상선의 악성 신생물",
+                        name_en="Malignant neoplasm of thyroid gland",
+                    ),
                     KcdCode(
                         code="M8007",
                         name_ko="병적 골절을 동반한 폐경후골다공증, 발목 및 발",
@@ -215,6 +247,39 @@ class KcdSearchTests(unittest.TestCase):
     def test_exact_english_name_keeps_priority_over_token_matches(self):
         response = self.search("Chest pain, unspecified")
         self.assertEqual(response.items[0].code, "R07.4")
+
+    def test_korean_diabetes_keeps_exact_name_first_and_surfaces_e119(self):
+        response = self.search("당뇨")
+
+        self.assertEqual(response.items[0].code, "R81")
+        self.assertIn("E11.9", [item.code for item in response.items[:3]])
+
+    def test_korean_diabetes_name_surfaces_uncomplicated_codes_first(self):
+        response = self.search("당뇨병")
+        top_codes = [item.code for item in response.items[:3]]
+
+        self.assertIn("E11.9", top_codes)
+        self.assertNotIn("E11.63", top_codes)
+
+    def test_english_diabetes_surfaces_uncomplicated_codes_first(self):
+        response = self.search("diabetes")
+        top_codes = [item.code for item in response.items[:3]]
+
+        self.assertIn("E11.9", top_codes)
+        self.assertNotIn("E11.63", top_codes)
+
+    def test_existing_alias_search_is_preserved(self):
+        with patch(
+            "app.api.kcd.lookup_alias_terms",
+            return_value=("복부대동맥류", "abdominal aortic aneurysm"),
+        ):
+            response = self.search("AAA")
+
+        self.assertEqual(response.items[0].code, "I71.3")
+
+    def test_existing_cancer_expansion_search_is_preserved(self):
+        response = self.search("갑상선암")
+        self.assertEqual(response.items[0].code, "C73")
 
     def test_unknown_diagnosis_returns_no_results(self):
         response = self.search("zzzznosuchkcdterm")

@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, desc, func, literal, or_, select
+from sqlalchemy import and_, case, desc, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.clinical_records import get_db
@@ -148,9 +148,16 @@ def search_kcd_codes(
         conditions.append(KcdCode.code.ilike(f"%{normalized_code}%"))
     conditions.extend(token_condition(group) for group in token_groups)
 
+    code_score_conditions = (
+        (
+            (func.upper(KcdCode.code) == normalized_code, 0),
+            (func.upper(KcdCode.code).like(f"{normalized_code}%"), 1),
+        )
+        if normalized_code
+        else ()
+    )
     score = case(
-        (func.upper(KcdCode.code) == normalized_code, 0),
-        (func.upper(KcdCode.code).like(f"{normalized_code}%"), 1),
+        *code_score_conditions,
         (KcdCode.name_ko == query, 2),
         (func.lower(KcdCode.name_en) == query.lower(), 2),
         (KcdCode.name_ko.ilike(f"{query}%"), 3),
@@ -167,12 +174,50 @@ def search_kcd_codes(
         (case((token_condition(group), 1), else_=0) for group in token_groups),
         start=literal(0),
     )
+    exact_priority = case((score <= 2, score), else_=3)
+    generality_score = (
+        case(
+            (
+                and_(
+                    score > 2,
+                    or_(
+                        KcdCode.name_ko.ilike("%합병증을 동반하지 않은%"),
+                        KcdCode.name_en.ilike("%without complications%"),
+                    ),
+                ),
+                0,
+            ),
+            (
+                and_(
+                    score > 2,
+                    or_(
+                        KcdCode.name_ko.ilike("상세불명의 %"),
+                        KcdCode.name_ko.ilike("기타 및 상세불명의 %"),
+                        KcdCode.name_en.ilike("unspecified %"),
+                        KcdCode.name_en.ilike("other and unspecified %"),
+                        KcdCode.name_en.ilike("%, unspecified"),
+                    ),
+                ),
+                1,
+            ),
+            else_=2,
+        )
+        if len(token_groups) == 1
+        else literal(2)
+    )
     where_clause = or_(*conditions)
     total = db.scalar(select(func.count()).select_from(KcdCode).where(where_clause)) or 0
     rows = db.scalars(
         select(KcdCode)
         .where(where_clause)
-        .order_by(score, desc(token_score), func.length(KcdCode.name_ko), KcdCode.code)
+        .order_by(
+            exact_priority,
+            generality_score,
+            score,
+            desc(token_score),
+            func.length(KcdCode.name_ko),
+            KcdCode.code,
+        )
         .limit(limit)
     ).all()
     return KcdSearchResponse(
