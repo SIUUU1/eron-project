@@ -1593,7 +1593,7 @@ function RecordWorkflow({
                 <Loader2 className="mx-auto mb-3 size-8 animate-spin text-primary" />
                 <p className="text-sm font-medium">AI가 응급진료기록을 검토하고 있습니다…</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  주호소(흉통) 기준 필수 임상정보 항목을 대조하는 중입니다.
+                  필수 임상정보 항목을 대조하는 중입니다.
                 </p>
               </CardContent>
             </Card>
