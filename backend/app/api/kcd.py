@@ -15,6 +15,32 @@ from app.schemas.kcd import KcdCodeItem, KcdSearchResponse
 router = APIRouter(prefix="/api/kcd", tags=["kcd"])
 
 
+def search_token_variants(query: str) -> tuple[tuple[str, ...], ...]:
+    """Return searchable token variants without relying on diagnosis-specific rules."""
+    token_groups: list[tuple[str, ...]] = []
+    for raw_token in re.findall(r"[A-Za-z0-9]+|[가-힣]+", query):
+        token = re.sub(r"(의심|추정|증)$", "", raw_token)
+        if len(token) < 2:
+            continue
+
+        variants = [token]
+        lower_token = token.lower()
+        if re.fullmatch(r"[a-z]+", lower_token):
+            if lower_token.endswith("ies") and len(lower_token) > 3:
+                variants.append(f"{token[:-3]}y")
+            elif lower_token.endswith("es") and len(lower_token) > 3:
+                variants.extend((token[:-2], token[:-1]))
+            elif lower_token.endswith("s") and not lower_token.endswith("ss"):
+                variants.append(token[:-1])
+
+        group = tuple(dict.fromkeys(variants))
+        if group not in token_groups:
+            token_groups.append(group)
+        if len(token_groups) == 5:
+            break
+    return tuple(token_groups)
+
+
 def display_code(code: str) -> str:
     normalized = code.replace(".", "").upper()
     return f"{normalized[:3]}.{normalized[3:]}" if len(normalized) > 3 else normalized
@@ -94,12 +120,18 @@ def search_kcd_codes(
     aliases = tuple(
         dict.fromkeys((*lookup_alias_terms(query), *expand_common_kcd_terms(query)))
     )
-    terms = []
-    for raw_term in re.split(r"\s+", query):
-        term = re.sub(r"(의심|추정|증)$", "", raw_term)
-        if len(term) >= 2 and term not in terms:
-            terms.append(term)
-    terms = terms[:5]
+    token_groups = search_token_variants(query)
+
+    def token_condition(variants: tuple[str, ...]):
+        return or_(
+            *(
+                or_(
+                    KcdCode.name_ko.ilike(f"%{variant}%"),
+                    KcdCode.name_en.ilike(f"%{variant}%"),
+                )
+                for variant in variants
+            )
+        )
 
     conditions = [
         KcdCode.name_ko.ilike(f"%{query}%"),
@@ -114,14 +146,17 @@ def search_kcd_codes(
     )
     if normalized_code:
         conditions.append(KcdCode.code.ilike(f"%{normalized_code}%"))
-    conditions.extend(KcdCode.name_ko.ilike(f"%{term}%") for term in terms)
+    conditions.extend(token_condition(group) for group in token_groups)
 
     score = case(
         (func.upper(KcdCode.code) == normalized_code, 0),
         (func.upper(KcdCode.code).like(f"{normalized_code}%"), 1),
         (KcdCode.name_ko == query, 2),
+        (func.lower(KcdCode.name_en) == query.lower(), 2),
         (KcdCode.name_ko.ilike(f"{query}%"), 3),
+        (KcdCode.name_en.ilike(f"{query}%"), 3),
         (KcdCode.name_ko.ilike(f"%{query}%"), 4),
+        (KcdCode.name_en.ilike(f"%{query}%"), 4),
         *(
             (or_(KcdCode.name_ko.ilike(f"%{alias}%"), KcdCode.name_en.ilike(f"%{alias}%")), 4)
             for alias in aliases
@@ -129,7 +164,7 @@ def search_kcd_codes(
         else_=5,
     )
     token_score = sum(
-        (case((KcdCode.name_ko.ilike(f"%{term}%"), 1), else_=0) for term in terms),
+        (case((token_condition(group), 1), else_=0) for group in token_groups),
         start=literal(0),
     )
     where_clause = or_(*conditions)
@@ -137,7 +172,7 @@ def search_kcd_codes(
     rows = db.scalars(
         select(KcdCode)
         .where(where_clause)
-        .order_by(desc(token_score), score, func.length(KcdCode.name_ko), KcdCode.code)
+        .order_by(score, desc(token_score), func.length(KcdCode.name_ko), KcdCode.code)
         .limit(limit)
     ).all()
     return KcdSearchResponse(
