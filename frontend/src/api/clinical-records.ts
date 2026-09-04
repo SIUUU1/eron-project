@@ -47,23 +47,35 @@ const diagnosisListPrefix =
 
 /** Convert the model-authored impression display into ordered UI diagnosis rows. */
 export function clinicalRecordDiagnosisEntries(value: string): string[] {
-  const normalized = value.replace(/\r\n?/g, "\n").trim();
-  if (!normalized || normalized === "미확인") return [""];
-
-  const entries = normalized
+  const lineNormalized = value
+    .replace(/\r\n?/g, "\n")
     .replace(
       /;\s*(?=(?:(?:추정\s*진단|주진단|부진단)\s*\d*\s*[:：-]?|\d+\s*[.)]))/gi,
       "\n",
-    )
-    .split(/(?:\n+|\s*[,;]\s*)/)
-    .map((entry) => entry.replace(diagnosisListPrefix, "").trim())
-    .filter(Boolean);
+    );
+  if (!lineNormalized.trim() || lineNormalized.trim() === "미확인") return [""];
+
+  const entries = lineNormalized.split("\n").flatMap((line) => {
+    const trailingWhitespace = line.match(/[ \t]+$/)?.[0] ?? "";
+    const parsed = line
+      .trim()
+      .split(/\s*[,;]\s*/)
+      .map((entry) => entry.replace(diagnosisListPrefix, "").trim())
+      .filter(Boolean);
+
+    if (parsed.length === 0) return [""];
+    if (trailingWhitespace) parsed[parsed.length - 1] += trailingWhitespace;
+    return parsed;
+  });
 
   return entries.length > 0 ? entries : [""];
 }
 
 export function normalizeClinicalRecordImpression(value: string): string {
-  return clinicalRecordDiagnosisEntries(value).filter(Boolean).join("\n");
+  return clinicalRecordDiagnosisEntries(value)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function parseWhisperDraftJson(source: string): WhisperDraftRequest {

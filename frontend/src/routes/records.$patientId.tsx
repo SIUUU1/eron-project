@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import {
   clinicalAudioTranscriptionErrorMessage,
   clinicalRecordDiagnosisEntries,
+  normalizeClinicalRecordImpression,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -408,7 +409,10 @@ function RecordWorkflow({
     try {
       const saved = await saveClinicalRecordDraft(patient.id, {
         record_payload: {
-          record,
+          record: {
+            ...record,
+            impression: normalizeClinicalRecordImpression(record.impression),
+          },
           field_statuses: clinicalFieldStatuses,
           field_provenance: fieldProvenance as Record<string, unknown>,
           generated,

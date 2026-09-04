@@ -5,6 +5,7 @@ import { ApiError } from "../src/api/client.ts";
 import {
   clinicalAudioTranscriptionErrorMessage,
   clinicalRecordDiagnosisEntries,
+  normalizeClinicalRecordImpression,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -63,6 +64,22 @@ test("복수 추정진단을 순서대로 주진단과 부진단 행으로 정�
   );
   assert.deepEqual(clinicalRecordDiagnosisEntries(""), [""]);
   assert.deepEqual(clinicalRecordDiagnosisEntries("미확인"), [""]);
+});
+
+test("추가된 빈 부진단 행은 편집 중 유지하고 저장 시 제외한다", () => {
+  assert.deepEqual(clinicalRecordDiagnosisEntries("Hypertension\n"), ["Hypertension", ""]);
+  assert.equal(normalizeClinicalRecordImpression("Hypertension\n"), "Hypertension");
+});
+
+test("추정진단을 편집하는 동안 각 입력 행 끝의 공백을 유지한다", () => {
+  assert.deepEqual(clinicalRecordDiagnosisEntries("Acute \nDiabetes mellitus "), [
+    "Acute ",
+    "Diabetes mellitus ",
+  ]);
+  assert.equal(
+    normalizeClinicalRecordImpression("Acute \nDiabetes mellitus "),
+    "Acute\nDiabetes mellitus",
+  );
 });
 
 test("다른 후보를 선택하거나 제외하면 추가된 후보 줄만 교체하거나 제거한다", () => {
