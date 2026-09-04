@@ -136,6 +136,13 @@ class _SyntheticClinicalExtractor:
                 "issues": [],
             },
             "generation": {
+                "fact_chunk_count": 3,
+                "fact_chunk_worker_count": 3,
+                "field_group_call_count": 0,
+                "length_fallback_count": 0,
+                "repair_count": 1,
+                "regeneration_count": 0,
+                "failed_segment_count": 0,
                 "provider_call_count": 2,
                 "network_retry_count": 1,
                 "http_elapsed_ms": 140.0,
@@ -256,6 +263,9 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "translation_calls",
                 "translation_batch_count",
                 "translation_retry_split_count",
+                "translation_partial_retry_count",
+                "translation_preserved_segment_count",
+                "translation_retry_reasons",
                 "translation_rate_limit_count",
                 "translation_batches",
                 "translation_provider_calls",
@@ -326,6 +336,13 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "vector_emergency_terms_candidate_count",
                 "vector_emergency_terms_empty_query_count",
                 "clinical_extraction_ms",
+                "clinical_llm_fact_chunk_count",
+                "clinical_llm_fact_chunk_worker_count",
+                "clinical_llm_field_group_call_count",
+                "clinical_llm_length_fallback_count",
+                "clinical_llm_repair_count",
+                "clinical_llm_regeneration_count",
+                "clinical_llm_failed_segment_count",
                 "clinical_llm_provider_calls",
                 "clinical_llm_network_retries",
                 "clinical_llm_http_ms",
@@ -340,7 +357,10 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             all(
                 isinstance(value, (int, float)) and value >= 0
                 for key, value in result["telemetry"].items()
-                if key != "translation_batches"
+                if key not in {
+                    "translation_batches",
+                    "translation_retry_reasons",
+                }
             )
         )
         self.assertEqual(
@@ -352,6 +372,9 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                     "context_segment_count": 1,
                     "request_count": 1,
                     "retry_split_count": 0,
+                    "partial_retry_count": 0,
+                    "preserved_segment_count": 0,
+                    "retry_reasons": {},
                     "rate_limit_count": 0,
                     "failed_segment_count": 0,
                     "elapsed_ms": 140.0,
@@ -537,6 +560,12 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             "$.compact_v3_primary.record",
         )
         self.assertEqual(result["telemetry"]["clinical_llm_provider_calls"], 2)
+        self.assertEqual(result["telemetry"]["clinical_llm_fact_chunk_count"], 3)
+        self.assertEqual(
+            result["telemetry"]["clinical_llm_fact_chunk_worker_count"],
+            3,
+        )
+        self.assertEqual(result["telemetry"]["clinical_llm_repair_count"], 1)
         self.assertEqual(result["telemetry"]["clinical_llm_network_retries"], 1)
         self.assertEqual(result["telemetry"]["clinical_llm_http_ms"], 140.0)
         self.assertEqual(result["telemetry"]["clinical_llm_provider_ms"], 120.0)

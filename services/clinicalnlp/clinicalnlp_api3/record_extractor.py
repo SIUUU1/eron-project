@@ -77,6 +77,7 @@ CANDIDATE_PROMPT_VERSION = "candidate-adjudication-v1"
 DRAFT_NORMALIZATION_PROMPT_VERSION = "draft-normalization-v1"
 COMPACT_PROMPT_VERSION = "clinical-record-compact-v3.2"
 LEAN_REQUEST_DEADLINE_SECONDS = 620.0
+MAX_PARALLEL_FACT_CHUNKS = 3
 
 
 class _LeanCallBudget:
@@ -101,6 +102,7 @@ class _LeanTelemetry:
             "contract_version": LEAN_SCHEMA_VERSION,
             "generation_route": "single",
             "fact_chunk_count": 0,
+            "fact_chunk_worker_count": 0,
             "field_group_call_count": 0,
             "llm_call_count": 0,
             "provider_call_count": 0,
@@ -957,10 +959,14 @@ class LlamaServerClinicalExtractor:
             candidate_snapshots,
         )
         telemetry.set("fact_chunk_count", len(chunks))
+        fact_chunk_worker_count = min(MAX_PARALLEL_FACT_CHUNKS, len(chunks))
+        telemetry.set("fact_chunk_worker_count", fact_chunk_worker_count)
         failed_segment_ids = list(overflow_ids)
         ordered_fact_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
         ordered_audit_entries: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(
+            max_workers=max(1, fact_chunk_worker_count)
+        ) as executor:
             futures = {}
             for index, chunk in enumerate(chunks, start=1):
                 context = None

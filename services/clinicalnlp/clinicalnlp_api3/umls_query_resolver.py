@@ -1742,9 +1742,8 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                     )
                 )
                 seen_ngram_spans: set[tuple[int, int, str]] = set()
-                for region_start, region_end, exact_only in planned_regions:
-                    region_matched = False
-                    planned_any = False
+                region_plan_groups: list[list[_NgramQuery]] = []
+                for region_start, region_end, _exact_only in planned_regions:
                     region_plans: list[_NgramQuery] = []
                     for plan in _ngram_queries_for_region(
                         translation,
@@ -1761,18 +1760,31 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                         seen_ngram_spans.add(span_key)
                         if segment_budget <= 0 or document_budget <= 0:
                             break
-                        planned_any = True
                         segment_budget -= 1
                         document_budget -= 1
                         ngram_query_count += 1
                         region_plans.append(plan)
-                    region_matches = safe_search_many(
-                        tuple(
-                            (plan.search_text, segment.collection_hints)
-                            for plan in region_plans
-                        ),
-                        exact_only=exact_only,
-                    )
+                    if region_plans:
+                        region_plan_groups.append(region_plans)
+                all_region_plans = [
+                    plan
+                    for region_plans in region_plan_groups
+                    for plan in region_plans
+                ]
+                all_region_matches = safe_search_many(
+                    tuple(
+                        (plan.search_text, segment.collection_hints)
+                        for plan in all_region_plans
+                    ),
+                    exact_only=True,
+                )
+                match_offset = 0
+                for region_plans in region_plan_groups:
+                    region_matches = all_region_matches[
+                        match_offset : match_offset + len(region_plans)
+                    ]
+                    match_offset += len(region_plans)
+                    region_matched = False
                     for plan, matches in zip(region_plans, region_matches):
                         if matches:
                             region_matched = True
@@ -1794,7 +1806,7 @@ class UmlsPrimaryMedicalQueryResolver(MedicalQueryResolver):
                                     evidence=evidence,
                                 )
                             )
-                    if planned_any and not region_matched:
+                    if not region_matched:
                         unresolved_count += 1
 
         # Official RAW matches are a post-UMLS safety net. They recover exact

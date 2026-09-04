@@ -3924,12 +3924,21 @@ def run_clinical_workflow(
     def telemetry_count(value: object) -> int:
         return value if type(value) is int and value >= 0 else 0
 
+    def telemetry_counts(value: object) -> dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): telemetry_count(count)
+            for key, count in value.items()
+            if isinstance(key, str) and telemetry_count(count) > 0
+        }
+
     def translation_batch_details(
         value: object,
-    ) -> list[dict[str, int | float]]:
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
-        details: list[dict[str, int | float]] = []
+        details: list[dict[str, Any]] = []
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -3945,6 +3954,15 @@ def run_clinical_workflow(
                     "request_count": telemetry_count(item.get("request_count")),
                     "retry_split_count": telemetry_count(
                         item.get("retry_split_count")
+                    ),
+                    "partial_retry_count": telemetry_count(
+                        item.get("partial_retry_count")
+                    ),
+                    "preserved_segment_count": telemetry_count(
+                        item.get("preserved_segment_count")
+                    ),
+                    "retry_reasons": telemetry_counts(
+                        item.get("retry_reasons")
                     ),
                     "rate_limit_count": telemetry_count(
                         item.get("rate_limit_count")
@@ -4031,6 +4049,18 @@ def run_clinical_workflow(
         ),
         "translation_retry_split_count": telemetry_count(
             query_expansion_telemetry.get("translation_retry_split_count", 0)
+        ),
+        "translation_partial_retry_count": telemetry_count(
+            query_expansion_telemetry.get("translation_partial_retry_count", 0)
+        ),
+        "translation_preserved_segment_count": telemetry_count(
+            query_expansion_telemetry.get(
+                "translation_preserved_segment_count",
+                0,
+            )
+        ),
+        "translation_retry_reasons": telemetry_counts(
+            query_expansion_telemetry.get("translation_retry_reasons")
         ),
         "translation_rate_limit_count": telemetry_count(
             query_expansion_telemetry.get("translation_rate_limit_count", 0)
@@ -4125,6 +4155,13 @@ def run_clinical_workflow(
         "vector_emergency_terms_candidate_count": 0,
         "vector_emergency_terms_empty_query_count": 0,
         "clinical_extraction_ms": 0.0,
+        "clinical_llm_fact_chunk_count": 0,
+        "clinical_llm_fact_chunk_worker_count": 0,
+        "clinical_llm_field_group_call_count": 0,
+        "clinical_llm_length_fallback_count": 0,
+        "clinical_llm_repair_count": 0,
+        "clinical_llm_regeneration_count": 0,
+        "clinical_llm_failed_segment_count": 0,
         "clinical_llm_provider_calls": 0,
         "clinical_llm_network_retries": 0,
         "clinical_llm_http_ms": 0.0,
@@ -4510,6 +4547,18 @@ def run_clinical_workflow(
     telemetry["clinical_llm_provider_calls"] = telemetry_count(
         generation_telemetry.get("provider_call_count", 0)
     )
+    for target_key, source_key in (
+        ("clinical_llm_fact_chunk_count", "fact_chunk_count"),
+        ("clinical_llm_fact_chunk_worker_count", "fact_chunk_worker_count"),
+        ("clinical_llm_field_group_call_count", "field_group_call_count"),
+        ("clinical_llm_length_fallback_count", "length_fallback_count"),
+        ("clinical_llm_repair_count", "repair_count"),
+        ("clinical_llm_regeneration_count", "regeneration_count"),
+        ("clinical_llm_failed_segment_count", "failed_segment_count"),
+    ):
+        telemetry[target_key] = telemetry_count(
+            generation_telemetry.get(source_key, 0)
+        )
     telemetry["clinical_llm_network_retries"] = telemetry_count(
         generation_telemetry.get("network_retry_count", 0)
     )

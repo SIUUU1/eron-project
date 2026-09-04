@@ -6,6 +6,10 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from clinicalnlp_api3.clinical_llm import (
+    ClinicalLlmLengthLimit,
+    InvalidClinicalLlmOutput,
+)
 from clinicalnlp_api3.pipeline import run_api3
 from clinicalnlp_api3.query_expansion import LlamaServerMedicalQueryExpander
 from clinicalnlp_api3.workflow import run_clinical_workflow
@@ -347,6 +351,9 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
                     "context_segment_count": 5,
                     "request_count": 1,
                     "retry_split_count": 0,
+                    "partial_retry_count": 0,
+                    "preserved_segment_count": 0,
+                    "retry_reasons": {},
                     "rate_limit_count": 0,
                     "failed_segment_count": 0,
                     "elapsed_ms": result["_telemetry"]["translation_batches"][0][
@@ -367,10 +374,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             schema = payload["response_format"]["json_schema"]["schema"]
             translation_schema = schema["properties"]["translations"]
             self.assertFalse(translation_schema["additionalProperties"])
-            self.assertEqual(
-                set(translation_schema["required"]),
-                set(supplied["target_segment_ids"]),
-            )
+            self.assertNotIn("required", translation_schema)
             self.assertIn("medical_terms", json.dumps(schema))
 
     def test_compact_translation_splits_only_when_token_budget_requires_it(self):
@@ -472,6 +476,348 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
             result["_telemetry"]["translation_batches"][0]["retry_split_count"],
             2,
         )
+
+    def test_partial_batch_preserves_successes_and_retries_only_missing_ids(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"원문 {index}",
+            }
+            for index in range(1, 4)
+        ]
+
+        class PartialClient:
+            def __init__(self):
+                self.target_batches = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_ids = list(user_payload["target_segment_ids"])
+                self.target_batches.append(target_ids)
+                returned_ids = (
+                    [target_id for target_id in target_ids if target_id != "t0002"]
+                    if len(self.target_batches) == 1
+                    else target_ids
+                )
+                return {
+                    "translations": {
+                        target_id: {
+                            "translated_text_en": f"Translation {target_id}",
+                            "medical_terms": [],
+                        }
+                        for target_id in returned_ids
+                    }
+                }
+
+        client = PartialClient()
+        result = LlamaServerMedicalQueryExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "available")
+        self.assertFalse(result["fallback_used"])
+        self.assertEqual(
+            client.target_batches,
+            [["t0001", "t0002", "t0003"], ["t0002"]],
+        )
+        self.assertEqual(result["_telemetry"]["translation_calls"], 2)
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_split_count"],
+            0,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_partial_retry_count"],
+            1,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_preserved_segment_count"],
+            2,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_reasons"],
+            {"missing_segment": 1},
+        )
+
+    def test_repeated_short_segments_retry_only_the_omitted_id(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index) * 1.5,
+                "end": float(index) * 1.5 + 1.2,
+                "text": "감사합니다.",
+            }
+            for index in range(1, 10)
+        ]
+
+        class RepeatedSegmentClient:
+            def __init__(self):
+                self.target_batches = []
+                self.context_texts = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_ids = list(user_payload["target_segment_ids"])
+                self.target_batches.append(target_ids)
+                self.context_texts.append(
+                    [item["text"] for item in user_payload["context_segments"]]
+                )
+                returned_ids = (
+                    target_ids[:-1]
+                    if len(self.target_batches) == 1
+                    else target_ids
+                )
+                return {
+                    "translations": {
+                        target_id: {
+                            "translated_text_en": "Thank you.",
+                            "medical_terms": [],
+                        }
+                        for target_id in returned_ids
+                    }
+                }
+
+        client = RepeatedSegmentClient()
+        result = LlamaServerMedicalQueryExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(
+            client.target_batches,
+            [
+                [f"t{index:04d}" for index in range(1, 10)],
+                ["t0009"],
+            ],
+        )
+        self.assertEqual(client.context_texts[0], ["감사합니다."] * 9)
+        self.assertEqual(result["status"], "available")
+        self.assertFalse(result["fallback_used"])
+        self.assertEqual(len(result["translated_segments"]), 9)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 2)
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_split_count"],
+            0,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_partial_retry_count"],
+            1,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_preserved_segment_count"],
+            8,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_reasons"],
+            {"missing_segment": 1},
+        )
+
+    def test_five_minute_repeated_tail_avoids_oversized_translation_batches(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index) * 1.5,
+                "end": float(index) * 1.5 + 1.2,
+                "text": (
+                    f"임상 대화 {index}"
+                    if index <= 47
+                    else "감사합니다."
+                ),
+            }
+            for index in range(1, 56)
+        ]
+
+        class OutputBoundedClient:
+            def __init__(self):
+                self.target_batches = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_ids = list(user_payload["target_segment_ids"])
+                self.target_batches.append(target_ids)
+                if len(target_ids) > 12:
+                    raise ClinicalLlmLengthLimit("synthetic output limit")
+                return {
+                    "translations": {
+                        target_id: {
+                            "translated_text_en": f"Translation {target_id}",
+                            "medical_terms": [],
+                        }
+                        for target_id in target_ids
+                    }
+                }
+
+        client = OutputBoundedClient()
+        result = LlamaServerMedicalQueryExpander(
+            "http://unused.local",
+            max_output_tokens=1536,
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(len(result["translated_segments"]), 55)
+        self.assertEqual(result["_telemetry"]["translation_batch_count"], 5)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 5)
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_split_count"],
+            0,
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_reasons"],
+            {},
+        )
+        self.assertLessEqual(
+            max(len(target_ids) for target_ids in client.target_batches),
+            12,
+        )
+
+    def test_partial_batch_classifies_entry_failures_before_targeted_retry(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"원문 {index}",
+            }
+            for index in range(1, 5)
+        ]
+
+        class InvalidEntryClient:
+            def __init__(self):
+                self.target_batches = []
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_ids = list(user_payload["target_segment_ids"])
+                self.target_batches.append(target_ids)
+                if len(self.target_batches) > 1:
+                    return {
+                        "translations": {
+                            target_id: {
+                                "translated_text_en": f"Translation {target_id}",
+                                "medical_terms": [],
+                            }
+                            for target_id in target_ids
+                        }
+                    }
+                return {
+                    "translations": {
+                        "t0001": {
+                            "translated_text_en": "Translation t0001",
+                            "medical_terms": [],
+                        },
+                        "t0003": {
+                            "translated_text_en": "   ",
+                            "medical_terms": [],
+                        },
+                        "t0004": {
+                            "translated_text_en": "Translation t0004",
+                            "medical_terms": {},
+                        },
+                    }
+                }
+
+        client = InvalidEntryClient()
+        result = LlamaServerMedicalQueryExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(
+            client.target_batches,
+            [
+                ["t0001", "t0002", "t0003", "t0004"],
+                ["t0002", "t0003", "t0004"],
+            ],
+        )
+        self.assertEqual(result["_telemetry"]["translation_calls"], 2)
+        self.assertEqual(
+            result["_telemetry"]["translation_retry_reasons"],
+            {
+                "missing_segment": 1,
+                "empty_translation": 1,
+                "invalid_medical_terms": 1,
+            },
+        )
+        self.assertEqual(
+            result["_telemetry"]["translation_preserved_segment_count"],
+            1,
+        )
+
+    def test_retry_telemetry_distinguishes_invalid_json_and_output_limit(self):
+        segments = [
+            {"id": "seg_0001", "start": 0.0, "end": 1.0, "text": "원문 1"},
+            {"id": "seg_0002", "start": 1.0, "end": 2.0, "text": "원문 2"},
+        ]
+
+        for expected_reason, error in (
+            ("invalid_json", InvalidClinicalLlmOutput("no complete JSON object")),
+            ("output_length_exceeded", ClinicalLlmLengthLimit("length")),
+        ):
+            with self.subTest(expected_reason=expected_reason):
+                class RecoveringClient:
+                    def generate_json(
+                        self,
+                        *,
+                        system_prompt,
+                        user_payload,
+                        response_format,
+                        output_label,
+                    ):
+                        del system_prompt, response_format, output_label
+                        target_ids = list(user_payload["target_segment_ids"])
+                        if len(target_ids) > 1:
+                            raise error
+                        return {
+                            "translations": {
+                                target_ids[0]: {
+                                    "translated_text_en": "Recovered",
+                                    "medical_terms": [],
+                                }
+                            }
+                        }
+
+                result = LlamaServerMedicalQueryExpander(
+                    "http://unused.local",
+                    llm_client=RecoveringClient(),
+                ).expand(segments)
+
+                self.assertEqual(result["status"], "available")
+                self.assertEqual(
+                    result["_telemetry"]["translation_retry_reasons"],
+                    {expected_reason: 1},
+                )
 
     def test_single_segment_failure_preserves_other_batch_translations(self):
         segments = [

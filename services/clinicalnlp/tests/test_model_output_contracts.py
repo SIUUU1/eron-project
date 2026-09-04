@@ -3,6 +3,7 @@ import unittest
 from clinicalnlp_api3.model_output_contracts import (
     candidate_adjudication_response_format,
     clinical_record_response_format,
+    compact_translation_response_format,
     draft_normalization_response_format,
     translation_search_response_format,
 )
@@ -95,6 +96,25 @@ class ModelOutputContractTests(unittest.TestCase):
 
         self.assertEqual(translated_segment_id["enum"], ["seg_0001"])
         self.assertEqual(unresolved_segment_id["enum"], ["seg_0001"])
+
+    def test_compact_translation_can_receive_partial_entries_for_salvage(self):
+        strict = _schema(compact_translation_response_format(["t0001", "t0002"]))
+        partial = _schema(
+            compact_translation_response_format(
+                ["t0001", "t0002"],
+                allow_partial=True,
+            )
+        )
+
+        strict_translations = strict["properties"]["translations"]
+        partial_translations = partial["properties"]["translations"]
+        self.assertEqual(strict_translations["required"], ["t0001", "t0002"])
+        self.assertNotIn("required", partial_translations)
+        self.assertFalse(partial_translations["additionalProperties"])
+        self.assertEqual(
+            set(partial_translations["properties"]),
+            {"t0001", "t0002"},
+        )
 
 
 if __name__ == "__main__":

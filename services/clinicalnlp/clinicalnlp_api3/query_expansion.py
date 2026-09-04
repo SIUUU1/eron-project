@@ -9,7 +9,12 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from .clinical_llm import ClinicalLlmClient, OllamaCloudClinicalLlmClient
+from .clinical_llm import (
+    ClinicalLlmClient,
+    ClinicalLlmLengthLimit,
+    InvalidClinicalLlmOutput,
+    OllamaCloudClinicalLlmClient,
+)
 from .model_output_contracts import (
     MEDICAL_TERM_TYPES,
     compact_translation_response_format,
@@ -18,6 +23,7 @@ from .model_output_contracts import (
 
 
 DEFAULT_MAX_OUTPUT_TOKENS = 3072
+MAX_TRANSLATION_TARGETS_PER_BATCH = 12
 _TERM_TYPES = set(MEDICAL_TERM_TYPES)
 _ENGLISH_QUERY_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9 .,+()/%'’:_-]{0,119}\Z"
@@ -43,6 +49,21 @@ _TRANSLATION_SEARCH_STOPWORDS = {
     "she", "that", "the", "their", "they", "this", "to", "was", "were",
     "with", "you",
 }
+
+
+class _PartialTranslationBatchError(ValueError):
+    """Carry valid segment translations alongside per-segment failures."""
+
+    def __init__(
+        self,
+        translations: dict[str, dict[str, Any]],
+        failure_reasons: dict[str, str],
+    ) -> None:
+        super().__init__("PartialModelResponse")
+        self.translations = translations
+        self.failure_reasons = failure_reasons
+
+
 _GENERIC_COURSE_ONLY_RE = re.compile(
     r"^(?:더\s*)?(?:"
     r"있(?:는데|어요|습니다|다)?|없(?:는데|어요|습니다|다)?|"
@@ -274,7 +295,10 @@ class LlamaServerMedicalQueryExpander:
             "context_segments": context_segments,
             "target_segment_ids": target_segment_ids,
         }
-        response_format = compact_translation_response_format(target_segment_ids)
+        response_format = compact_translation_response_format(
+            target_segment_ids,
+            allow_partial=True,
+        )
         if self.llm_client is not None:
             model_result = self.llm_client.generate_json(
                 system_prompt=_COMPACT_TRANSLATION_SYSTEM_PROMPT,
@@ -283,31 +307,10 @@ class LlamaServerMedicalQueryExpander:
                 output_label="compact translation",
             )
             translations = model_result.get("translations")
-            if not isinstance(translations, dict):
-                raise ValueError("InvalidModelResponse")
-            normalized: dict[str, dict[str, Any]] = {}
-            for target_id in target_segment_ids:
-                translated = translations.get(target_id)
-                # Accept the former string-only payload as a bounded fallback
-                # while deployed model servers roll onto the richer schema.
-                if isinstance(translated, str):
-                    translated = {
-                        "translated_text_en": translated,
-                        "medical_terms": [],
-                    }
-                if not isinstance(translated, dict):
-                    raise ValueError("InvalidModelResponse")
-                translated_text = translated.get("translated_text_en")
-                medical_terms = translated.get("medical_terms")
-                if not isinstance(translated_text, str) or not translated_text.strip():
-                    raise ValueError("InvalidModelResponse")
-                if not isinstance(medical_terms, list):
-                    raise ValueError("InvalidModelResponse")
-                normalized[target_id] = {
-                    "translated_text_en": " ".join(translated_text.split()),
-                    "medical_terms": medical_terms,
-                }
-            return normalized
+            return self._normalize_compact_translations(
+                translations,
+                target_segment_ids,
+            )
         request_payload = json.dumps(
             {
                 "model": self.model_name,
@@ -351,29 +354,75 @@ class LlamaServerMedicalQueryExpander:
             if isinstance(model_result, dict)
             else None
         )
+        return self._normalize_compact_translations(
+            translations,
+            target_segment_ids,
+        )
+
+    @staticmethod
+    def _normalize_compact_translations(
+        translations: object,
+        target_segment_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
         if not isinstance(translations, dict):
             raise ValueError("InvalidModelResponse")
         normalized: dict[str, dict[str, Any]] = {}
+        failure_reasons: dict[str, str] = {}
         for target_id in target_segment_ids:
-            translated = translations.get(target_id)
+            if target_id not in translations:
+                failure_reasons[target_id] = "missing_segment"
+                continue
+            translated = translations[target_id]
+            # Accept the former string-only payload as a bounded fallback
+            # while deployed model servers roll onto the richer schema.
             if isinstance(translated, str):
                 translated = {
                     "translated_text_en": translated,
                     "medical_terms": [],
                 }
             if not isinstance(translated, dict):
-                raise ValueError("InvalidModelResponse")
+                failure_reasons[target_id] = "invalid_translation_entry"
+                continue
             translated_text = translated.get("translated_text_en")
             medical_terms = translated.get("medical_terms")
             if not isinstance(translated_text, str) or not translated_text.strip():
-                raise ValueError("InvalidModelResponse")
-            if not isinstance(medical_terms, list):
-                raise ValueError("InvalidModelResponse")
+                failure_reasons[target_id] = "empty_translation"
+                continue
+            if not LlamaServerMedicalQueryExpander._valid_medical_terms(
+                medical_terms
+            ):
+                failure_reasons[target_id] = "invalid_medical_terms"
+                continue
             normalized[target_id] = {
                 "translated_text_en": " ".join(translated_text.split()),
                 "medical_terms": medical_terms,
             }
+        if failure_reasons:
+            raise _PartialTranslationBatchError(normalized, failure_reasons)
         return normalized
+
+    @staticmethod
+    def _valid_medical_terms(value: object) -> bool:
+        if not isinstance(value, list):
+            return False
+        for term in value:
+            if not isinstance(term, dict):
+                return False
+            source_text = term.get("source_text")
+            search_terms = term.get("search_terms_en")
+            term_type = term.get("term_type")
+            if not isinstance(source_text, str) or not source_text.strip():
+                return False
+            if (
+                not isinstance(search_terms, list)
+                or len(search_terms) != 1
+                or not isinstance(search_terms[0], str)
+                or not search_terms[0].strip()
+            ):
+                return False
+            if term_type not in _TERM_TYPES:
+                return False
+        return True
 
     def _request_translation_batch_with_retry(
         self,
@@ -382,7 +431,8 @@ class LlamaServerMedicalQueryExpander:
         target_segment_ids: list[str],
         call_counter: list[int] | None = None,
         provider_telemetry: dict[str, int | float] | None = None,
-        retry_telemetry: dict[str, int] | None = None,
+        retry_telemetry: dict[str, Any] | None = None,
+        _partial_retry_attempted: bool = False,
     ) -> tuple[dict[str, dict[str, Any]], list[tuple[str, Exception]]]:
         def request(ids: list[str]) -> dict[str, dict[str, Any]]:
             if call_counter is not None:
@@ -411,7 +461,47 @@ class LlamaServerMedicalQueryExpander:
                 request(target_segment_ids),
                 [],
             )
+        except _PartialTranslationBatchError as error:
+            if retry_telemetry is not None:
+                reason_counts = retry_telemetry.setdefault("reason_counts", {})
+                for reason in error.failure_reasons.values():
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                retry_telemetry["preserved_segment_count"] = (
+                    retry_telemetry.get("preserved_segment_count", 0)
+                    + len(error.translations)
+                )
+            failed_ids = [
+                target_id
+                for target_id in target_segment_ids
+                if target_id in error.failure_reasons
+            ]
+            translations = dict(error.translations)
+            if not _partial_retry_attempted:
+                if retry_telemetry is not None:
+                    retry_telemetry["partial_retry_count"] = (
+                        retry_telemetry.get("partial_retry_count", 0) + 1
+                    )
+                retried, failures = self._request_translation_batch_with_retry(
+                    context_segments=context_segments,
+                    target_segment_ids=failed_ids,
+                    call_counter=call_counter,
+                    provider_telemetry=provider_telemetry,
+                    retry_telemetry=retry_telemetry,
+                    _partial_retry_attempted=True,
+                )
+                translations.update(retried)
+                return translations, failures
+            if len(failed_ids) == 1:
+                target_id = failed_ids[0]
+                return translations, [
+                    (target_id, ValueError(error.failure_reasons[target_id]))
+                ]
+            target_segment_ids = failed_ids
         except Exception as error:
+            if retry_telemetry is not None:
+                reason = self._translation_retry_reason(error)
+                reason_counts = retry_telemetry.setdefault("reason_counts", {})
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
             diagnostics_reader = getattr(
                 self.llm_client,
                 "last_diagnostics",
@@ -430,12 +520,12 @@ class LlamaServerMedicalQueryExpander:
                 raise
             if len(target_segment_ids) == 1:
                 return {}, [(target_segment_ids[0], error)]
+            translations = {}
         if retry_telemetry is not None:
             retry_telemetry["split_count"] = (
                 retry_telemetry.get("split_count", 0) + 1
             )
         midpoint = len(target_segment_ids) // 2
-        translations: dict[str, dict[str, Any]] = {}
         failures: list[tuple[str, Exception]] = []
         for target_ids in (
             target_segment_ids[:midpoint],
@@ -448,11 +538,34 @@ class LlamaServerMedicalQueryExpander:
                     call_counter=call_counter,
                     provider_telemetry=provider_telemetry,
                     retry_telemetry=retry_telemetry,
+                    _partial_retry_attempted=_partial_retry_attempted,
                 )
             )
             translations.update(partial_translations)
             failures.extend(partial_failures)
         return translations, failures
+
+    @staticmethod
+    def _translation_retry_reason(error: Exception) -> str:
+        if isinstance(error, ClinicalLlmLengthLimit) or (
+            isinstance(error, ValueError)
+            and str(error) == "OutputLengthExceeded"
+        ):
+            return "output_length_exceeded"
+        if isinstance(error, InvalidClinicalLlmOutput) and "medical_terms" in str(
+            error
+        ):
+            return "invalid_medical_terms"
+        if isinstance(error, InvalidClinicalLlmOutput) or (
+            isinstance(error, ValueError)
+            and str(error) == "InvalidModelResponse"
+        ):
+            return "invalid_json"
+        if isinstance(error, HTTPError) and error.code == 429:
+            return "rate_limited"
+        if isinstance(error, HTTPError):
+            return "http_error"
+        return "request_error"
 
     @staticmethod
     def _estimated_tokens(value: Any) -> int:
@@ -554,7 +667,13 @@ class LlamaServerMedicalQueryExpander:
             add_range(midpoint, end)
 
         if segments:
-            add_range(0, len(segments))
+            initial_batch_count = math.ceil(
+                len(segments) / MAX_TRANSLATION_TARGETS_PER_BATCH
+            )
+            for batch_index in range(initial_batch_count):
+                start = batch_index * len(segments) // initial_batch_count
+                end = (batch_index + 1) * len(segments) // initial_batch_count
+                add_range(start, end)
         return batches
 
     @staticmethod
@@ -1129,8 +1248,11 @@ class LlamaServerMedicalQueryExpander:
         retry_telemetry = {
             "split_count": 0,
             "direct_rate_limit_count": 0,
+            "partial_retry_count": 0,
+            "preserved_segment_count": 0,
+            "reason_counts": {},
         }
-        translation_batches: list[dict[str, int | float]] = []
+        translation_batches: list[dict[str, Any]] = []
         planned_batch_count = 0
 
         def translation_telemetry() -> dict[str, Any]:
@@ -1149,6 +1271,15 @@ class LlamaServerMedicalQueryExpander:
                 "translation_calls": translation_calls[0],
                 "translation_batch_count": planned_batch_count,
                 "translation_retry_split_count": retry_telemetry["split_count"],
+                "translation_partial_retry_count": retry_telemetry[
+                    "partial_retry_count"
+                ],
+                "translation_preserved_segment_count": retry_telemetry[
+                    "preserved_segment_count"
+                ],
+                "translation_retry_reasons": dict(
+                    retry_telemetry["reason_counts"]
+                ),
                 "translation_rate_limit_count": rate_limit_count,
                 "translation_batches": [
                     dict(batch) for batch in translation_batches
@@ -1192,6 +1323,9 @@ class LlamaServerMedicalQueryExpander:
                 batch_started = time.perf_counter()
                 calls_before = translation_calls[0]
                 splits_before = retry_telemetry["split_count"]
+                partial_retries_before = retry_telemetry["partial_retry_count"]
+                preserved_before = retry_telemetry["preserved_segment_count"]
+                reasons_before = dict(retry_telemetry["reason_counts"])
                 rate_limits_before = int(
                     provider_telemetry.get("rate_limit_count", 0)
                 ) + retry_telemetry["direct_rate_limit_count"]
@@ -1226,6 +1360,21 @@ class LlamaServerMedicalQueryExpander:
                         "retry_split_count": (
                             retry_telemetry["split_count"] - splits_before
                         ),
+                        "partial_retry_count": (
+                            retry_telemetry["partial_retry_count"]
+                            - partial_retries_before
+                        ),
+                        "preserved_segment_count": (
+                            retry_telemetry["preserved_segment_count"]
+                            - preserved_before
+                        ),
+                        "retry_reasons": {
+                            reason: count - reasons_before.get(reason, 0)
+                            for reason, count in retry_telemetry[
+                                "reason_counts"
+                            ].items()
+                            if count - reasons_before.get(reason, 0) > 0
+                        },
                         "rate_limit_count": (
                             rate_limits_after - rate_limits_before
                         ),

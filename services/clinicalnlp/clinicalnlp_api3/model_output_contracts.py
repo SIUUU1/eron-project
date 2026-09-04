@@ -102,10 +102,50 @@ def translation_search_response_format(
 
 def compact_translation_response_format(
     translation_ids: Iterable[str],
+    *,
+    allow_partial: bool = False,
 ) -> dict[str, Any]:
     """Bounded translation and medical-span contract keyed by transport IDs."""
 
     values = _unique_segment_ids(translation_ids)
+    strict_entry = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["translated_text_en", "medical_terms"],
+        "properties": {
+            "translated_text_en": {"type": "string"},
+            "medical_terms": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "source_text",
+                        "search_terms_en",
+                        "term_type",
+                    ],
+                    "properties": {
+                        "source_text": {"type": "string"},
+                        "search_terms_en": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 1,
+                            "items": {"type": "string"},
+                        },
+                        "term_type": {
+                            "type": "string",
+                            "enum": list(MEDICAL_TERM_TYPES),
+                        },
+                    },
+                },
+            },
+        },
+    }
+    # Query expansion accepts missing segment keys so completed translations
+    # can be retained. Entries that are present still use the strict schema;
+    # weakening their shape removes useful provider guidance and causes
+    # systematic medical_terms formatting failures.
+    partial_entry = strict_entry
     return _response_format(
         "compact_segment_translation",
         {
@@ -116,41 +156,9 @@ def compact_translation_response_format(
                 "translations": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": values,
+                    **({} if allow_partial else {"required": values}),
                     "properties": {
-                        value: {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["translated_text_en", "medical_terms"],
-                            "properties": {
-                                "translated_text_en": {"type": "string"},
-                                "medical_terms": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "additionalProperties": False,
-                                        "required": [
-                                            "source_text",
-                                            "search_terms_en",
-                                            "term_type",
-                                        ],
-                                        "properties": {
-                                            "source_text": {"type": "string"},
-                                            "search_terms_en": {
-                                                "type": "array",
-                                                "minItems": 1,
-                                                "maxItems": 1,
-                                                "items": {"type": "string"},
-                                            },
-                                            "term_type": {
-                                                "type": "string",
-                                                "enum": list(MEDICAL_TERM_TYPES),
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        }
+                        value: partial_entry if allow_partial else strict_entry
                         for value in values
                     },
                 }

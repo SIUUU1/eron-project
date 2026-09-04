@@ -1856,6 +1856,51 @@ class UmlsPrimaryResolverTests(unittest.TestCase):
             "chest pain",
         )
 
+    def test_ngram_regions_for_one_segment_share_one_exact_batch(self):
+        translation = "Severe abdominal pain with fever and nausea."
+        dictionary = _BatchRecordingDictionary()
+        spans = []
+        for surface in ("pain", "fever"):
+            start = translation.index(surface)
+            spans.append(
+                {
+                    "segment_id": "seg_1",
+                    "text": surface,
+                    "start_char": start,
+                    "end_char": start + len(surface),
+                    "linked": True,
+                    "umls_candidates": [
+                        {
+                            "cui": f"C-{surface}",
+                            "canonical_name": surface,
+                            "semantic_types": ["T184"],
+                            "linking_score": 0.5,
+                        }
+                    ],
+                }
+            )
+        resolver = UmlsPrimaryMedicalQueryResolver(
+            dictionary=dictionary,
+            span_linker=_RecordingSpanLinker(spans),
+        )
+
+        resolution = resolver.resolve(
+            MedicalQueryDocument(
+                segments=(
+                    MedicalQuerySegment(
+                        segment_id="seg_1",
+                        raw_text="복통과 발열, 오심이 있습니다.",
+                        translated_text_en=translation,
+                    ),
+                )
+            )
+        )
+
+        exact_calls = [call for call in dictionary.calls if call[1] is True]
+        self.assertEqual(len(exact_calls), 1)
+        self.assertEqual(len(exact_calls[0][0]), resolution.ngram_query_count)
+        self.assertEqual(resolution.telemetry.exact_search_batch_count, 1)
+
     def test_whole_query_vector_hits_are_reverified_against_source_sqlite(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

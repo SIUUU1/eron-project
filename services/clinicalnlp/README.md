@@ -75,10 +75,21 @@ call/retry counts, client-observed `http_ms`, and Ollama-reported `provider_ms`,
 `unattributed_http_ms` is the non-negative difference between client HTTP time
 and Ollama `total_duration`; it can include transport, remote queueing, response
 transfer, and client parsing, so it must not be interpreted as TLS time alone.
+Clinical generation telemetry also exposes Fact chunk, field-group fallback,
+length fallback, repair, regeneration, and failed-segment counts so an extra
+provider call can be attributed before changing prompts or chunk sizes.
+Chunked Fact extraction runs at most three independent chunks concurrently;
+the reported worker count records the concurrency selected for the request.
 Translation batch telemetry also reports the planned batch count, target/context
-segment counts, elapsed time, response-error bisections, failed segments, and
-HTTP 429 responses. These fields only observe the existing sequential batching
-behavior and do not change token budgeting, retries, or translation results.
+segment counts, elapsed time, response-error bisections, failed segments, HTTP
+429 responses, partial retries, preserved segments, and retry reasons. Retry
+reasons distinguish invalid JSON, missing segments, empty translations, output
+length exhaustion, and invalid `medical_terms` values. A partially valid model
+response keeps valid segment translations and retries only failed segment IDs;
+only the remaining failures are bisected if that targeted retry is incomplete.
+Planned translation batches are evenly bounded to at most 12 target segments
+before the existing token-budget check; this avoids predictable output-length
+failures without changing sequential batch execution.
 After the provider retry is exhausted, HTTP 429 stops later translation batches
 without response-error bisection; translations completed earlier are preserved
 as a partial result instead of multiplying rate-limited requests.
