@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -24,6 +25,7 @@ from .model_output_contracts import (
 
 DEFAULT_MAX_OUTPUT_TOKENS = 3072
 MAX_TRANSLATION_TARGETS_PER_BATCH = 12
+MAX_TRANSLATION_BATCH_WORKERS = 2
 _TERM_TYPES = set(MEDICAL_TERM_TYPES)
 _ENGLISH_QUERY_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9 .,+()/%'’:_-]{0,119}\Z"
@@ -1254,6 +1256,7 @@ class LlamaServerMedicalQueryExpander:
         }
         translation_batches: list[dict[str, Any]] = []
         planned_batch_count = 0
+        translation_worker_count = 0
 
         def translation_telemetry() -> dict[str, Any]:
             http_ms = float(provider_telemetry.get("http_elapsed_ms", 0.0))
@@ -1270,6 +1273,7 @@ class LlamaServerMedicalQueryExpander:
                 ),
                 "translation_calls": translation_calls[0],
                 "translation_batch_count": planned_batch_count,
+                "translation_worker_count": translation_worker_count,
                 "translation_retry_split_count": retry_telemetry["split_count"],
                 "translation_partial_retry_count": retry_telemetry[
                     "partial_retry_count"
@@ -1317,27 +1321,35 @@ class LlamaServerMedicalQueryExpander:
             failed_translations: list[tuple[str, Exception]] = []
             planned_batches = self._translation_batches(transport_segments)
             planned_batch_count = len(planned_batches)
-            for batch_index, (context_segments, target_ids) in enumerate(
-                planned_batches
-            ):
+            translation_worker_count = min(
+                MAX_TRANSLATION_BATCH_WORKERS,
+                planned_batch_count,
+            )
+
+            def run_batch(
+                batch_index: int,
+                context_segments: list[dict[str, str]],
+                target_ids: list[str],
+            ) -> dict[str, Any]:
                 batch_started = time.perf_counter()
-                calls_before = translation_calls[0]
-                splits_before = retry_telemetry["split_count"]
-                partial_retries_before = retry_telemetry["partial_retry_count"]
-                preserved_before = retry_telemetry["preserved_segment_count"]
-                reasons_before = dict(retry_telemetry["reason_counts"])
-                rate_limits_before = int(
-                    provider_telemetry.get("rate_limit_count", 0)
-                ) + retry_telemetry["direct_rate_limit_count"]
+                batch_calls = [0]
+                batch_provider_telemetry: dict[str, int | float] = {}
+                batch_retry_telemetry = {
+                    "split_count": 0,
+                    "direct_rate_limit_count": 0,
+                    "partial_retry_count": 0,
+                    "preserved_segment_count": 0,
+                    "reason_counts": {},
+                }
                 rate_limit_error: HTTPError | None = None
                 try:
                     translations, failures = (
                         self._request_translation_batch_with_retry(
                             context_segments=context_segments,
                             target_segment_ids=target_ids,
-                            call_counter=translation_calls,
-                            provider_telemetry=provider_telemetry,
-                            retry_telemetry=retry_telemetry,
+                            call_counter=batch_calls,
+                            provider_telemetry=batch_provider_telemetry,
+                            retry_telemetry=batch_retry_telemetry,
                         )
                     )
                 except HTTPError as error:
@@ -1348,52 +1360,110 @@ class LlamaServerMedicalQueryExpander:
                     failures = [
                         (target_id, error) for target_id in target_ids
                     ]
-                rate_limits_after = int(
-                    provider_telemetry.get("rate_limit_count", 0)
-                ) + retry_telemetry["direct_rate_limit_count"]
-                translation_batches.append(
-                    {
+                rate_limit_count = int(
+                    batch_provider_telemetry.get("rate_limit_count", 0)
+                ) + batch_retry_telemetry["direct_rate_limit_count"]
+                return {
+                    "translations": translations,
+                    "failures": failures,
+                    "rate_limit_error": rate_limit_error,
+                    "call_count": batch_calls[0],
+                    "provider_telemetry": batch_provider_telemetry,
+                    "retry_telemetry": batch_retry_telemetry,
+                    "telemetry": {
                         "batch_index": batch_index,
                         "target_segment_count": len(target_ids),
                         "context_segment_count": len(context_segments),
-                        "request_count": translation_calls[0] - calls_before,
-                        "retry_split_count": (
-                            retry_telemetry["split_count"] - splits_before
+                        "request_count": batch_calls[0],
+                        "retry_split_count": batch_retry_telemetry["split_count"],
+                        "partial_retry_count": batch_retry_telemetry[
+                            "partial_retry_count"
+                        ],
+                        "preserved_segment_count": batch_retry_telemetry[
+                            "preserved_segment_count"
+                        ],
+                        "retry_reasons": dict(
+                            batch_retry_telemetry["reason_counts"]
                         ),
-                        "partial_retry_count": (
-                            retry_telemetry["partial_retry_count"]
-                            - partial_retries_before
-                        ),
-                        "preserved_segment_count": (
-                            retry_telemetry["preserved_segment_count"]
-                            - preserved_before
-                        ),
-                        "retry_reasons": {
-                            reason: count - reasons_before.get(reason, 0)
-                            for reason, count in retry_telemetry[
-                                "reason_counts"
-                            ].items()
-                            if count - reasons_before.get(reason, 0) > 0
-                        },
-                        "rate_limit_count": (
-                            rate_limits_after - rate_limits_before
-                        ),
+                        "rate_limit_count": rate_limit_count,
                         "failed_segment_count": len(failures),
                         "elapsed_ms": round(
                             (time.perf_counter() - batch_started) * 1000,
                             3,
                         ),
-                    }
+                    },
+                }
+
+            def merge_batch(result: dict[str, Any]) -> None:
+                translation_calls[0] += result["call_count"]
+                _accumulate_provider_diagnostics(
+                    provider_telemetry,
+                    result["provider_telemetry"],
                 )
-                failed_translations.extend(failures)
-                translated_payloads.update(translations)
-                if rate_limit_error is not None:
-                    for _, remaining_ids in planned_batches[batch_index + 1 :]:
-                        failed_translations.extend(
-                            (target_id, rate_limit_error)
-                            for target_id in remaining_ids
-                        )
-                    break
+                batch_retry = result["retry_telemetry"]
+                for key in (
+                    "split_count",
+                    "direct_rate_limit_count",
+                    "partial_retry_count",
+                    "preserved_segment_count",
+                ):
+                    retry_telemetry[key] += batch_retry[key]
+                for reason, count in batch_retry["reason_counts"].items():
+                    retry_telemetry["reason_counts"][reason] = (
+                        retry_telemetry["reason_counts"].get(reason, 0) + count
+                    )
+                translation_batches.append(result["telemetry"])
+                failed_translations.extend(result["failures"])
+                translated_payloads.update(result["translations"])
+
+            if translation_worker_count <= 1:
+                batch_results = [
+                    run_batch(batch_index, context_segments, target_ids)
+                    for batch_index, (context_segments, target_ids) in enumerate(
+                        planned_batches
+                    )
+                ]
+                for result in batch_results:
+                    merge_batch(result)
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=translation_worker_count,
+                    thread_name_prefix="clinicalnlp-translation",
+                ) as executor:
+                    for wave_start in range(
+                        0,
+                        planned_batch_count,
+                        translation_worker_count,
+                    ):
+                        wave = planned_batches[
+                            wave_start : wave_start + translation_worker_count
+                        ]
+                        futures = [
+                            executor.submit(
+                                run_batch,
+                                wave_start + offset,
+                                context_segments,
+                                target_ids,
+                            )
+                            for offset, (context_segments, target_ids) in enumerate(
+                                wave
+                            )
+                        ]
+                        wave_results = [future.result() for future in futures]
+                        rate_limit_error: HTTPError | None = None
+                        for result in wave_results:
+                            merge_batch(result)
+                            if result["rate_limit_error"] is not None:
+                                rate_limit_error = result["rate_limit_error"]
+                        if rate_limit_error is not None:
+                            for _, remaining_ids in planned_batches[
+                                wave_start + len(wave) :
+                            ]:
+                                failed_translations.extend(
+                                    (target_id, rate_limit_error)
+                                    for target_id in remaining_ids
+                                )
+                            break
         except Exception as error:
             return {
                 "status": "unavailable",

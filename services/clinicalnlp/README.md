@@ -89,10 +89,14 @@ response keeps valid segment translations and retries only failed segment IDs;
 only the remaining failures are bisected if that targeted retry is incomplete.
 Planned translation batches are evenly bounded to at most 12 target segments
 before the existing token-budget check; this avoids predictable output-length
-failures without changing sequential batch execution.
-After the provider retry is exhausted, HTTP 429 stops later translation batches
-without response-error bisection; translations completed earlier are preserved
-as a partial result instead of multiplying rate-limited requests.
+failures. Two or more planned batches run in ordered waves of at most two
+workers. Each worker owns its counters and provider diagnostics, and the caller
+merges results and telemetry in source-batch order after the wave completes.
+After the provider retry is exhausted, HTTP 429 finishes the current wave but
+stops later waves without response-error bisection; successful translations in
+the same or earlier wave are preserved as a partial result instead of
+multiplying rate-limited requests. `translation_worker_count` records whether
+the request selected zero, one, or two workers.
 
 Medical retrieval telemetry is diagnostic and additive. Collection metrics
 report vector batch, query, SQL statement, accepted-candidate, empty-query, and

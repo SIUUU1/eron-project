@@ -32,6 +32,7 @@ class _SyntheticQueryExpander:
                 "translation_ms": 150.0,
                 "translation_calls": 1,
                 "translation_batch_count": 1,
+                "translation_worker_count": 1,
                 "translation_retry_split_count": 0,
                 "translation_rate_limit_count": 0,
                 "translation_batches": [
@@ -262,6 +263,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "translation_ms",
                 "translation_calls",
                 "translation_batch_count",
+                "translation_worker_count",
                 "translation_retry_split_count",
                 "translation_partial_retry_count",
                 "translation_preserved_segment_count",

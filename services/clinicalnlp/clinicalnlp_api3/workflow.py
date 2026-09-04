@@ -4047,6 +4047,9 @@ def run_clinical_workflow(
         "translation_batch_count": telemetry_count(
             query_expansion_telemetry.get("translation_batch_count", 0)
         ),
+        "translation_worker_count": telemetry_count(
+            query_expansion_telemetry.get("translation_worker_count", 0)
+        ),
         "translation_retry_split_count": telemetry_count(
             query_expansion_telemetry.get("translation_retry_split_count", 0)
         ),

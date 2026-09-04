@@ -421,7 +421,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
                 "target_segment_ids"
             ]
         ]
-        self.assertEqual(
+        self.assertCountEqual(
             requested_ids,
             [f"t{index:04d}" for index in range(1, 9)],
         )
@@ -856,7 +856,7 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(result["error_code"], "PartialTranslationFailure")
 
-    def test_rate_limit_does_not_bisect_or_start_later_batches(self):
+    def test_rate_limit_does_not_bisect_or_start_batches_after_current_wave(self):
         segments = [
             {
                 "id": f"seg_{index:04d}",
@@ -909,16 +909,19 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         ).expand(segments)
 
         self.assertEqual(result["status"], "unavailable")
-        self.assertEqual(client.target_batches, [["t0001", "t0002"]])
+        self.assertCountEqual(
+            client.target_batches,
+            [["t0001", "t0002"], ["t0003", "t0004"]],
+        )
         self.assertEqual(
             result["failed_segment_ids"],
             [f"seg_{index:04d}" for index in range(1, 7)],
         )
         self.assertEqual(result["_telemetry"]["translation_batch_count"], 3)
-        self.assertEqual(result["_telemetry"]["translation_calls"], 1)
+        self.assertEqual(result["_telemetry"]["translation_calls"], 2)
         self.assertEqual(result["_telemetry"]["translation_retry_split_count"], 0)
-        self.assertEqual(result["_telemetry"]["translation_rate_limit_count"], 1)
-        self.assertEqual(len(result["_telemetry"]["translation_batches"]), 1)
+        self.assertEqual(result["_telemetry"]["translation_rate_limit_count"], 2)
+        self.assertEqual(len(result["_telemetry"]["translation_batches"]), 2)
 
     def test_rate_limit_after_success_preserves_completed_batch(self):
         segments = [
@@ -996,6 +999,96 @@ class MedicalQueryExpansionBoundaryTests(unittest.TestCase):
         self.assertEqual(
             result["failed_segment_ids"],
             ["seg_0003", "seg_0004", "seg_0005", "seg_0006"],
+        )
+
+    def test_multiple_translation_batches_run_two_at_a_time_in_source_order(self):
+        segments = [
+            {
+                "id": f"seg_{index:04d}",
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"원문 {index}",
+            }
+            for index in range(1, 4)
+        ]
+
+        class ThreeBatchExpander(LlamaServerMedicalQueryExpander):
+            def _translation_batches(self, transport_segments):
+                return [
+                    ([segment], [segment["segment_id"]])
+                    for segment in transport_segments
+                ]
+
+        class ConcurrentClient:
+            def __init__(self):
+                self.barrier = threading.Barrier(2)
+                self.lock = threading.Lock()
+                self.diagnostics = threading.local()
+                self.in_flight = 0
+                self.max_in_flight = 0
+
+            def generate_json(
+                self,
+                *,
+                system_prompt,
+                user_payload,
+                response_format,
+                output_label,
+            ):
+                del system_prompt, response_format, output_label
+                target_id = user_payload["target_segment_ids"][0]
+                self.diagnostics.value = {
+                    "provider_call_count": 1,
+                    "http_elapsed_ms": 10.0,
+                    "provider_total_ms": 8.0,
+                }
+                with self.lock:
+                    self.in_flight += 1
+                    self.max_in_flight = max(
+                        self.max_in_flight,
+                        self.in_flight,
+                    )
+                try:
+                    if target_id in {"t0001", "t0002"}:
+                        self.barrier.wait(timeout=0.5)
+                    return {
+                        "translations": {
+                            target_id: {
+                                "translated_text_en": f"Translation {target_id}",
+                                "medical_terms": [],
+                            }
+                        }
+                    }
+                finally:
+                    with self.lock:
+                        self.in_flight -= 1
+
+            def last_diagnostics(self):
+                return self.diagnostics.value
+
+        client = ConcurrentClient()
+        result = ThreeBatchExpander(
+            "http://unused.local",
+            llm_client=client,
+        ).expand(segments)
+
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(client.max_in_flight, 2)
+        self.assertEqual(result["_telemetry"]["translation_worker_count"], 2)
+        self.assertEqual(
+            [item["segment_id"] for item in result["translated_segments"]],
+            ["seg_0001", "seg_0002", "seg_0003"],
+        )
+        self.assertEqual(result["_telemetry"]["translation_calls"], 3)
+        self.assertEqual(result["_telemetry"]["translation_provider_calls"], 3)
+        self.assertEqual(result["_telemetry"]["translation_http_ms"], 30.0)
+        self.assertEqual(result["_telemetry"]["translation_provider_ms"], 24.0)
+        self.assertEqual(
+            [
+                batch["batch_index"]
+                for batch in result["_telemetry"]["translation_batches"]
+            ],
+            [0, 1, 2],
         )
 
     def test_translates_each_whole_segment_with_compact_output(self):
