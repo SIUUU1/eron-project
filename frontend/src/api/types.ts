@@ -397,6 +397,33 @@ export interface DashboardSummary {
   meta: Meta;
 }
 
+export type ClinicalRecordRequiredField =
+  | "chief_complaint"
+  | "pain_assessment"
+  | "history_of_present_illness"
+  | "past_history"
+  | "medications"
+  | "allergy"
+  | "social_history"
+  | "review_of_systems"
+  | "physical_examination"
+  | "outcome";
+
+export interface IncompleteRecordItem {
+  stay_id: string;
+  display_name: string | null;
+  record_status: "DRAFT" | null;
+  reason: "RECORD_NOT_CREATED" | "MISSING_REQUIRED_FIELDS";
+  missing_fields: ClinicalRecordRequiredField[];
+}
+
+export interface IncompleteRecordsResponse {
+  /** 현재 재실 환자 중 기록 미작성 또는 필수 필드 누락 건수 */
+  count: number;
+  /** 오래 체류한 순으로 정렬된, 요청 limit 이내의 항목 */
+  items: IncompleteRecordItem[];
+}
+
 /** pending = 환자는 있으나 첫 예측 전(흰색). 위험도 카운트에 포함하지 않는다. */
 export type BedStatusApi = "critical" | "moderate" | "low" | "pending" | "empty";
 

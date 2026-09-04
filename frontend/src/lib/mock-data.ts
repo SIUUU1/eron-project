@@ -180,7 +180,6 @@ export const summary = {
   total: 24,
   critical: 2,
   rising: 4,
-  incompleteRecords: 5,
   aiAlertsToday: 8,
 };
 
@@ -337,14 +336,6 @@ export const aiAlerts = [
     level: "watch" as RiskLevel,
     message: "발열 지속 · 재측정 필요",
   },
-];
-
-export const incompleteRecords = [
-  { patient: "김민수", patientId: "P-20260812-001", missing: "알레르기, 흡연력" },
-  { patient: "박준호", patientId: "P-20260812-003", missing: "현병력, 신체검진" },
-  { patient: "이영희", patientId: "P-20260812-002", missing: "응급진료결과" },
-  { patient: "허민호", patientId: null, missing: "퇴실 형태" },
-  { patient: "강현우", patientId: null, missing: "최종 처치 결과" },
 ];
 
 export const reassessQueue = [

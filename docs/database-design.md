@@ -4,6 +4,7 @@
 > 작성 2026-08-26 / 개정 2026-08-26 (rev.3 — 구현 결과 반영)
 > 2026-09-01 개정 — riskmodel 배포에 맞춰 §7.7 적재 전략과 §9 DDL 을 갱신
 > 2026-09-02 개정 — §8 ERD 를 로컬 DB 실측으로 재작성, §12.1 프로젝트 테이블 이관 절차 추가
+> 2026-09-04 개정 — 대시보드 기록 미완료 알림을 `public.clinical_records` 기반 live 조회로 전환
 > DBMS: PostgreSQL 16 (pgvector 이미지)
 
 ---
@@ -19,8 +20,7 @@
 | 결정항목 D3 (KCD/ICD 처리) | 진단코드 추천은 기록 화면 기능 |
 | `ed/medrecon`, `ed/pyxis`의 Phase B 후보 지위 | 복용약 항목은 기록 화면 전용 → **완전 제외** |
 
-`/records`, `/records/$patientId` 화면과 `mock-data.ts`의 기록 관련 export는 **현재 mock 그대로 유지**합니다.
-대시보드의 "기록 미완료" 카드·알림, 환자 목록의 "기록 상태" 컬럼도 mock을 유지합니다.
+이 절은 초기 데이터베이스 설계 작업 당시의 제외 범위를 기록합니다. 현재 응급진료기록은 `public.clinical_records`에 저장되며, 대시보드의 "기록 미완료" 카드·알림은 해당 저장 데이터를 조회합니다.
 
 **추가로 §7 (행 서브셋 전략)을 실행 가능한 수준으로 구체화했습니다.**
 
@@ -261,7 +261,7 @@ vitalsign stay당 측정 횟수
 | Frontend 데이터 | 처리 |
 |---|---|
 | `recordStatus` — 환자 목록의 "기록 상태" 컬럼 | **mock 유지** |
-| `incompleteRecords`, `summary.incompleteRecords` — 대시보드 | **mock 유지** |
+| `incompleteRecords` — 대시보드 | `public.clinical_records`와 현재 재실 환자를 조인한 live API 사용 |
 | `sampleDialogue`, `aiDraftRecord`, `emptyRecord`, `followUpQuestions` | **mock 유지** |
 | `kcdCandidates`, `recordFieldLabels`, `checkStatusMeta`, `outcomeOptions` | **mock 유지** |
 
@@ -1025,7 +1025,7 @@ CREATE TABLE app.prediction_ack (
 > 무효화하므로, 다시 앞으로 가면 되살아납니다.
 
 > ⛔ **`app.ed_record`는 설계에서 삭제되었습니다.** 기록 영역을 건드리지 않으므로 기록 저장 테이블을 만들지 않습니다.
-> 환자 목록의 "기록 상태"와 대시보드의 "기록 미완료"는 프론트 mock 값을 계속 사용합니다.
+> 대시보드의 "기록 미완료"는 `public.clinical_records`를 조회하는 live API를 사용합니다.
 
 ### 9.3 `public` 스키마
 

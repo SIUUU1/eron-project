@@ -5,7 +5,7 @@
 > 진입점: `http://localhost:8080` (nginx) · Swagger 직접 접근: `http://localhost:8100/docs`
 >
 > ⚠ 본문은 **rev.3(2026-08-26) 시점의 8개 엔드포인트 계약**입니다. 그 이후 기록 영역과
-> 예측 실행 API 가 추가되어 현재는 33개입니다. 추가분은 §0-2 에 모아 두었고,
+> 예측 실행 API와 기록 미완료 API가 추가되어 현재는 34개입니다. 추가분은 §0-2 에 모아 두었고,
 > **항상 최신인 정본은 `/openapi.json`** 입니다 (운영: `https://eron.co.kr/openapi.json`).
 > 배포 주소는 `docs/oci-deployment.md` 를 참고하세요.
 
@@ -16,7 +16,7 @@
 | # | 변경 |
 |---|---|
 | 1 | **기록 영역 API 4종 삭제** — `/api/ed/records/incomplete`, `GET·PUT /api/ed/stays/{id}/record`, `/api/ed/stays/{id}/diagnoses` |
-| 2 | `dashboard/summary`에서 `incomplete_records` 필드 삭제 → 대시보드 "기록 미완료" 카드는 **mock 유지** |
+| 2 | `dashboard/summary`에서 `incomplete_records` 필드 삭제. 후속 작업에서 별도 `/dashboard/incomplete-records` API로 연동 |
 | 3 | `/api/ed/stays` 응답에서 `record_status` 필드 삭제 → 목록 "기록 상태" 컬럼은 **mock 유지** |
 | 4 | **엔드포인트 12개 → 8개** |
 | 5 | nginx 리버스 프록시 도입에 따라 **동일 오리진 + 상대 경로** 호출로 전환, CORS는 로컬 dev 전용으로 축소 |
@@ -31,7 +31,7 @@
 | 재평가 우선순위 | 예측 확률 순 | 예측이 없으면 **acuity 순** (동일 플래그) | 위와 동일 |
 | `mimic` FK | 테이블 DDL 에 인라인 | **적재 후 `03_constraints.sql` 로 부여** | COPY 적재 순서 의존을 없애면서 무결성은 유지 |
 
-**기록 영역은 어떤 형태로도 건드리지 않습니다.** `/records`, `/records/$patientId` 화면, `mock-data.ts`의 기록 관련 export, 기존 `backend/app/api/records.py`(별개 도메인) 모두 그대로 둡니다.
+이 절의 기존 8개 API 구현 당시에는 기록 영역을 건드리지 않았습니다. 현재 기록 저장은 `public.clinical_records`를 사용하며, 대시보드 기록 미완료 표시는 별도 live API로 연동되어 있습니다.
 
 ---
 
@@ -49,6 +49,7 @@
 | POST | `/api/clinical-records/draft` | 대화 기록 → 초안 생성 (ClinicalNLP) |
 | POST | `/api/clinical-records/transcribe` | 음성 → Whisper 전사 |
 | POST | `/api/clinical-records/draft/audio` | 전사 + 초안 생성 통합 경로 (호환 유지) |
+| GET | `/api/ed/dashboard/incomplete-records` | 재실 환자의 기록 미작성·필수 필드 누락 목록 |
 
 저장 규칙과 상태 전이는 `docs/clinical-record-persistence.md` 를 따릅니다.
 이 세 POST 는 nginx 에서 각각 630s · 310s · 930s 의 proxy timeout 을 받습니다
@@ -95,16 +96,17 @@
 3. **읽기 전용.** `/api/ed/*`는 원칙적으로 **GET만** 제공합니다. 유일한 예외는 `/api/ed/demo/*` 로, `app.demo_clock` 한 행만 씁니다. MIMIC 원천 데이터는 어떤 경로로도 변경하지 않습니다.
 4. **필요 컬럼만.** `SELECT *` 및 전체 스캔을 발생시키는 엔드포인트를 만들지 않습니다.
 5. **미확정은 null + 문서화.** MIMIC에 없는 값은 지어내지 않고 `null`로 반환하며, 필드 설명에 사유를 적습니다 (R4).
-6. **범위 밖은 아예 만들지 않는다.** 기록 관련 필드를 "빈 값으로라도" 내려보내지 않습니다. 프론트가 mock을 쓰는지 API를 쓰는지 한눈에 구분되게 합니다.
+6. **기록 완결성은 별도 API로 분리한다.** 위험도 요약 응답에 섞지 않고 기록 미완료 전용 응답에서만 제공합니다.
 
 ---
 
-## 2. 엔드포인트 목록 (8종)
+## 2. 엔드포인트 목록
 
 | # | Method | Path | 사용 화면 |
 |---|---|---|---|
 | 1 | GET | `/api/ed/dashboard/summary` | `/` 요약 카드 · `app-header` 배지 |
 | 2 | GET | `/api/ed/dashboard/beds` | `/` 병상 현황판 |
+| 2-1 | GET | `/api/ed/dashboard/incomplete-records` | `/` 기록 미완료 요약 카드·알림 목록 |
 | 3 | GET | `/api/ed/alerts` | `/` 실시간 AI 경고 |
 | 4 | GET | `/api/ed/reassess-queue` | `/` 위험 환자 우선순위 |
 | 5 | GET | `/api/ed/stays` | `/monitoring` 환자 목록 |
@@ -121,7 +123,7 @@
 ### ⛔ 삭제된 엔드포인트 (기록 영역)
 
 ```text
-GET  /api/ed/records/incomplete          → 대시보드 "기록 미완료 알림"은 mock 유지
+GET  /api/ed/records/incomplete          → 삭제됨. 현재는 GET /api/ed/dashboard/incomplete-records 사용
 GET  /api/ed/stays/{stay_id}/record      → 기록 화면 미변경
 PUT  /api/ed/stays/{stay_id}/record      → 기록 화면 미변경
 GET  /api/ed/stays/{stay_id}/diagnoses   → 진단코드 추천은 기록 화면 기능
@@ -189,7 +191,7 @@ FastAPI 기본 형태를 유지합니다.
 ```
 
 `CLAUDE.md`의 "mock과 live를 한 흐름에서 섞지 않는다" 규칙에 대응하는 장치입니다.
-기록 관련 값은 API에 아예 포함되지 않으므로, **API 응답에 있으면 live, 없으면 mock**이라는 단순한 규칙이 성립합니다.
+기록 미완료 값은 전용 API 응답만 사용하므로, 같은 화면에서 mock과 live 데이터가 섞이지 않습니다.
 
 ---
 
@@ -218,7 +220,26 @@ FastAPI 기본 형태를 유지합니다.
 | `critical`/`rising`/`watch`/`stable` | `app.v_latest_prediction.risk_level` 집계. **예측 없으면 전부 0** |
 | `ai_alerts_today` | 데모 시계 기준 **오늘 경보가 켜진 건수**. `app.prediction` 에서 파생하며 `/api/ed/alerts` 와 같은 정의다. 예측이 없으면 0 |
 
-> ⛔ **`incomplete_records`는 제공하지 않습니다.** 대시보드의 "기록 미완료" 카드(`summary.incompleteRecords`)는 mock을 계속 사용합니다.
+기록 미완료 건수는 이 위험도 요약에 포함하지 않고 `/api/ed/dashboard/incomplete-records`에서 목록과 함께 제공합니다.
+
+#### `GET /api/ed/dashboard/incomplete-records`
+
+현재 재실 환자 중 기록이 없거나 DRAFT의 필수 필드가 누락된 환자를 오래 체류한 순서로 반환합니다. `SIGNED` 기록과 필수 필드 누락이 없는 DRAFT는 제외합니다. `count`는 전체 건수이며 `items`는 `limit` 이내의 목록입니다.
+
+```json
+{
+  "count": 2,
+  "items": [
+    {
+      "stay_id": "34391979",
+      "display_name": "환자 34391979",
+      "record_status": "DRAFT",
+      "reason": "MISSING_REQUIRED_FIELDS",
+      "missing_fields": ["allergy", "outcome"]
+    }
+  ]
+}
+```
 
 ---
 
@@ -599,6 +620,7 @@ TODO  outcome별 확률 필드 필요 여부
 | " | " | `bedZones`, `bedSummary` | `GET /api/ed/dashboard/beds` |
 | " | " | `aiAlerts` | `GET /api/ed/alerts` |
 | " | " | `reassessQueue` | `GET /api/ed/reassess-queue` |
+| " | " | 기록 미완료 건수·목록 | `GET /api/ed/dashboard/incomplete-records` |
 | 상단 헤더 | `components/app-header.tsx` | `summary.total`, `summary.critical+rising` | `GET /api/ed/dashboard/summary` |
 | 환자 목록 | `components/patient-list-table.tsx` | `sortedPatients` | `GET /api/ed/stays?sort=risk` (**`/monitoring`에서만**) |
 | 환자 상세 | `routes/monitoring.$patientId.tsx` | `getPatient(id)` | `GET /api/ed/stays/{stay_id}` |
@@ -612,8 +634,6 @@ TODO  outcome별 확률 필드 필요 여부
 | `/records`, `/records/$patientId` **전체** | 기록 영역 미변경 |
 | `sampleDialogue`, `aiDraftRecord`, `emptyRecord`, `followUpQuestions`, `kcdCandidates` | 위와 동일 |
 | `recordFieldLabels`, `checkStatusMeta`, `outcomeOptions` | 위와 동일 |
-| `summary.incompleteRecords` (대시보드 카드) | 위와 동일 |
-| `incompleteRecords` (대시보드 알림 목록) | 위와 동일 |
 | `Patient.recordStatus` (목록 컬럼) | 위와 동일 |
 | `currentUser` | 인증 미구현 |
 | `riskMeta`, `bedStatusMeta` | **UI 표시 메타데이터**(색상 클래스·한글 라벨). 원래 서버 데이터가 아님 |

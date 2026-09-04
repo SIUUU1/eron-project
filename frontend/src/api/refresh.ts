@@ -26,6 +26,7 @@ function stayLeaf(query: Query): unknown {
 export function invalidateDemoTimeQueries(queryClient: QueryClient): Promise<void> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: dashboardKeys.beds }),
+    queryClient.invalidateQueries({ queryKey: dashboardKeys.incompleteRecords }),
     queryClient.invalidateQueries({ queryKey: dashboardKeys.alertsRoot }),
     queryClient.invalidateQueries({ queryKey: dashboardKeys.reassess }),
     queryClient.invalidateQueries({ queryKey: edStayKeys.lists }),

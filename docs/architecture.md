@@ -5,12 +5,13 @@
 >
 > ⚠ 이 문서는 **응급실 현황·모니터링 작업(rev.3)의 설계 기록**입니다. §1 현황 실측,
 > §2 작업 범위, §7 compose 제안은 그 시점의 사실이므로 그대로 둡니다.
-> 그 이후 배포로 달라진 부분만 아래에 덧붙입니다 (2026-09-02 기준).
+> 그 이후 배포로 달라진 부분만 아래에 덧붙입니다 (2026-09-04 기준).
 >
 > | 항목 | rev.3 시점 | 현재 |
 > |---|---|---|
 > | 악화 예측 | 모델 없음 (`PREDICT_AI_URL` 환경변수만) | `services/riskmodel` 가동 (`riskmodel:8790`, profile `risk`) |
 > | 기록 초안 · STT | 범위 밖 | `clinicalnlp:8765` · `whisper:8780` 가동 (profile `clinical` / `stt`) |
+> | 기록 미완료 대시보드 | mock | `public.clinical_records` 기반 live API 사용 |
 > | 벡터 검색 | `QDRANT_URL` 후보 | **Qdrant 미채택.** PostgreSQL/pgvector 사용 (`docs/adr/0001-clinicalnlp-postgresql-storage.md`) |
 > | 엣지 | nginx `:80` | nginx `:80` / `:443`, `eron.co.kr` HTTPS (`docs/oci-deployment.md`) |
 
@@ -103,21 +104,21 @@ eron-project/
 환자 상세 (/monitoring/$patientId) ─ 헤더 · Vital · 시간별 추이 · AI 분석
 ```
 
-### 이번 작업에서 **제외** (기록 영역 — 손대지 않음)
+### 초기 API 연동 작업에서 제외했던 기록 영역
 
 ```text
 AI 진료기록 및 누락 검사 (/records, /records/$patientId)
  ├─ 5단계 워크플로우 (대화 수집 → 기록 초안 → 누락 검사 → 진단코드 → 의사 인증)
  ├─ sampleDialogue / aiDraftRecord / followUpQuestions / kcdCandidates
  ├─ recordFieldLabels / checkStatusMeta / outcomeOptions / emptyRecord
- └─ 대시보드의 "기록 미완료 알림" 및 "기록 미완료" 요약 카드
+ └─ 대시보드의 "기록 미완료 알림" 및 "기록 미완료" 요약 카드 (현재 live API 연동)
 ```
 
-**해당 화면·데이터·컴포넌트는 현재 mock 상태 그대로 유지합니다.**
+이 절은 초기 대시보드 API 작업 당시의 범위를 설명합니다. 현재 응급진료기록은 별도 API로 저장되며, 대시보드 기록 미완료 항목도 live 데이터로 전환되었습니다.
 DB 테이블(`app.ed_record`), API(`/api/ed/records/*`, `/api/ed/stays/{id}/record`, `/api/ed/stays/{id}/diagnoses`), 프론트 연동을 **설계에서 삭제**했습니다.
 `RECORD_AI_URL` / `STT_URL` 연동도 범위 밖입니다.
 
-> 부수 효과: 환자 목록의 `기록 상태` 컬럼과 대시보드의 `기록 미완료` 항목은 API가 아니라 **mock 값을 계속 사용**합니다. `CLAUDE.md`의 "mock과 live를 한 흐름에서 섞지 않는다" 규칙에 대응해, 해당 요소에는 UI 변경 없이 응답 `meta`로 출처를 구분합니다 (R6: 디자인 불변).
+> 현재 대시보드의 `기록 미완료` 항목은 `/api/ed/dashboard/incomplete-records`의 live 응답을 사용합니다.
 
 ---
 

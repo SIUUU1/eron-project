@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,33 @@ class DashboardSummary(BaseModel):
     unassessed: int = Field(0, description="예측이 없어 위험도를 산출할 수 없는 환자 수")
     ai_alerts_today: int = 0
     meta: Meta
+
+
+ClinicalRecordRequiredField = Literal[
+    "chief_complaint",
+    "pain_assessment",
+    "history_of_present_illness",
+    "past_history",
+    "medications",
+    "allergy",
+    "social_history",
+    "review_of_systems",
+    "physical_examination",
+    "outcome",
+]
+
+
+class IncompleteRecordItem(BaseModel):
+    stay_id: str
+    display_name: str | None = None
+    record_status: Literal["DRAFT"] | None = None
+    reason: Literal["RECORD_NOT_CREATED", "MISSING_REQUIRED_FIELDS"]
+    missing_fields: list[ClinicalRecordRequiredField] = Field(default_factory=list)
+
+
+class IncompleteRecordsResponse(BaseModel):
+    count: int = Field(description="현재 재실 환자 중 기록 미작성 또는 필수 필드 누락 건수")
+    items: list[IncompleteRecordItem]
 
 
 class BedItem(BaseModel):
