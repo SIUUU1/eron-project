@@ -1161,7 +1161,7 @@ function RecordWorkflow({
         <div className="grid gap-5 md:grid-cols-2">
           <Card>
             <CardHeader className="border-b py-3">
-              <CardTitle className="text-base">환자-의료진 대화 기록</CardTitle>
+              <CardTitle className="text-base">대화 기록</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 pt-4">
               <div className="flex flex-wrap gap-2">
