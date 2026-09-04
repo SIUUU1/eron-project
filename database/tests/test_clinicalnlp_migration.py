@@ -10,7 +10,7 @@ import uuid
 
 REPO = Path(__file__).resolve().parents[2]
 MIGRATIONS = tuple(
-    sorted((REPO / "database" / "init").glob("0[5-9]_clinicalnlp*.sql"))
+    sorted((REPO / "database" / "init").glob("[0-9][0-9]_clinicalnlp*.sql"))
 )
 RUNNER = REPO / "database" / "scripts" / "apply_clinicalnlp_schema.py"
 
@@ -132,9 +132,9 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             self._query(
                 "SELECT count(*) FROM clinicalnlp.schema_migrations "
-                "WHERE version IN ('001', '002', '003', '004', '005')"
+                "WHERE version IN ('001', '002', '003', '004', '005', '006')"
             ),
-            "5",
+            "6",
         )
         self.assertEqual(
             self._query(
@@ -189,6 +189,24 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
             ),
             "5",
         )
+        self.assertEqual(
+            self._query(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = 'clinicalnlp' "
+                "AND indexname = 'ix_clinicalnlp_medical_terms_source_exact'"
+            ),
+            "CREATE INDEX ix_clinicalnlp_medical_terms_source_exact "
+            "ON clinicalnlp.medical_terms USING btree (lower(TRIM(BOTH FROM source_text)))",
+        )
+
+    def test_base_migration_does_not_recreate_retired_global_vector_index(self) -> None:
+        base_migration = (REPO / "database" / "init" / "05_clinicalnlp.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(
+            "CREATE INDEX IF NOT EXISTS ix_clinicalnlp_medical_vectors_hnsw",
+            base_migration,
+        )
 
     def test_runner_applies_and_verifies_an_existing_database(self) -> None:
         process = subprocess.run(
@@ -206,7 +224,7 @@ class ClinicalNlpMigrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(process.stdout),
             {
-                "migration": "005",
+                "migration": "006",
                 "schema": "clinicalnlp",
                 "status": "ready",
                 "table_count": 15,

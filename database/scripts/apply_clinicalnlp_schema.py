@@ -13,11 +13,11 @@ import sys
 
 REPO = Path(__file__).resolve().parents[2]
 MIGRATIONS = tuple(
-    sorted((REPO / "database" / "init").glob("0[5-9]_clinicalnlp*.sql"))
+    sorted((REPO / "database" / "init").glob("[0-9][0-9]_clinicalnlp*.sql"))
 )
 EXPECTED_TABLE_COUNT = 15
 EXPECTED_VECTOR_DIMENSIONS = 256
-EXPECTED_MIGRATION = "005"
+EXPECTED_MIGRATION = "006"
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 

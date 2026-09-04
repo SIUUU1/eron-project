@@ -14,7 +14,7 @@ import uuid
 
 REPO = Path(__file__).resolve().parents[2]
 MIGRATIONS = tuple(
-    sorted((REPO / "database" / "init").glob("0[5-9]_clinicalnlp*.sql"))
+    sorted((REPO / "database" / "init").glob("[0-9][0-9]_clinicalnlp*.sql"))
 )
 IMPORTER = REPO / "database" / "scripts" / "import_clinicalnlp_dictionaries.py"
 

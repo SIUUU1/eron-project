@@ -95,9 +95,6 @@ CREATE TABLE IF NOT EXISTS clinicalnlp.medical_vectors (
     UNIQUE (concept_pk, source_text, model_version)
 );
 
-CREATE INDEX IF NOT EXISTS ix_clinicalnlp_medical_vectors_hnsw
-    ON clinicalnlp.medical_vectors USING hnsw (embedding vector_cosine_ops);
-
 CREATE TABLE IF NOT EXISTS clinicalnlp.kcd_codes (
     kcd_code_pk       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     source_release_id BIGINT  NOT NULL REFERENCES clinicalnlp.source_releases(release_id),
