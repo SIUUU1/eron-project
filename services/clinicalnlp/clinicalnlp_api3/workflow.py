@@ -4168,6 +4168,8 @@ def run_clinical_workflow(
         "clinical_llm_fact_recovery_reasons": [],
         "clinical_llm_fact_targeted_retry_count": 0,
         "clinical_llm_fact_preserved_count": 0,
+        "clinical_llm_field_reference_retry_count": 0,
+        "clinical_llm_field_preserved_count": 0,
         "clinical_llm_validation_failure_reasons": [],
         "clinical_llm_failed_segment_count": 0,
         "clinical_llm_provider_calls": 0,
@@ -4565,6 +4567,8 @@ def run_clinical_workflow(
         ("clinical_llm_fact_recovery_count", "fact_recovery_count"),
         ("clinical_llm_fact_targeted_retry_count", "fact_targeted_retry_count"),
         ("clinical_llm_fact_preserved_count", "fact_preserved_count"),
+        ("clinical_llm_field_reference_retry_count", "field_reference_retry_count"),
+        ("clinical_llm_field_preserved_count", "field_preserved_count"),
         ("clinical_llm_failed_segment_count", "failed_segment_count"),
     ):
         telemetry[target_key] = telemetry_count(

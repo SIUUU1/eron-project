@@ -117,6 +117,8 @@ class _LeanTelemetry:
             "fact_recovery_reasons": [],
             "fact_targeted_retry_count": 0,
             "fact_preserved_count": 0,
+            "field_reference_retry_count": 0,
+            "field_preserved_count": 0,
             "validation_failure_reasons": [],
             "network_retry_count": 0,
             "failed_segment_count": 0,
@@ -932,6 +934,7 @@ class LlamaServerClinicalExtractor:
         base_payload = {
             "segments": supported_segments,
             "facts": facts,
+            "allowed_fact_ids": list(facts),
             "candidate_snapshots": minimal_candidate_projection(
                 candidate_snapshots,
                 segment_ids=supported_segment_ids,
@@ -939,10 +942,36 @@ class LlamaServerClinicalExtractor:
             "failed_segment_ids": failed_segment_ids,
         }
         prompt = f"{extraction_rules}\n\n{fields_prompt}"
+
+        def valid_fields(
+            raw_fields: Any,
+            requested_fields: list[str] | tuple[str, ...],
+        ) -> tuple[dict[str, Any], list[str]]:
+            if not isinstance(raw_fields, dict):
+                return {}, []
+            known_fact_ids = set(facts)
+            requested = set(requested_fields)
+            accepted: dict[str, Any] = {}
+            invalid: list[str] = []
+            for field_id, field in raw_fields.items():
+                if field_id not in requested or not isinstance(field, dict):
+                    continue
+                refs = field.get("fact_refs")
+                if (
+                    isinstance(refs, list)
+                    and refs
+                    and all(isinstance(ref, str) and ref in known_fact_ids for ref in refs)
+                ):
+                    accepted[field_id] = field
+                else:
+                    invalid.append(field_id)
+            return accepted, invalid
+
         try:
+            all_field_ids = list(FIELD_GROUPS[0] + FIELD_GROUPS[1] + FIELD_GROUPS[2])
             generated = self._lean_call(
                 prompt=prompt,
-                payload={**base_payload, "requested_fields": list(FIELD_GROUPS[0] + FIELD_GROUPS[1] + FIELD_GROUPS[2])},
+                payload={**base_payload, "requested_fields": all_field_ids},
                 response_format=field_response_format(),
                 required_key="fields",
                 required_type=dict,
@@ -951,8 +980,53 @@ class LlamaServerClinicalExtractor:
                 telemetry=telemetry,
                 deadline=deadline,
             )
-            fields = generated.get("fields")
-            return (fields if isinstance(fields, dict) else {}), []
+            fields, invalid_field_ids = valid_fields(
+                generated.get("fields"), all_field_ids
+            )
+            if not invalid_field_ids:
+                return fields, []
+
+            telemetry.increment("field_preserved_count", len(fields))
+            telemetry.increment("field_reference_retry_count")
+            invalid_outputs = {
+                field_id: generated["fields"][field_id]
+                for field_id in invalid_field_ids
+            }
+            try:
+                repaired = self._lean_call(
+                    prompt=prompt,
+                    payload={
+                        **base_payload,
+                        "requested_fields": invalid_field_ids,
+                        "invalid_reference_outputs": invalid_outputs,
+                        "reference_repair_instruction": (
+                            "Return only the requested fields. fact_refs must use "
+                            "IDs from allowed_fact_ids, never segment IDs. Preserve "
+                            "the prior field text when it is supported; omit a field "
+                            "when no supplied Fact supports it."
+                        ),
+                    },
+                    response_format=field_response_format(invalid_field_ids),
+                    required_key="fields",
+                    required_type=dict,
+                    output_label="Compact v3.1 field reference repair",
+                    budget=budget,
+                    telemetry=telemetry,
+                    deadline=deadline,
+                )
+            except Exception:
+                return fields, invalid_field_ids
+
+            repaired_fields, still_invalid = valid_fields(
+                repaired.get("fields"), invalid_field_ids
+            )
+            fields.update(repaired_fields)
+            unresolved = [
+                field_id
+                for field_id in invalid_field_ids
+                if field_id not in repaired_fields or field_id in still_invalid
+            ]
+            return fields, unresolved
         except ClinicalLlmLengthLimit:
             telemetry.increment("length_fallback_count")
         except Exception:
@@ -977,8 +1051,11 @@ class LlamaServerClinicalExtractor:
                     deadline=deadline,
                 )
                 group_fields = generated.get("fields")
-                if isinstance(group_fields, dict):
-                    fields.update(group_fields)
+                accepted_fields, invalid_field_ids = valid_fields(
+                    group_fields, group
+                )
+                fields.update(accepted_fields)
+                failed_fields.extend(invalid_field_ids)
             except Exception:
                 failed_fields.extend(group)
         return fields, failed_fields

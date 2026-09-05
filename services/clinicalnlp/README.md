@@ -94,6 +94,13 @@ usable source IDs retain the bounded whole-response recovery behavior. The
 `clinical_llm_fact_targeted_retry_count` and
 `clinical_llm_fact_preserved_count` metrics distinguish this smaller retry from
 a whole-chunk repair.
+Field generation separately verifies that every `fact_refs` value exists in the
+request Fact Registry. When a sparse field response copies segment IDs instead,
+valid sibling fields are preserved and only fields with dangling references are
+requested again. `clinical_llm_field_reference_retry_count` and
+`clinical_llm_field_preserved_count` expose this path; an unresolved retry is
+reported as a field-generation review issue rather than publishing invalid
+references.
 Chunked Fact extraction runs at most three independent chunks concurrently;
 the reported worker count records the concurrency selected for the request.
 Fact chunks use a stage-specific extraction contract; the complete field

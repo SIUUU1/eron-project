@@ -9,6 +9,7 @@ from clinicalnlp_api3.clinical_llm import (
     OllamaCloudClinicalLlmClient,
 )
 from clinicalnlp_api3.compact_primary import project_compact_primary_draft
+from clinicalnlp_api3.compact_record_v3 import CANONICAL_FIELD_IDS
 from clinicalnlp_api3.compact_record_lean import (
     SCHEMA_VERSION,
     fact_chunk_response_format,
@@ -42,13 +43,16 @@ class _LeanClient:
         measurement=False,
         fail_combined_fields=False,
         split_fact_chunks_over=None,
+        invalid_combined_field_refs=False,
     ):
         self.length_on_first = length_on_first
         self.fail_segment_id = fail_segment_id
         self.measurement = measurement
         self.fail_combined_fields = fail_combined_fields
         self.split_fact_chunks_over = split_fact_chunks_over
+        self.invalid_combined_field_refs = invalid_combined_field_refs
         self._combined_fields_failed = False
+        self._invalid_combined_refs_emitted = False
         self.calls = []
         self._lock = threading.Lock()
 
@@ -109,6 +113,39 @@ class _LeanClient:
                 }},
             }
         requested_fields = user_payload.get("requested_fields", [])
+        first_fact = next(iter(user_payload["facts"]), None)
+        if (
+            self.invalid_combined_field_refs
+            and len(requested_fields) == 12
+            and not self._invalid_combined_refs_emitted
+        ):
+            self._invalid_combined_refs_emitted = True
+            return {
+                "schema_version": "clinical-record-compact-fields-v1",
+                "fields": {
+                    "chief_complaint": {
+                        "text": "Cough",
+                        "fact_refs": [first_fact],
+                    },
+                    "pain_assessment": {
+                        "text": "NRS 8",
+                        "fact_refs": ["seg_0001"],
+                    },
+                },
+            }
+        if (
+            self.invalid_combined_field_refs
+            and requested_fields == ["pain_assessment"]
+        ):
+            return {
+                "schema_version": "clinical-record-compact-fields-v1",
+                "fields": {
+                    "pain_assessment": {
+                        "text": "NRS 8",
+                        "fact_refs": [first_fact],
+                    }
+                },
+            }
         if (
             self.fail_combined_fields
             and len(requested_fields) == 12
@@ -116,7 +153,6 @@ class _LeanClient:
         ):
             self._combined_fields_failed = True
             raise RuntimeError("synthetic all-fields failure")
-        first_fact = next(iter(user_payload["facts"]), None)
         if self.measurement:
             fields = ({
                 "physical_examination": {
@@ -519,6 +555,30 @@ class CompactRecordLeanContractTests(unittest.TestCase):
         self.assertEqual(result["generation"]["field_group_call_count"], 3)
         self.assertIn("chief_complaint", result["record"]["fields"])
         self.assertNotIn("FIELD_GENERATION_FAILED", {
+            issue.get("issue_code") for issue in result["validation"]["issues"]
+        })
+
+    def test_invalid_field_fact_refs_retry_only_invalid_fields(self):
+        client = _LeanClient(invalid_combined_field_refs=True)
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        fields = result["record"]["fields"]
+        self.assertEqual(fields["chief_complaint"]["fact_refs"], ["c01_f001"])
+        self.assertEqual(fields["pain_assessment"]["fact_refs"], ["c01_f001"])
+        field_calls = [
+            call["payload"]["requested_fields"]
+            for call in client.calls
+            if call["name"] == "clinical_record_compact_fields_v1"
+        ]
+        self.assertEqual(field_calls, [
+            list(CANONICAL_FIELD_IDS),
+            ["pain_assessment"],
+        ])
+        self.assertEqual(result["generation"]["field_reference_retry_count"], 1)
+        self.assertEqual(result["generation"]["field_preserved_count"], 1)
+        self.assertNotIn("INVALID_FACT_REF", {
             issue.get("issue_code") for issue in result["validation"]["issues"]
         })
 
