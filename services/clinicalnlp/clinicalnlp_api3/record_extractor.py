@@ -111,6 +111,7 @@ class _LeanTelemetry:
             "length_fallback_count": 0,
             "repair_count": 0,
             "regeneration_count": 0,
+            "validation_failure_reasons": [],
             "network_retry_count": 0,
             "failed_segment_count": 0,
             "http_elapsed_ms": 0.0,
@@ -159,6 +160,11 @@ class _LeanTelemetry:
                     and value >= 0
                 ):
                     self.values[key] += float(value)
+            reasons = diagnostics.get("validation_failure_reasons")
+            if isinstance(reasons, list):
+                self.values["validation_failure_reasons"].extend(
+                    str(reason) for reason in reasons[:8]
+                )
 
     def increment(self, key: str, amount: int = 1) -> None:
         with self._lock:
@@ -679,7 +685,6 @@ class LlamaServerClinicalExtractor:
     def _extract_lean_fact_chunk(
         self,
         *,
-        extraction_rules: str,
         chunk_prompt: str,
         owned_segments: list[dict[str, Any]],
         context_segment: dict[str, Any] | None,
@@ -714,7 +719,7 @@ class LlamaServerClinicalExtractor:
         started = time.perf_counter()
         try:
             generated = self._lean_call(
-                prompt=f"{extraction_rules}\n\n{chunk_prompt}",
+                prompt=chunk_prompt,
                 payload=payload,
                 response_format=fact_chunk_response_format(),
                 required_key="facts",
@@ -746,6 +751,9 @@ class LlamaServerClinicalExtractor:
                 "input_tokens": call_diagnostics.get("input_tokens", 0),
                 "output_tokens": call_diagnostics.get("output_tokens", 0),
                 "done_reason": call_diagnostics.get("done_reason"),
+                "validation_failure_reasons": call_diagnostics.get(
+                    "validation_failure_reasons", []
+                ),
             }]
             return [facts], [], audit
         except ClinicalLlmLengthLimit as error:
@@ -762,12 +770,14 @@ class LlamaServerClinicalExtractor:
                     "input_tokens": call_diagnostics.get("input_tokens", 0),
                     "output_tokens": call_diagnostics.get("output_tokens", 0),
                     "done_reason": call_diagnostics.get("done_reason", "length"),
+                    "validation_failure_reasons": call_diagnostics.get(
+                        "validation_failure_reasons", []
+                    ),
                 }]
             middle = len(owned_segments) // 2
             left = owned_segments[:middle]
             right = owned_segments[middle:]
             left_facts, left_failed, left_audit = self._extract_lean_fact_chunk(
-                extraction_rules=extraction_rules,
                 chunk_prompt=chunk_prompt,
                 owned_segments=left,
                 context_segment=context_segment,
@@ -779,7 +789,6 @@ class LlamaServerClinicalExtractor:
             )
             right_context = left[-1] if left else context_segment
             right_facts, right_failed, right_audit = self._extract_lean_fact_chunk(
-                extraction_rules=extraction_rules,
                 chunk_prompt=chunk_prompt,
                 owned_segments=right,
                 context_segment=right_context,
@@ -806,6 +815,9 @@ class LlamaServerClinicalExtractor:
                 "input_tokens": call_diagnostics.get("input_tokens", 0),
                 "output_tokens": call_diagnostics.get("output_tokens", 0),
                 "done_reason": call_diagnostics.get("done_reason"),
+                "validation_failure_reasons": call_diagnostics.get(
+                    "validation_failure_reasons", []
+                ),
             }]
 
     def _generate_lean_fields(
@@ -974,7 +986,6 @@ class LlamaServerClinicalExtractor:
                     context = chunks[index - 2]["owned_segments"][-1]
                 future = executor.submit(
                     self._extract_lean_fact_chunk,
-                    extraction_rules=extraction_rules,
                     chunk_prompt=fact_prompt,
                     owned_segments=chunk["owned_segments"],
                     context_segment=context,

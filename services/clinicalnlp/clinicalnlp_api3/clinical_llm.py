@@ -75,21 +75,33 @@ def _matches_type(value: Any, expected: str) -> bool:
 
 def _validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
     if "const" in schema and value != schema["const"]:
-        raise InvalidClinicalLlmOutput(f"{path} does not match the required value")
+        expected_value = str(schema["const"])
+        raise InvalidClinicalLlmOutput(
+            f"{path} does not match the required value: {expected_value[:80]}"
+        )
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
         matching_variants = 0
+        variant_errors: list[str] = []
         for variant in one_of:
             if not isinstance(variant, dict):
                 continue
             try:
                 _validate_schema(value, variant, path)
-            except InvalidClinicalLlmOutput:
+            except InvalidClinicalLlmOutput as error:
+                message = str(error)
+                if message not in variant_errors:
+                    variant_errors.append(message)
                 continue
             matching_variants += 1
         if matching_variants != 1:
+            detail = (
+                "; variant errors: " + " | ".join(variant_errors[:4])
+                if variant_errors
+                else ""
+            )
             raise InvalidClinicalLlmOutput(
-                f"{path} must match exactly one allowed schema variant"
+                f"{path} must match exactly one allowed schema variant{detail}"
             )
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
@@ -130,12 +142,18 @@ def _validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> Non
         required = required if isinstance(required, list) else []
         missing = [key for key in required if key not in value]
         if missing:
-            raise InvalidClinicalLlmOutput(f"{path} is missing required fields")
+            raise InvalidClinicalLlmOutput(
+                f"{path} is missing required fields: "
+                + ", ".join(str(key) for key in missing[:8])
+            )
         additional_properties = schema.get("additionalProperties")
         if additional_properties is False:
             unexpected = set(value) - set(properties)
             if unexpected:
-                raise InvalidClinicalLlmOutput(f"{path} has unexpected fields")
+                raise InvalidClinicalLlmOutput(
+                    f"{path} has unexpected fields: "
+                    + ", ".join(sorted(str(key) for key in unexpected)[:8])
+                )
         for key, item in value.items():
             property_schema = properties.get(key)
             if isinstance(property_schema, dict):
@@ -261,6 +279,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             "rate_limit_count": 0,
             "repair_count": 0,
             "regeneration_count": 0,
+            "validation_failure_reasons": [],
             "input_tokens": 0,
             "output_tokens": 0,
             "done_reason": None,
@@ -458,6 +477,9 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 f"issue={_invalid_issue(first.content, schema)}"
             )
 
+        self._diag()["validation_failure_reasons"].append(
+            _invalid_issue(first.content, schema)
+        )
         self._diag()["repair_count"] += 1
         repair_prompt = (
             "Repair the prior assistant output so it is exactly one JSON object "
@@ -482,6 +504,9 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 f"eval_count={repaired.eval_count}; chars={len(repaired.content)}"
             )
 
+        self._diag()["validation_failure_reasons"].append(
+            _invalid_issue(repaired.content, schema)
+        )
         self._diag()["regeneration_count"] += 1
         regeneration = self._chat(
             messages,

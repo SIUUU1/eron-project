@@ -344,6 +344,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "clinical_llm_length_fallback_count",
                 "clinical_llm_repair_count",
                 "clinical_llm_regeneration_count",
+                "clinical_llm_validation_failure_reasons",
                 "clinical_llm_failed_segment_count",
                 "clinical_llm_provider_calls",
                 "clinical_llm_network_retries",
@@ -362,6 +363,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 if key not in {
                     "translation_batches",
                     "translation_retry_reasons",
+                    "clinical_llm_validation_failure_reasons",
                 }
             )
         )

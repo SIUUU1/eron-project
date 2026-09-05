@@ -78,8 +78,13 @@ transfer, and client parsing, so it must not be interpreted as TLS time alone.
 Clinical generation telemetry also exposes Fact chunk, field-group fallback,
 length fallback, repair, regeneration, and failed-segment counts so an extra
 provider call can be attributed before changing prompts or chunk sizes.
+`clinical_llm_validation_failure_reasons` records schema paths and property
+names that triggered repair without copying clinical values into telemetry.
 Chunked Fact extraction runs at most three independent chunks concurrently;
 the reported worker count records the concurrency selected for the request.
+Fact chunks use a stage-specific extraction contract; the complete field
+writing policy is sent only to the final field-writing call instead of being
+repeated for every Fact chunk.
 Translation batch telemetry also reports the planned batch count, target/context
 segment counts, elapsed time, response-error bisections, failed segments, HTTP
 429 responses, partial retries, preserved segments, and retry reasons. Retry

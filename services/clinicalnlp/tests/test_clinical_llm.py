@@ -197,6 +197,78 @@ class OllamaCloudClinicalLlmClientTests(unittest.TestCase):
         repair_messages = captured[1]["payload"]["messages"]
         self.assertIn("Repair", repair_messages[0]["content"])
         self.assertIn("unexpected", repair_messages[1]["content"])
+        diagnostics = client.last_diagnostics()
+        self.assertEqual(diagnostics["repair_count"], 1)
+        self.assertEqual(
+            diagnostics["validation_failure_reasons"],
+            ["$ has unexpected fields: unexpected"],
+        )
+
+    def test_repair_diagnostics_explain_one_of_variant_failures(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "choice_result",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "required": ["item"],
+                    "properties": {
+                        "item": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["type", "value"],
+                                    "properties": {
+                                        "type": {"const": "A"},
+                                        "value": {"type": "string"},
+                                    },
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "count"],
+                                    "properties": {
+                                        "type": {"const": "B"},
+                                        "count": {"type": "integer"},
+                                    },
+                                },
+                            ]
+                        }
+                    },
+                },
+            },
+        }
+        server, thread, _ = self._serve(
+            [
+                '{"item":{"type":"A","count":1}}',
+                '{"item":{"type":"A","value":"ok"}}',
+            ]
+        )
+        try:
+            client = OllamaCloudClinicalLlmClient(
+                f"http://127.0.0.1:{server.server_port}",
+                model_name="gemma4:31b",
+                api_key="test-secret",
+            )
+            client.generate_json(
+                system_prompt="Return JSON.",
+                user_payload={"synthetic": True},
+                response_format=response_format,
+                output_label="test output",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        self.assertEqual(
+            client.last_diagnostics()["validation_failure_reasons"],
+            [
+                "$.item must match exactly one allowed schema variant; "
+                "variant errors: $.item is missing required fields: value | "
+                "$.item.type does not match the required value: B"
+            ],
+        )
 
     def test_length_result_skips_same_size_repair_and_regeneration(self):
         server, thread, captured = self._serve([

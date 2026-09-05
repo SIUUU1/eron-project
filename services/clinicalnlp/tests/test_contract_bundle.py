@@ -136,22 +136,22 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "4662a50c5aaf2bc8bd712d257f77f28f9823043b80bd3b64cd822d0c0e1ee52e"
             ),
             "candidate_adjudication_v1.txt": (
-                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
+                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "draft_normalization_v1.txt": (
                 "0d8d686d26b7efde5f2d502037528737fe1fdbd16a80bb6da69ccad6570bfe66"
             ),
             "compact_record_output_v3.txt": (
-                "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
+                "b55b7ce8b7fb10866106053fefd6004ba70f8708e6aa62fceb62bade497bd6d2"
             ),
             "compact_record_output_v3_1_lean.txt": (
-                "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
+                "efea3a39b24d3deefd3073fb42bded181a6315f96793818e709f48eb4d4474b6"
             ),
             "compact_fact_output_v1.txt": (
-                "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
+                "632b8d4869d92a8b72da58118ede4171e9ad53a8f537d2ca5334a2c0e771195c"
             ),
             "compact_fields_output_v1.txt": (
-                "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
+                "3b1fd13f93e64458c0b0dae7f804235adbde2b6390d59726996f9902a4e213f2"
             ),
         }
 
@@ -176,22 +176,22 @@ class ClinicalContractBundleTests(unittest.TestCase):
                 "4662a50c5aaf2bc8bd712d257f77f28f9823043b80bd3b64cd822d0c0e1ee52e"
             ),
             "prompts/candidate_adjudication_v1.txt": (
-                "262a30e0f846d69376828add354bd98eccedbb83ecb4e0a107b99d96815d2a9e"
+                "a9955ec10b509cdb86ab9fa0ec3dc4f7a4604001fd9dfdea737ab65ad70caca6"
             ),
             "prompts/draft_normalization_v1.txt": (
                 "0d8d686d26b7efde5f2d502037528737fe1fdbd16a80bb6da69ccad6570bfe66"
             ),
             "prompts/compact_record_output_v3.txt": (
-                "ebc859a02df4b1b9027101b637cc73c1ebb87fd34630d8dbb286cbd0983f47e2"
+                "b55b7ce8b7fb10866106053fefd6004ba70f8708e6aa62fceb62bade497bd6d2"
             ),
             "prompts/compact_record_output_v3_1_lean.txt": (
-                "c3e30437d3d6fcaf54643f580b8cd5b912e150488471e352d89bfdb84eecea26"
+                "efea3a39b24d3deefd3073fb42bded181a6315f96793818e709f48eb4d4474b6"
             ),
             "prompts/compact_fact_output_v1.txt": (
-                "c37a2f61a11a1e348d454918dd07c813c13fe303eb666889201676b01768624f"
+                "632b8d4869d92a8b72da58118ede4171e9ad53a8f537d2ca5334a2c0e771195c"
             ),
             "prompts/compact_fields_output_v1.txt": (
-                "b239b8f8bf50c74c790152928c0bdb4d5d813294745c2ab30f15c1842b75a4d5"
+                "3b1fd13f93e64458c0b0dae7f804235adbde2b6390d59726996f9902a4e213f2"
             ),
         }
 

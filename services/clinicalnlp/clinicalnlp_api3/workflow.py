@@ -4164,6 +4164,7 @@ def run_clinical_workflow(
         "clinical_llm_length_fallback_count": 0,
         "clinical_llm_repair_count": 0,
         "clinical_llm_regeneration_count": 0,
+        "clinical_llm_validation_failure_reasons": [],
         "clinical_llm_failed_segment_count": 0,
         "clinical_llm_provider_calls": 0,
         "clinical_llm_network_retries": 0,
@@ -4564,6 +4565,14 @@ def run_clinical_workflow(
         )
     telemetry["clinical_llm_network_retries"] = telemetry_count(
         generation_telemetry.get("network_retry_count", 0)
+    )
+    validation_failure_reasons = generation_telemetry.get(
+        "validation_failure_reasons", []
+    )
+    telemetry["clinical_llm_validation_failure_reasons"] = (
+        [str(reason) for reason in validation_failure_reasons]
+        if isinstance(validation_failure_reasons, list)
+        else []
     )
     for target_key, source_key in (
         ("clinical_llm_http_ms", "http_elapsed_ms"),

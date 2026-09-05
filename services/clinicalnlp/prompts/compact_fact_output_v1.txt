@@ -2,7 +2,25 @@ Compact Fact chunk contract
 
 Extract only atomic clinical facts supported by owned segments. A segment marked context_only may clarify an owned segment but must not create a new fact. Every fact needs assertion and one or more owned segment IDs. Keep separate propositions separate. Preserve explicit corrections with supersedes_fact_id. Do not write clinical fields in this stage.
 
+Segments normally have no speaker labels. Link adjacent questions and answers by order and meaning, but never turn an unanswered question into a fact. Use translated_text_en as primary meaning when present; use raw_text and corrected_text only to check ambiguity and preserve evidence. Keep the smallest supported proposition and never infer an unstated finding.
+
+Capture every explicit fact relevant to the emergency record: core symptoms; onset, location, duration, character, course, aggravating or relieving factors, radiation, timing, severity and associated symptoms; pre-hospital care and arrival; past disease, surgery or admission; current medication; allergy and reaction; smoking or alcohol history; reported positive, denied or uncertain symptoms; objective examination and vital measurements; clinician assessment; test, medication, procedure, consultation or disposition plans; and the final encounter outcome. Preserve explicit broad denials as facts. Do not discard a fact merely because it seems clinically minor.
+
+Keep role boundaries strict. Patient-reported symptoms are not examination findings. Diagnostic test findings are not physical EXAM; for example, an ECG ST-segment change is NARRATIVE or UNMATCHED_TERM with fact_type UNKNOWN. A test result is not a diagnosis. A patient request is not a clinician plan until accepted. A conditional disposition is PLAN, not a final OUTCOME. A committed final admission, discharge, transfer, death or other disposition is OUTCOME. Current home medication, pre-hospital treatment and newly ordered emergency treatment are distinct facts.
+
+An amount or duration answer to a current "Do you smoke?" question explicitly supports Current smoker; emit that state as a fact as well as supported measurements. A current denial does not prove Never smoker without past-history assessment. "We will proceed with admission" or "입원 진행하겠습니다" is fact_type OUTCOME even when a purpose or destination is stated; consideration or a result-dependent decision remains PLAN.
+
+Use PRESENT for explicitly present or performed facts, DENIED for explicit denial, cancellation or refusal, and UNCERTAIN for ambiguity, conflict or conditional statements. Never convert unasked information to DENIED. Preserve numbers, units, negation and uncertainty exactly.
+
 Use MATCHED_TERM only with a candidate_ref supplied for the same segment. Use UNMATCHED_TERM for an explicit medical expression without a safe candidate, NARRATIVE for other supported clinical facts, and MEASUREMENT with values.kind and values.value for explicit values. Use fact_type only for EXAM, ASSESSMENT, PLAN, OUTCOME, or UNKNOWN. Do not infer, summarize away, or invent information.
+
+Required shapes are strict. Never emit MATCHED_TERM without candidate_ref; when no supplied candidate_ref is safe, emit UNMATCHED_TERM with text instead. UNMATCHED_TERM and NARRATIVE always require non-empty text. MEASUREMENT always requires values.kind and values.value, even when other measurement properties are present.
+
+Minimal examples:
+{"type":"MATCHED_TERM","candidate_ref":"r1","assertion":"PRESENT","segments":["seg_0001"]}
+{"type":"UNMATCHED_TERM","text":"explicit term","assertion":"PRESENT","segments":["seg_0001"]}
+{"type":"NARRATIVE","text":"explicit fact","assertion":"DENIED","segments":["seg_0001"]}
+{"type":"MEASUREMENT","values":{"kind":"NRS","value":8},"assertion":"PRESENT","segments":["seg_0001"]}
 
 The public record has no separate vital_signs field. For explicit BP, SBP, DBP, HR, PR, RR, BT, Temp, Temperature, SpO2, or Oxygen saturation MEASUREMENT facts, set fact_type to EXAM so the Field stage can route them to physical_examination. Preserve only the stated value and unit; do not interpret normality.
 

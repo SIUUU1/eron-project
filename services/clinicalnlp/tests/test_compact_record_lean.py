@@ -245,6 +245,41 @@ class CompactRecordLeanContractTests(unittest.TestCase):
             {segment["id"] for segment in field_payload["segments"]},
         )
 
+    def test_fact_chunks_use_a_stage_specific_prompt(self):
+        client = _LeanClient()
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        fact_prompts = [
+            call["system_prompt"]
+            for call in client.calls
+            if call["name"] == "clinical_record_compact_facts_v1"
+        ]
+        self.assertTrue(fact_prompts)
+        self.assertTrue(all(len(prompt) < 4_500 for prompt in fact_prompts))
+        self.assertTrue(
+            all("Use translated_text_en as primary meaning" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("Never emit MATCHED_TERM without candidate_ref" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("MEASUREMENT always requires values.kind and values.value" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("explicitly supports Current smoker" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("fact_type OUTCOME even when a purpose" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("Diagnostic test findings are not physical EXAM" in prompt for prompt in fact_prompts)
+        )
+        self.assertTrue(
+            all("Write history_of_present_illness.text" not in prompt for prompt in fact_prompts)
+        )
+
     def test_vital_measurement_is_assigned_to_physical_examination(self):
         client = _LeanClient(length_on_first=True, measurement=True)
         extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
