@@ -429,6 +429,85 @@ class CompactRecordLeanContractTests(unittest.TestCase):
 
         self.assertIsNone(recovered)
 
+    def test_misplaced_clinical_act_is_recovered_without_chunk_repair(self):
+        class MisplacedClinicalActClient(OllamaCloudClinicalLlmClient):
+            def __init__(self):
+                super().__init__(
+                    "http://unused.local",
+                    model_name="gemma4:31b",
+                    api_key="test-secret",
+                )
+                self.requests = []
+
+            def _chat_once(self, messages, *, timeout=None):
+                del timeout
+                system_prompt = messages[0]["content"]
+                payload = json.loads(messages[-1]["content"])
+                owned_ids = payload.get("owned_segment_ids")
+                if "Repair the prior assistant output" in system_prompt:
+                    content = json.dumps({
+                        "schema_version": "clinical-record-compact-facts-v1",
+                        "facts": {"f1": {
+                            "type": "NARRATIVE",
+                            "text": "aspirin administration planned",
+                            "assertion": "PRESENT",
+                            "segments": ["seg_0001"],
+                            "fact_type": "PLAN",
+                        }},
+                    })
+                elif isinstance(owned_ids, list):
+                    segment_id = owned_ids[0]
+                    fact = {
+                        "type": "NARRATIVE",
+                        "text": f"supported {segment_id}",
+                        "assertion": "PRESENT",
+                        "segments": [segment_id],
+                    }
+                    if segment_id == "seg_0001":
+                        fact = {
+                            "type": "PLAN",
+                            "text": "aspirin administration planned",
+                            "assertion": "PRESENT",
+                            "segments": [segment_id],
+                        }
+                    content = json.dumps({
+                        "schema_version": "clinical-record-compact-facts-v1",
+                        "facts": {"f1": fact},
+                    })
+                else:
+                    content = json.dumps({
+                        "schema_version": "clinical-record-compact-fields-v1",
+                        "fields": {},
+                    })
+                self.requests.append(content)
+                return SimpleNamespace(
+                    content=content,
+                    done_reason="stop",
+                    eval_count=1,
+                    prompt_eval_count=1,
+                    provider_total_ms=0.0,
+                    provider_load_ms=0.0,
+                    provider_prompt_eval_ms=0.0,
+                    provider_eval_ms=0.0,
+                )
+
+        client = MisplacedClinicalActClient()
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        recovered = next(
+            fact
+            for fact in result["record"]["facts"].values()
+            if fact.get("text") == "aspirin administration planned"
+        )
+        self.assertEqual(recovered["type"], "NARRATIVE")
+        self.assertEqual(recovered["fact_type"], "PLAN")
+        self.assertEqual(result["generation"]["provider_call_count"], 3)
+        self.assertEqual(result["generation"]["repair_count"], 0)
+        self.assertEqual(result["generation"]["fact_recovery_count"], 1)
+        self.assertEqual(len(client.requests), 3)
+
     def test_unrecoverable_fact_retries_only_its_source_segment(self):
         class TargetedRetryFactClient(OllamaCloudClinicalLlmClient):
             def __init__(self):

@@ -292,6 +292,31 @@ def _recover_fact_chunk(
             or (isinstance(candidate_ref, str) and not candidate_ref.strip())
         )
         text = raw_fact.get("text")
+        existing_clinical_act = raw_fact.get("fact_type")
+        if (
+            fact_type in CLINICAL_ACTS
+            and existing_clinical_act in {None, fact_type}
+            and isinstance(text, str)
+            and text.strip()
+        ):
+            normalized_narrative = copy.deepcopy(dict(raw_fact))
+            normalized_narrative["type"] = "NARRATIVE"
+            normalized_narrative["fact_type"] = fact_type
+            try:
+                _validate_schema(
+                    normalized_narrative,
+                    _fact_schema(),
+                    f"$.facts[{index}]",
+                )
+            except InvalidClinicalLlmOutput:
+                pass
+            else:
+                facts[fact_id] = normalized_narrative
+                reasons.append(
+                    f"fact[{index}]: CLINICAL_ACT_MOVED_TO_FACT_TYPE"
+                )
+                continue
+
         downgraded = copy.deepcopy(dict(raw_fact))
         downgraded.pop("candidate_ref", None)
         downgraded["type"] = "UNMATCHED_TERM"

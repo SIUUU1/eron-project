@@ -85,6 +85,10 @@ omits a usable `candidate_ref` but preserves explicit text and valid evidence,
 the Fact contract safely downgrades only that item to `UNMATCHED_TERM`; it never
 invents a candidate or clinical text. Other schema-invalid Fact kinds are not
 coerced into terms.
+When the model places a clinical act (`PLAN`, `EXAM`, `ASSESSMENT`, `OUTCOME`,
+or `UNKNOWN`) in the Fact `type` slot, a text-bearing Fact is normalized to
+`type=NARRATIVE` with the original act moved to `fact_type`. This is a structural
+correction only; its text, assertion, and evidence segments are preserved.
 `clinical_llm_fact_recovery_count` and
 `clinical_llm_fact_recovery_reasons` expose this structural recovery without
 copying the fact text into telemetry. When an invalid Fact has valid source
