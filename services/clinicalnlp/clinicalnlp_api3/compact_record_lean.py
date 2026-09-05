@@ -260,6 +260,113 @@ def fact_chunk_response_format() -> dict[str, Any]:
     )
 
 
+def _recover_fact_chunk(
+    document: dict[str, Any],
+    *,
+    defer_invalid_facts: bool,
+) -> tuple[dict[str, Any], list[str], list[str]] | None:
+    recovered = copy.deepcopy(document)
+    if recovered.get("schema_version") != FACT_CHUNK_SCHEMA_VERSION:
+        return None
+    facts = recovered.get("facts")
+    if not isinstance(facts, dict):
+        return None
+
+    reasons: list[str] = []
+    retry_segment_ids: list[str] = []
+    for index, (fact_id, raw_fact) in enumerate(list(facts.items()), start=1):
+        if not isinstance(raw_fact, Mapping):
+            return None
+        try:
+            _validate_schema(dict(raw_fact), _fact_schema(), f"$.facts[{index}]")
+            continue
+        except InvalidClinicalLlmOutput:
+            pass
+
+        candidate_ref = raw_fact.get("candidate_ref")
+        fact_type = raw_fact.get("type")
+        term_like_fact = fact_type in {"MATCHED_TERM", "TERM"}
+        missing_candidate_ref = (
+            "candidate_ref" not in raw_fact
+            or candidate_ref is None
+            or (isinstance(candidate_ref, str) and not candidate_ref.strip())
+        )
+        text = raw_fact.get("text")
+        downgraded = copy.deepcopy(dict(raw_fact))
+        downgraded.pop("candidate_ref", None)
+        downgraded["type"] = "UNMATCHED_TERM"
+        if (
+            term_like_fact
+            and missing_candidate_ref
+            and isinstance(text, str)
+            and text.strip()
+        ):
+            try:
+                _validate_schema(downgraded, _fact_schema(), f"$.facts[{index}]")
+            except InvalidClinicalLlmOutput:
+                pass
+            else:
+                facts[fact_id] = downgraded
+                reasons.append(
+                    f"fact[{index}]: TEXT_FACT_WITHOUT_CANDIDATE_REF_DOWNGRADED"
+                )
+                continue
+
+        if (
+            defer_invalid_facts
+            and term_like_fact
+            and missing_candidate_ref
+        ):
+            raw_segments = raw_fact.get("segments")
+            if (
+                not isinstance(raw_segments, list)
+                or not raw_segments
+                or any(
+                    not isinstance(segment_id, str) or not segment_id.strip()
+                    for segment_id in raw_segments
+                )
+            ):
+                return None
+            del facts[fact_id]
+            for segment_id in raw_segments:
+                if segment_id not in retry_segment_ids:
+                    retry_segment_ids.append(segment_id)
+            reasons.append(f"fact[{index}]: INVALID_FACT_DEFERRED_TO_SEGMENT_RETRY")
+            continue
+        return None
+
+    if not reasons:
+        return None
+    try:
+        _validate_schema(
+            recovered,
+            fact_chunk_response_format()["json_schema"]["schema"],
+        )
+    except InvalidClinicalLlmOutput:
+        return None
+    return recovered, reasons, retry_segment_ids
+
+
+def recover_fact_chunk_response(
+    document: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Downgrade schema-invalid textual facts without inventing a candidate."""
+
+    result = _recover_fact_chunk(document, defer_invalid_facts=False)
+    if result is None:
+        return None
+    recovered, reasons, _ = result
+    return recovered, reasons
+
+
+def recover_partial_fact_chunk_response(
+    document: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]] | None:
+    """Preserve valid facts and defer malformed fact segments to a smaller retry."""
+
+    return _recover_fact_chunk(document, defer_invalid_facts=True)
+
+
 def field_response_format(
     field_ids: Iterable[str] = CANONICAL_FIELD_IDS,
 ) -> dict[str, Any]:
@@ -527,6 +634,8 @@ __all__ = [
     "lean_record_response_format",
     "merge_chunk_facts",
     "minimal_candidate_projection",
+    "recover_fact_chunk_response",
+    "recover_partial_fact_chunk_response",
     "to_legacy_validation_document",
     "validate_lean_record",
 ]

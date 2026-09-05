@@ -80,6 +80,20 @@ length fallback, repair, regeneration, and failed-segment counts so an extra
 provider call can be attributed before changing prompts or chunk sizes.
 `clinical_llm_validation_failure_reasons` records schema paths and property
 names that triggered repair without copying clinical values into telemetry.
+When a term-like Fact (`MATCHED_TERM` or the model's non-contract `TERM` alias)
+omits a usable `candidate_ref` but preserves explicit text and valid evidence,
+the Fact contract safely downgrades only that item to `UNMATCHED_TERM`; it never
+invents a candidate or clinical text. Other schema-invalid Fact kinds are not
+coerced into terms.
+`clinical_llm_fact_recovery_count` and
+`clinical_llm_fact_recovery_reasons` expose this structural recovery without
+copying the fact text into telemetry. When an invalid Fact has valid source
+segment IDs but cannot be safely downgraded, valid sibling Facts are preserved
+and only those source segments are retried. Malformed roots and Facts without
+usable source IDs retain the bounded whole-response recovery behavior. The
+`clinical_llm_fact_targeted_retry_count` and
+`clinical_llm_fact_preserved_count` metrics distinguish this smaller retry from
+a whole-chunk repair.
 Chunked Fact extraction runs at most three independent chunks concurrently;
 the reported worker count records the concurrency selected for the request.
 Fact chunks use a stage-specific extraction contract; the complete field

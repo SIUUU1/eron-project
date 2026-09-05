@@ -1,14 +1,20 @@
 import copy
+import json
 import threading
 import unittest
+from types import SimpleNamespace
 
-from clinicalnlp_api3.clinical_llm import ClinicalLlmLengthLimit
+from clinicalnlp_api3.clinical_llm import (
+    ClinicalLlmLengthLimit,
+    OllamaCloudClinicalLlmClient,
+)
 from clinicalnlp_api3.compact_primary import project_compact_primary_draft
 from clinicalnlp_api3.compact_record_lean import (
     SCHEMA_VERSION,
     fact_chunk_response_format,
     lean_record_response_format,
     minimal_candidate_projection,
+    recover_fact_chunk_response,
     validate_lean_record,
 )
 from clinicalnlp_api3.record_extractor import LlamaServerClinicalExtractor
@@ -279,6 +285,201 @@ class CompactRecordLeanContractTests(unittest.TestCase):
         self.assertTrue(
             all("Write history_of_present_illness.text" not in prompt for prompt in fact_prompts)
         )
+
+    def test_unknown_text_fact_preserves_valid_facts_without_chunk_repair(self):
+        class RecoverableFactClient(OllamaCloudClinicalLlmClient):
+            def __init__(self):
+                super().__init__(
+                    "http://unused.local",
+                    model_name="gemma4:31b",
+                    api_key="test-secret",
+                )
+                self.requests = []
+                self._request_lock = threading.Lock()
+
+            def _chat_once(self, messages, *, timeout=None):
+                del timeout
+                system_prompt = messages[0]["content"]
+                if "Repair the prior assistant output" in system_prompt:
+                    content = json.dumps({
+                        "schema_version": "clinical-record-compact-facts-v1",
+                        "facts": {
+                            "f1": {
+                                "type": "NARRATIVE",
+                                "text": "supported symptom",
+                                "assertion": "PRESENT",
+                                "segments": ["seg_0001"],
+                            },
+                            "f2": {
+                                "type": "UNMATCHED_TERM",
+                                "text": "unmatched spoken term",
+                                "assertion": "PRESENT",
+                                "segments": ["seg_0001"],
+                            },
+                        },
+                    })
+                else:
+                    payload = json.loads(messages[-1]["content"])
+                    owned_ids = payload.get("owned_segment_ids")
+                    if isinstance(owned_ids, list):
+                        segment_id = owned_ids[0]
+                        facts = {
+                            "f1": {
+                                "type": "NARRATIVE",
+                                "text": "supported symptom",
+                                "assertion": "PRESENT",
+                                "segments": [segment_id],
+                            }
+                        }
+                        if segment_id == "seg_0001":
+                            facts["f2"] = {
+                                "type": "TERM",
+                                "text": "unmatched spoken term",
+                                "assertion": "PRESENT",
+                                "segments": [segment_id],
+                            }
+                        content = json.dumps({
+                            "schema_version": "clinical-record-compact-facts-v1",
+                            "facts": facts,
+                        })
+                    else:
+                        content = json.dumps({
+                            "schema_version": "clinical-record-compact-fields-v1",
+                            "fields": {},
+                        })
+                with self._request_lock:
+                    self.requests.append(content)
+                return SimpleNamespace(
+                    content=content,
+                    done_reason="stop",
+                    eval_count=1,
+                    prompt_eval_count=1,
+                    provider_total_ms=0.0,
+                    provider_load_ms=0.0,
+                    provider_prompt_eval_ms=0.0,
+                    provider_eval_ms=0.0,
+                )
+
+        client = RecoverableFactClient()
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        facts = list(result["record"]["facts"].values())
+        self.assertIn("supported symptom", {fact.get("text") for fact in facts})
+        recovered = next(
+            fact for fact in facts if fact.get("text") == "unmatched spoken term"
+        )
+        self.assertEqual(recovered["type"], "UNMATCHED_TERM")
+        self.assertNotIn("candidate_ref", recovered)
+        self.assertEqual(result["generation"]["provider_call_count"], 3)
+        self.assertEqual(result["generation"]["repair_count"], 0)
+        self.assertEqual(result["generation"]["fact_recovery_count"], 1)
+        self.assertEqual(len(client.requests), 3)
+
+    def test_non_term_schema_error_is_not_coerced_to_unmatched_term(self):
+        recovered = recover_fact_chunk_response({
+            "schema_version": "clinical-record-compact-facts-v1",
+            "facts": {
+                "f1": {
+                    "type": "NARRATIVE",
+                    "text": "explicit clinical narrative",
+                    "candidate_ref": "not-valid-for-narrative",
+                    "assertion": "PRESENT",
+                    "segments": ["seg_0001"],
+                }
+            },
+        })
+
+        self.assertIsNone(recovered)
+
+    def test_unrecoverable_fact_retries_only_its_source_segment(self):
+        class TargetedRetryFactClient(OllamaCloudClinicalLlmClient):
+            def __init__(self):
+                super().__init__(
+                    "http://unused.local",
+                    model_name="gemma4:31b",
+                    api_key="test-secret",
+                )
+                self.fact_request_owned_ids = []
+                self._request_lock = threading.Lock()
+
+            def _chat_once(self, messages, *, timeout=None):
+                del timeout
+                system_prompt = messages[0]["content"]
+                if "Repair the prior assistant output" in system_prompt:
+                    content = json.dumps({
+                        "schema_version": "clinical-record-compact-facts-v1",
+                        "facts": {"f2": {
+                            "type": "UNMATCHED_TERM",
+                            "text": "targeted term",
+                            "assertion": "PRESENT",
+                            "segments": ["seg_0001"],
+                        }},
+                    })
+                else:
+                    payload = json.loads(messages[-1]["content"])
+                    owned_ids = payload.get("owned_segment_ids")
+                    if isinstance(owned_ids, list):
+                        with self._request_lock:
+                            self.fact_request_owned_ids.append(list(owned_ids))
+                        segment_id = owned_ids[0]
+                        if owned_ids == ["seg_0001"]:
+                            facts = {"f2": {
+                                "type": "UNMATCHED_TERM",
+                                "text": "targeted term",
+                                "assertion": "PRESENT",
+                                "segments": [segment_id],
+                            }}
+                        else:
+                            facts = {"f1": {
+                                "type": "NARRATIVE",
+                                "text": f"supported {segment_id}",
+                                "assertion": "PRESENT",
+                                "segments": [segment_id],
+                            }}
+                            if segment_id == "seg_0001":
+                                facts["f2"] = {
+                                    "type": "MATCHED_TERM",
+                                    "assertion": "PRESENT",
+                                    "segments": [segment_id],
+                                }
+                        content = json.dumps({
+                            "schema_version": "clinical-record-compact-facts-v1",
+                            "facts": facts,
+                        })
+                    else:
+                        content = json.dumps({
+                            "schema_version": "clinical-record-compact-fields-v1",
+                            "fields": {},
+                        })
+                return SimpleNamespace(
+                    content=content,
+                    done_reason="stop",
+                    eval_count=1,
+                    prompt_eval_count=1,
+                    provider_total_ms=0.0,
+                    provider_load_ms=0.0,
+                    provider_prompt_eval_ms=0.0,
+                    provider_eval_ms=0.0,
+                )
+
+        client = TargetedRetryFactClient()
+        extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+
+        result = extractor.generate_compact_record_lean({"segments": _segments(17)}, {})
+
+        fact_texts = {
+            fact.get("text")
+            for fact in result["record"]["facts"].values()
+            if isinstance(fact, dict)
+        }
+        self.assertIn("supported seg_0001", fact_texts)
+        self.assertIn("targeted term", fact_texts)
+        self.assertIn(["seg_0001"], client.fact_request_owned_ids)
+        self.assertEqual(result["generation"]["repair_count"], 0)
+        self.assertEqual(result["generation"]["fact_targeted_retry_count"], 1)
+        self.assertEqual(result["generation"]["fact_preserved_count"], 1)
 
     def test_vital_measurement_is_assigned_to_physical_examination(self):
         client = _LeanClient(length_on_first=True, measurement=True)

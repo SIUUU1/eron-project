@@ -11,6 +11,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+ResponseRecoverer = Callable[
+    [dict[str, Any]],
+    tuple[dict[str, Any], list[str]] | None,
+]
+
+
 class InvalidClinicalLlmOutput(ValueError):
     """The provider response did not satisfy the requested JSON contract."""
 
@@ -247,6 +253,7 @@ class ClinicalLlmClient(ABC):
         user_payload: dict[str, Any],
         response_format: dict[str, Any],
         output_label: str,
+        response_recoverer: ResponseRecoverer | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -279,6 +286,8 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             "rate_limit_count": 0,
             "repair_count": 0,
             "regeneration_count": 0,
+            "structural_recovery_count": 0,
+            "structural_recovery_reasons": [],
             "validation_failure_reasons": [],
             "input_tokens": 0,
             "output_tokens": 0,
@@ -434,6 +443,26 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
             return candidate
         return None
 
+    @staticmethod
+    def _recover_valid_object(
+        content: str,
+        schema: dict[str, Any],
+        response_recoverer: ResponseRecoverer | None,
+    ) -> tuple[dict[str, Any], list[str]] | None:
+        if response_recoverer is None:
+            return None
+        for candidate in _json_objects(content):
+            recovered = response_recoverer(candidate)
+            if recovered is None:
+                continue
+            value, reasons = recovered
+            try:
+                _validate_schema(value, schema)
+            except InvalidClinicalLlmOutput:
+                continue
+            return value, [str(reason) for reason in reasons]
+        return None
+
     def generate_json(
         self,
         *,
@@ -443,6 +472,7 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
         output_label: str,
         call_reserver: Callable[[], int] | None = None,
         deadline: float | None = None,
+        response_recoverer: ResponseRecoverer | None = None,
     ) -> dict[str, Any]:
         self._reset_diagnostics()
         schema = _response_schema(response_format)
@@ -477,9 +507,20 @@ class OllamaCloudClinicalLlmClient(ClinicalLlmClient):
                 f"issue={_invalid_issue(first.content, schema)}"
             )
 
-        self._diag()["validation_failure_reasons"].append(
-            _invalid_issue(first.content, schema)
+        initial_issue = _invalid_issue(first.content, schema)
+        recovered = self._recover_valid_object(
+            first.content,
+            schema,
+            response_recoverer,
         )
+        if recovered is not None:
+            value, reasons = recovered
+            self._diag()["validation_failure_reasons"].append(initial_issue)
+            self._diag()["structural_recovery_count"] += max(1, len(reasons))
+            self._diag()["structural_recovery_reasons"].extend(reasons)
+            return value
+
+        self._diag()["validation_failure_reasons"].append(initial_issue)
         self._diag()["repair_count"] += 1
         repair_prompt = (
             "Repair the prior assistant output so it is exactly one JSON object "

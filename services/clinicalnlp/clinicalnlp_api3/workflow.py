@@ -4164,6 +4164,10 @@ def run_clinical_workflow(
         "clinical_llm_length_fallback_count": 0,
         "clinical_llm_repair_count": 0,
         "clinical_llm_regeneration_count": 0,
+        "clinical_llm_fact_recovery_count": 0,
+        "clinical_llm_fact_recovery_reasons": [],
+        "clinical_llm_fact_targeted_retry_count": 0,
+        "clinical_llm_fact_preserved_count": 0,
         "clinical_llm_validation_failure_reasons": [],
         "clinical_llm_failed_segment_count": 0,
         "clinical_llm_provider_calls": 0,
@@ -4558,6 +4562,9 @@ def run_clinical_workflow(
         ("clinical_llm_length_fallback_count", "length_fallback_count"),
         ("clinical_llm_repair_count", "repair_count"),
         ("clinical_llm_regeneration_count", "regeneration_count"),
+        ("clinical_llm_fact_recovery_count", "fact_recovery_count"),
+        ("clinical_llm_fact_targeted_retry_count", "fact_targeted_retry_count"),
+        ("clinical_llm_fact_preserved_count", "fact_preserved_count"),
         ("clinical_llm_failed_segment_count", "failed_segment_count"),
     ):
         telemetry[target_key] = telemetry_count(
@@ -4572,6 +4579,14 @@ def run_clinical_workflow(
     telemetry["clinical_llm_validation_failure_reasons"] = (
         [str(reason) for reason in validation_failure_reasons]
         if isinstance(validation_failure_reasons, list)
+        else []
+    )
+    fact_recovery_reasons = generation_telemetry.get(
+        "fact_recovery_reasons", []
+    )
+    telemetry["clinical_llm_fact_recovery_reasons"] = (
+        [str(reason) for reason in fact_recovery_reasons]
+        if isinstance(fact_recovery_reasons, list)
         else []
     )
     for target_key, source_key in (

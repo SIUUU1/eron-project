@@ -143,6 +143,12 @@ class _SyntheticClinicalExtractor:
                 "length_fallback_count": 0,
                 "repair_count": 1,
                 "regeneration_count": 0,
+                "fact_recovery_count": 1,
+                "fact_recovery_reasons": [
+                    "fact[2]: TEXT_FACT_WITHOUT_CANDIDATE_REF_DOWNGRADED"
+                ],
+                "fact_targeted_retry_count": 1,
+                "fact_preserved_count": 7,
                 "failed_segment_count": 0,
                 "provider_call_count": 2,
                 "network_retry_count": 1,
@@ -344,6 +350,10 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 "clinical_llm_length_fallback_count",
                 "clinical_llm_repair_count",
                 "clinical_llm_regeneration_count",
+                "clinical_llm_fact_recovery_count",
+                "clinical_llm_fact_recovery_reasons",
+                "clinical_llm_fact_targeted_retry_count",
+                "clinical_llm_fact_preserved_count",
                 "clinical_llm_validation_failure_reasons",
                 "clinical_llm_failed_segment_count",
                 "clinical_llm_provider_calls",
@@ -363,6 +373,7 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
                 if key not in {
                     "translation_batches",
                     "translation_retry_reasons",
+                    "clinical_llm_fact_recovery_reasons",
                     "clinical_llm_validation_failure_reasons",
                 }
             )
@@ -570,6 +581,15 @@ class ClinicalDraftRuntimeTests(unittest.TestCase):
             3,
         )
         self.assertEqual(result["telemetry"]["clinical_llm_repair_count"], 1)
+        self.assertEqual(result["telemetry"]["clinical_llm_fact_recovery_count"], 1)
+        self.assertEqual(
+            result["telemetry"]["clinical_llm_fact_recovery_reasons"],
+            ["fact[2]: TEXT_FACT_WITHOUT_CANDIDATE_REF_DOWNGRADED"],
+        )
+        self.assertEqual(
+            result["telemetry"]["clinical_llm_fact_targeted_retry_count"], 1
+        )
+        self.assertEqual(result["telemetry"]["clinical_llm_fact_preserved_count"], 7)
         self.assertEqual(result["telemetry"]["clinical_llm_network_retries"], 1)
         self.assertEqual(result["telemetry"]["clinical_llm_http_ms"], 140.0)
         self.assertEqual(result["telemetry"]["clinical_llm_provider_ms"], 120.0)

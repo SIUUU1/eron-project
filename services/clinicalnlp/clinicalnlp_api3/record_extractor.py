@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.request import Request, urlopen
 
 from .clinical_llm import (
@@ -48,6 +48,8 @@ from .compact_record_lean import (
     lean_record_response_format,
     merge_chunk_facts,
     minimal_candidate_projection,
+    recover_fact_chunk_response,
+    recover_partial_fact_chunk_response,
     validate_lean_record,
 )
 
@@ -111,6 +113,10 @@ class _LeanTelemetry:
             "length_fallback_count": 0,
             "repair_count": 0,
             "regeneration_count": 0,
+            "fact_recovery_count": 0,
+            "fact_recovery_reasons": [],
+            "fact_targeted_retry_count": 0,
+            "fact_preserved_count": 0,
             "validation_failure_reasons": [],
             "network_retry_count": 0,
             "failed_segment_count": 0,
@@ -145,6 +151,13 @@ class _LeanTelemetry:
                 value = diagnostics.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     self.values[key] += value
+            recovery_count = diagnostics.get("structural_recovery_count")
+            if (
+                isinstance(recovery_count, int)
+                and not isinstance(recovery_count, bool)
+                and recovery_count >= 0
+            ):
+                self.values["fact_recovery_count"] += recovery_count
             for key in (
                 "http_elapsed_ms",
                 "provider_total_ms",
@@ -164,6 +177,11 @@ class _LeanTelemetry:
             if isinstance(reasons, list):
                 self.values["validation_failure_reasons"].extend(
                     str(reason) for reason in reasons[:8]
+                )
+            recovery_reasons = diagnostics.get("structural_recovery_reasons")
+            if isinstance(recovery_reasons, list):
+                self.values["fact_recovery_reasons"].extend(
+                    str(reason) for reason in recovery_reasons[:8]
                 )
 
     def increment(self, key: str, amount: int = 1) -> None:
@@ -583,6 +601,10 @@ class LlamaServerClinicalExtractor:
         budget: _LeanCallBudget,
         telemetry: _LeanTelemetry,
         deadline: float,
+        response_recoverer: Callable[
+            [dict[str, Any]],
+            tuple[dict[str, Any], list[str]] | None,
+        ] | None = None,
     ) -> dict[str, Any]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -598,6 +620,7 @@ class LlamaServerClinicalExtractor:
                         output_label=output_label,
                         call_reserver=budget.reserve,
                         deadline=deadline,
+                        response_recoverer=response_recoverer,
                     )
                 budget.reserve()
                 return self.llm_client.generate_json(
@@ -693,6 +716,7 @@ class LlamaServerClinicalExtractor:
         telemetry: _LeanTelemetry,
         deadline: float,
         depth: int = 0,
+        allow_partial_recovery: bool = True,
     ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
         owned_ids = [
             str(segment.get("id"))
@@ -716,6 +740,26 @@ class LlamaServerClinicalExtractor:
                 segment_ids=owned_ids,
             ),
         }
+        recovery_retry_ids: list[str] = []
+
+        def recover_response(
+            document: dict[str, Any],
+        ) -> tuple[dict[str, Any], list[str]] | None:
+            if not allow_partial_recovery:
+                return recover_fact_chunk_response(document)
+            recovered = recover_partial_fact_chunk_response(document)
+            if recovered is None:
+                return None
+            value, reasons, retry_ids = recovered
+            if any(segment_id not in owned_ids for segment_id in retry_ids):
+                return None
+            recovery_retry_ids.extend(
+                segment_id
+                for segment_id in retry_ids
+                if segment_id not in recovery_retry_ids
+            )
+            return value, reasons
+
         started = time.perf_counter()
         try:
             generated = self._lean_call(
@@ -728,6 +772,7 @@ class LlamaServerClinicalExtractor:
                 budget=budget,
                 telemetry=telemetry,
                 deadline=deadline,
+                response_recoverer=recover_response,
             )
             facts = generated.get("facts")
             facts = facts if isinstance(facts, dict) else {}
@@ -755,6 +800,44 @@ class LlamaServerClinicalExtractor:
                     "validation_failure_reasons", []
                 ),
             }]
+            if recovery_retry_ids:
+                telemetry.increment("fact_preserved_count", len(facts))
+                if depth >= MAX_SPLIT_DEPTH:
+                    return [facts], recovery_retry_ids, audit
+                retry_segments = [
+                    segment
+                    for segment in owned_segments
+                    if str(segment.get("id") or "") in recovery_retry_ids
+                ]
+                if not retry_segments:
+                    return [facts], recovery_retry_ids, audit
+                first_retry_index = next(
+                    index
+                    for index, segment in enumerate(owned_segments)
+                    if str(segment.get("id") or "") in recovery_retry_ids
+                )
+                retry_context = (
+                    owned_segments[first_retry_index - 1]
+                    if first_retry_index > 0
+                    else context_segment
+                )
+                telemetry.increment("fact_targeted_retry_count")
+                retry_facts, retry_failed, retry_audit = self._extract_lean_fact_chunk(
+                    chunk_prompt=chunk_prompt,
+                    owned_segments=retry_segments,
+                    context_segment=retry_context,
+                    candidate_snapshots=candidate_snapshots,
+                    budget=budget,
+                    telemetry=telemetry,
+                    deadline=deadline,
+                    depth=depth + 1,
+                    allow_partial_recovery=False,
+                )
+                return (
+                    [facts] + retry_facts,
+                    retry_failed,
+                    audit + retry_audit,
+                )
             return [facts], [], audit
         except ClinicalLlmLengthLimit as error:
             telemetry.increment("length_fallback_count")
@@ -786,6 +869,7 @@ class LlamaServerClinicalExtractor:
                 telemetry=telemetry,
                 deadline=deadline,
                 depth=depth + 1,
+                allow_partial_recovery=allow_partial_recovery,
             )
             right_context = left[-1] if left else context_segment
             right_facts, right_failed, right_audit = self._extract_lean_fact_chunk(
@@ -797,6 +881,7 @@ class LlamaServerClinicalExtractor:
                 telemetry=telemetry,
                 deadline=deadline,
                 depth=depth + 1,
+                allow_partial_recovery=allow_partial_recovery,
             )
             return (
                 left_facts + right_facts,
