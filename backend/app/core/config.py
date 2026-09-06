@@ -50,6 +50,22 @@ class Settings:
     risk_rising: float = 0.133371
     risk_watch: float = 0.035838
 
+    # 모델 성능 모니터링의 목표값.
+    #
+    # 🔑 임의로 정한 숫자가 아니다. 프로젝트가 문서에 적어 둔 목표치 그대로다
+    #    (services/riskmodel/README.md 「성능」 절 · _handoff/B_pristine_evaluation_report.md).
+    #    목표 미달을 어떻게 표시할지는 services/model_monitoring.status_of 가 정한다.
+    model_target_pr_auc: float = 0.55
+    model_target_auroc: float = 0.93
+    model_target_recall: float = 0.90
+    model_target_precision: float = 0.30
+    model_target_f1: float = 0.40
+
+    # 지표를 낼 수 있는 최소 표본. 이보다 적으면 값을 만들지 않고 insufficient_data 다.
+    # ⚠ 이 값을 넘겨도 표본이 작으면 신뢰구간은 넓다. 화면은 표본 수를 함께 보여준다.
+    model_min_eval_samples: int = 100
+    model_min_positives: int = 10
+
     # 예측 모델 연동 여부. PREDICT_AI_URL 이 설정되어야 연동으로 본다.
     predict_ai_url: str | None = None
     predict_ai_timeout_seconds: float = 60.0
@@ -96,6 +112,13 @@ def load_settings() -> Settings:
         risk_critical=_float_env("RISK_CRITICAL", _float_env("RISK_THRESHOLD_CRITICAL", 0.40)),
         risk_rising=_float_env("RISK_RISING", _float_env("RISK_THRESHOLD_RISING", 0.133371)),
         risk_watch=_float_env("RISK_WATCH", _float_env("RISK_THRESHOLD_WATCH", 0.035838)),
+        model_target_pr_auc=_float_env("MODEL_TARGET_PR_AUC", 0.55),
+        model_target_auroc=_float_env("MODEL_TARGET_AUROC", 0.93),
+        model_target_recall=_float_env("MODEL_TARGET_RECALL", 0.90),
+        model_target_precision=_float_env("MODEL_TARGET_PRECISION", 0.30),
+        model_target_f1=_float_env("MODEL_TARGET_F1", 0.40),
+        model_min_eval_samples=int(_float_env("MODEL_MIN_EVAL_SAMPLES", 100)),
+        model_min_positives=int(_float_env("MODEL_MIN_POSITIVES", 10)),
         predict_ai_url=os.getenv("PREDICT_AI_URL") or None,
         predict_ai_timeout_seconds=_float_env("PREDICT_AI_TIMEOUT_SECONDS", 60.0),
         predict_scheduler_enabled=_bool_env("PREDICT_SCHEDULER_ENABLED", True),

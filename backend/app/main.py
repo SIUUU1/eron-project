@@ -27,6 +27,7 @@ from app.api.records import router as record_router
 from app.api.ed_stays import router as ed_stay_router
 from app.api.ed_dashboard import router as ed_dashboard_router
 from app.api.ed_demo import router as ed_demo_router
+from app.api.model_monitoring import router as model_monitoring_router
 from app.api.clinical_records import router as clinical_record_router
 from app.api.kcd import router as kcd_router
 from app.services import prediction_runner
@@ -99,6 +100,9 @@ app.include_router(kcd_router)
 # MIMIC 기반 조회 (신규 네임스페이스, 읽기 전용)
 app.include_router(ed_stay_router)
 app.include_router(ed_dashboard_router)
+
+# 모델 성능 모니터링 (조회 시 판정 → app.model_outcome 에 캐시)
+app.include_router(model_monitoring_router)
 
 # 데모 시계 제어 (app.demo_clock 한 행만 쓰기)
 app.include_router(ed_demo_router)
