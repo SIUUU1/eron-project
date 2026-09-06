@@ -18,6 +18,30 @@
 
 개발 규칙은 [CLAUDE.md](CLAUDE.md) 와 [AGENTS.md](AGENTS.md) 를 참고하세요.
 
+## 검증
+
+```sh
+./backend/run-tests.sh                              # 백엔드 단위 테스트 전체
+./backend/run-tests.sh tests.test_model_monitoring  # 모듈 하나만
+cd frontend && npm run lint && npm run build        # 프론트엔드
+```
+
+백엔드 테스트는 운영 이미지에 테스트 코드를 넣지 않으므로, 같은 이미지에 `tests/` 를
+얹어 일회성 컨테이너로 돌립니다. 먼저 `docker compose build backend` 가 필요합니다.
+
+모델 성능 화면의 악화 라벨은 학습 파이프라인 정의를 옮겨 적은 것이라 정기적으로
+정답과 대조해야 합니다 — [backend/scripts/verify_label_reproduction.py](backend/scripts/verify_label_reproduction.py)
+의 docstring에 정답 CSV 생성법과 실행법이 있습니다.
+
+Data drift(PSI)는 학습 feature 분포를 참조로 씁니다. 모델을 교체하면 참조 분포를 다시
+만들고([backend/scripts/build_feature_reference.py](backend/scripts/build_feature_reference.py)),
+저장된 예측의 feature 도 다시 받아야 합니다
+([backend/scripts/backfill_prediction_features.py](backend/scripts/backfill_prediction_features.py) `--force`).
+
+예측 경로(riskmodel)를 건드린 뒤에는 배치 일치 검증을 반드시 돌립니다 —
+[services/riskmodel/tests/test_online_parity.py](services/riskmodel/tests/test_online_parity.py)
+docstring의 2단계 절차이며 **위험도 오차가 0** 이어야 합니다.
+
 ## 음성 기반 응급기록 초안
 
 선택적 `stt` 프로필은 API1의 비동기 계약을 유지하는 Groq Whisper 내부 서비스를 실행합니다.
