@@ -1,10 +1,11 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Activity, ClipboardCheck, LayoutDashboard, Settings } from "lucide-react";
+import { Activity, ClipboardCheck, Gauge, LayoutDashboard, Settings } from "lucide-react";
 
 const items = [
   { title: "응급실 현황", url: "/", icon: LayoutDashboard },
   { title: "환자 모니터링", url: "/monitoring", icon: Activity },
   { title: "AI 진료기록 및 누락 검사", url: "/records", icon: ClipboardCheck },
+  { title: "AI 모델 성능", url: "/model-monitoring", icon: Gauge },
   { title: "시스템 설정", url: "/settings", icon: Settings },
 ];
 

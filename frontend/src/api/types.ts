@@ -507,3 +507,171 @@ export interface ReassessResponse {
   /** 재평가 큐는 예측이 없으면 ESI 중증도 순으로 정렬한다(병상 색과는 별개 기준). */
   meta: { is_demo_assignment: boolean; status_source: "prediction" | "triage_acuity" };
 }
+
+// ---------------------------------------------------------------- AI 모델 성능 모니터링
+
+/**
+ * 화면 상태.
+ * - `normal` 목표 충족
+ * - `warning` 운영점 지표(Recall/Precision/F1) 미달 — threshold 를 어디 두느냐의 함수다
+ * - `critical` 판별력(PR-AUC/AUROC) 미달 — 모델 자체의 신호
+ * - `insufficient_data` 표본 부족. 숫자를 만들지 않는다.
+ */
+export type ModelStatus = "normal" | "warning" | "critical" | "insufficient_data";
+
+/**
+ * 라벨을 어디까지 확보했는지. 성능 숫자를 믿어도 되는지의 근거다.
+ * `evaluated` 만 지표에 들어간다 — pending/censored/truncated 는 빠진다.
+ */
+export interface LabelCoverage {
+  total_predictions: number;
+  evaluated: number;
+  /** 관찰 3시간이 아직 지나지 않아 판정할 수 없는 예측 */
+  pending: number;
+  /** 관측 경로가 없어 판정 불가. **음성으로 세지 않는다.** */
+  censored: number;
+  /** 첫 악화 이후 시점. 학습 grid 밖이라 제외한다. */
+  truncated: number;
+  positive: number;
+  label_definition: string;
+  label_components_reproduced: string[];
+  coverage_percentage: number;
+}
+
+/** 실제 예측을 학습과 같은 악화 정의로 채점한 값. 표본이 모자라면 null 이다. */
+export interface OperationalMetrics {
+  pr_auc: number | null;
+  auroc: number | null;
+  recall: number | null;
+  precision: number | null;
+  f1: number | null;
+  true_positive: number;
+  false_positive: number;
+  true_negative: number;
+  false_negative: number;
+  threshold: number;
+  evaluated_count: number;
+  positive_count: number;
+  status: ModelStatus;
+}
+
+/** 개발 단계 temporal holdout 성능. **운영 성능이 아니다** — 절대 섞지 않는다. */
+export interface ReferenceMetrics {
+  pr_auc: number | null;
+  auroc: number | null;
+  recall: number | null;
+  precision: number | null;
+  f1: number | null;
+  source: string | null;
+  protocol: string | null;
+  note: string | null;
+}
+
+/** artifacts/bundle.json 이 정본이다. */
+export interface ModelInfo {
+  model_version: string;
+  algorithm: string;
+  feature_set: string;
+  feature_count: number;
+  prediction_horizon_h: number;
+  threshold: number;
+  operating_point: string;
+  eval_unit: string;
+  training_period: string | null;
+  training_mode: string | null;
+  protocol: string | null;
+  created: string | null;
+}
+
+export interface MetricTargets {
+  pr_auc: number;
+  auroc: number;
+  recall: number;
+  precision: number;
+  f1: number;
+  min_eval_samples: number;
+  min_positives: number;
+}
+
+export interface ModelMonitoringSummary {
+  model_info: ModelInfo;
+  operational: OperationalMetrics;
+  reference: ReferenceMetrics;
+  targets: MetricTargets;
+  label_coverage: LabelCoverage;
+  evaluation_period_start: string | null;
+  evaluation_period_end: string | null;
+  last_evaluated_at: string | null;
+  meta: Meta;
+}
+
+export interface TrendPoint {
+  /** 구간 시작 (데모 시간축) */
+  bucket: string;
+  pr_auc: number | null;
+  auroc: number | null;
+  recall: number | null;
+  precision: number | null;
+  f1: number | null;
+  evaluated_count: number;
+  positive_count: number;
+}
+
+export interface TrendsResponse {
+  interval: "hour" | "day";
+  points: TrendPoint[];
+  label_coverage: LabelCoverage;
+  meta: Meta;
+}
+
+export interface ConfusionMatrixResponse {
+  threshold: number;
+  true_positive: number;
+  false_positive: number;
+  true_negative: number;
+  false_negative: number;
+  recall: number | null;
+  precision: number | null;
+  f1: number | null;
+  evaluated_count: number;
+  positive_count: number;
+  status: ModelStatus;
+  label_coverage: LabelCoverage;
+  meta: Meta;
+}
+
+export interface ThresholdRow {
+  threshold: number;
+  recall: number | null;
+  precision: number | null;
+  f1: number | null;
+  positive_predictions: number;
+  true_positive: number;
+  false_positive: number;
+  is_current: boolean;
+  /** bundle 의 운영점 이름 (recall_85 등) */
+  operating_point: string | null;
+}
+
+export interface ThresholdsResponse {
+  current_threshold: number;
+  rows: ThresholdRow[];
+  label_coverage: LabelCoverage;
+  meta: Meta;
+}
+
+export interface EvaluationStatusResponse {
+  last_prediction_at: string | null;
+  last_evaluated_at: string | null;
+  total_predictions: number;
+  evaluated_predictions: number;
+  pending_predictions: number;
+  censored_predictions: number;
+  truncated_predictions: number;
+  latest_model_version: string | null;
+  demo_now: string | null;
+  data_freshness_minutes: number | null;
+  status: ModelStatus;
+  label_coverage: LabelCoverage;
+  meta: Meta;
+}

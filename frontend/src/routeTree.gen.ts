@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ModelMonitoringRouteImport } from './routes/model-monitoring'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as MonitoringIndexRouteImport } from './routes/monitoring.index'
 import { Route as MonitoringPatientIdRouteImport } from './routes/monitoring.$patientId'
@@ -19,6 +20,11 @@ import { Route as RecordsPatientIdRouteImport } from './routes/records.$patientI
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelMonitoringRoute = ModelMonitoringRouteImport.update({
+  id: '/model-monitoring',
+  path: '/model-monitoring',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsRoute = SettingsRouteImport.update({
@@ -49,6 +55,7 @@ const RecordsPatientIdRoute = RecordsPatientIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/model-monitoring': typeof ModelMonitoringRoute
   '/settings': typeof SettingsRoute
   '/monitoring/$patientId': typeof MonitoringPatientIdRoute
   '/records/$patientId': typeof RecordsPatientIdRoute
@@ -57,6 +64,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/model-monitoring': typeof ModelMonitoringRoute
   '/settings': typeof SettingsRoute
   '/monitoring/$patientId': typeof MonitoringPatientIdRoute
   '/records/$patientId': typeof RecordsPatientIdRoute
@@ -66,6 +74,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/model-monitoring': typeof ModelMonitoringRoute
   '/settings': typeof SettingsRoute
   '/monitoring/$patientId': typeof MonitoringPatientIdRoute
   '/records/$patientId': typeof RecordsPatientIdRoute
@@ -76,6 +85,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/model-monitoring'
     | '/settings'
     | '/monitoring/$patientId'
     | '/records/$patientId'
@@ -84,6 +94,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/model-monitoring'
     | '/settings'
     | '/monitoring/$patientId'
     | '/records/$patientId'
@@ -92,6 +103,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/model-monitoring'
     | '/settings'
     | '/monitoring/$patientId'
     | '/records/$patientId'
@@ -101,6 +113,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ModelMonitoringRoute: typeof ModelMonitoringRoute
   SettingsRoute: typeof SettingsRoute
   MonitoringPatientIdRoute: typeof MonitoringPatientIdRoute
   RecordsPatientIdRoute: typeof RecordsPatientIdRoute
@@ -115,6 +128,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-monitoring': {
+      id: '/model-monitoring'
+      path: '/model-monitoring'
+      fullPath: '/model-monitoring'
+      preLoaderRoute: typeof ModelMonitoringRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings': {
@@ -157,6 +177,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ModelMonitoringRoute: ModelMonitoringRoute,
   SettingsRoute: SettingsRoute,
   MonitoringPatientIdRoute: MonitoringPatientIdRoute,
   RecordsPatientIdRoute: RecordsPatientIdRoute,
