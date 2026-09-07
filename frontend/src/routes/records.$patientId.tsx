@@ -42,6 +42,7 @@ import {
   workflowDraftToEmergencyRecord,
   workflowDraftToFieldProvenance,
   workflowDraftToFieldStatuses,
+  workflowDraftToUnassignedFacts,
   type DraftDialogueTurn,
 } from "@/api/clinical-records";
 import { formatDateTime, sexLabel } from "@/api/display";
@@ -56,6 +57,7 @@ import {
   type AudioRecorderState,
 } from "@/lib/browser-audio-recorder";
 import { FieldProvenancePanel } from "@/components/records/field-provenance-panel";
+import { UnassignedFactsPanel } from "@/components/records/unassigned-facts-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -288,6 +290,7 @@ function RecordWorkflow({
   const [generating, setGenerating] = useState(false);
   const [record, setRecord] = useState<EmergencyRecord>(savedRecord ?? emptyRecord);
   const [fieldProvenance, setFieldProvenance] = useState<FieldProvenanceMap>(savedProvenance);
+  const [unassignedFacts, setUnassignedFacts] = useState(savedPayload?.unassigned_facts ?? []);
   const [provenanceRevision, setProvenanceRevision] = useState(0);
   const [clinicalFieldStatuses, setClinicalFieldStatuses] = useState<Record<
     RecordFieldKey,
@@ -408,12 +411,12 @@ function RecordWorkflow({
           record,
           field_statuses: clinicalFieldStatuses,
           field_provenance: fieldProvenance as Record<string, unknown>,
+          unassigned_facts: unassignedFacts,
           generated,
           diagnosis_rule_outs: diagnosisRuleOuts,
           ...(dialogue.length > 0
             ? {
-                whisper_payload:
-                  uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue),
+                whisper_payload: uploadedWhisperPayload ?? dialogueToWhisperDraftRequest(dialogue),
               }
             : {}),
           ...(sentAt ? { conversation_sent_at: sentAt } : {}),
@@ -487,6 +490,7 @@ function RecordWorkflow({
       setUploadedAudioFile(null);
       setDialogue(whisperDraftToDialogue(payload));
       setFieldProvenance({});
+      setUnassignedFacts([]);
       setClinicalFieldStatuses(null);
       setGenerated(false);
       setChecked(false);
@@ -528,6 +532,7 @@ function RecordWorkflow({
       setUploadedWhisperFileName(null);
       setDialogue(whisperDraftToDialogue(payload));
       setFieldProvenance({});
+      setUnassignedFacts([]);
       setClinicalFieldStatuses(null);
       setGenerated(false);
       setChecked(false);
@@ -589,6 +594,7 @@ function RecordWorkflow({
         setDialogue([]);
         setRecord({ ...emptyRecord });
         setFieldProvenance({});
+        setUnassignedFacts([]);
         setClinicalFieldStatuses(null);
         setSelectedKcds([]);
         setDiagnosisRuleOuts([]);
@@ -670,6 +676,7 @@ function RecordWorkflow({
       );
       setRecord(workflowDraftToEmergencyRecord(workflow));
       setFieldProvenance(workflowDraftToFieldProvenance(workflow));
+      setUnassignedFacts(workflowDraftToUnassignedFacts(workflow));
       setProvenanceRevision((revision) => revision + 1);
       setClinicalFieldStatuses(workflowDraftToFieldStatuses(workflow));
       setGenerated(true);
@@ -1395,6 +1402,7 @@ function RecordWorkflow({
                 </p>
               ) : null}
               <ScrollArea className="h-[420px] pr-3">
+                <UnassignedFactsPanel facts={unassignedFacts} />
                 <div className="space-y-3">
                   {fieldOrder.map((key) => {
                     const provenance = fieldProvenance[key];

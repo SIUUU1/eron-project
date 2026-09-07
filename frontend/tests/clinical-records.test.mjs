@@ -16,12 +16,46 @@ import {
   workflowDraftToEmergencyRecord,
   workflowDraftToFieldProvenance,
   workflowDraftToFieldStatuses,
+  workflowDraftToUnassignedFacts,
 } from "../src/api/clinical-records.ts";
 import { applyTerminologyCandidateDecision } from "../src/lib/clinical-provenance.ts";
 import {
   normalizeClinicalRecordOutcome,
   outcomeOptions,
 } from "../src/lib/clinical-record-outcome.ts";
+
+test("미배정 Fact는 필드와 분리하여 상태와 모든 근거를 보존하고 Fact ID로 중복 제거한다", () => {
+  const fact = {
+    fact_id: "f1",
+    fact: { text: "Contrast allergy denied", assertion: "DENIED" },
+    evidence: [
+      {
+        segment_id: "s1",
+        raw_text: "조영제 알레르기 없어요",
+        translated_text_en: "No contrast allergy",
+      },
+      { segment_id: "s2", raw_text: "네 없어요" },
+    ],
+  };
+  const workflow = {
+    draft: {
+      fields: {},
+      review_items: [
+        { field_id: "workflow", unassigned_fact: fact },
+        { field_id: "workflow", unassigned_fact: fact },
+        { field_id: "allergy", source: "Penicillin" },
+        { field_id: "workflow" },
+      ],
+    },
+  };
+  const before = structuredClone(workflow);
+  assert.deepEqual(workflowDraftToUnassignedFacts(workflow), [fact]);
+  assert.deepEqual(workflow, before);
+  assert.deepEqual(workflowDraftToUnassignedFacts({ draft: { review_items: [] } }), []);
+  assert.deepEqual(JSON.parse(JSON.stringify({ unassigned_facts: [fact] })).unassigned_facts, [
+    fact,
+  ]);
+});
 
 test("의료진이 선택한 후보는 초안 원문을 유지하고 새 줄에 추가한다", () => {
   const candidate = {

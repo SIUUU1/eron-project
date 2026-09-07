@@ -8,6 +8,7 @@ import type {
   KcdSearchResponse,
   PersistedClinicalRecord,
   WhisperDraftRequest,
+  UnassignedClinicalFact,
 } from "./types.ts";
 import type {
   CandidateSource,
@@ -34,6 +35,19 @@ const recordFieldKeyByClinicalId: Record<string, RecordFieldKey> = {
   impression: "impression",
   outcome: "outcome",
 };
+
+export function workflowDraftToUnassignedFacts(
+  workflow: Pick<ClinicalRecordWorkflowResponse, "draft">,
+): UnassignedClinicalFact[] {
+  const facts = new Map<string, UnassignedClinicalFact>();
+  for (const item of workflow.draft.review_items) {
+    const fact = item.unassigned_fact;
+    if (fact?.fact_id && fact.fact && Array.isArray(fact.evidence)) {
+      facts.set(fact.fact_id, fact);
+    }
+  }
+  return [...facts.values()];
+}
 
 export interface DraftDialogueTurn {
   speaker: string;

@@ -98,6 +98,8 @@ def project_compact_primary_draft(
     compact_validation: Mapping[str, Any],
     api3_document: Mapping[str, Any],
     translated_segments: list[dict[str, Any]] | None = None,
+    *,
+    candidate_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project model-authored Compact v3 text into the legacy UI envelope.
 
@@ -189,6 +191,22 @@ def project_compact_primary_draft(
     for index, issue in enumerate(compact_validation.get("issues", [])):
         if not isinstance(issue, Mapping):
             continue
+        unassigned: dict[str, Any] = {}
+        if issue.get("issue_code") == "UNASSIGNED_FACT":
+            fact_id = str(issue.get("fact_id") or "")
+            fact = facts.get(fact_id)
+            fact = fact if isinstance(fact, Mapping) else {}
+            snapshot = (candidate_snapshots or {}).get(str(fact.get("candidate_ref") or ""))
+            unassigned = {
+                "unassigned_fact": {
+                    "fact_id": fact_id,
+                    "fact": copy.deepcopy(dict(fact)),
+                    "candidate_label": snapshot.get("canonical") if isinstance(snapshot, Mapping) else None,
+                    "evidence": _field_evidence(
+                        {"fact_refs": [fact_id]}, facts, segments_by_id, translations,
+                    ),
+                },
+            }
         for canonical_id in issue.get("field_ids", []) or [None]:
             legacy_id = CANONICAL_TO_LEGACY_FIELD_ID.get(str(canonical_id or ""))
             review_items.append(
@@ -208,6 +226,7 @@ def project_compact_primary_draft(
                     ],
                     "compact_issue": copy.deepcopy(dict(issue)),
                     "needs_review": True,
+                    **unassigned,
                 }
             )
     return {"fields": projected_fields, "review_items": review_items}

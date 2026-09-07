@@ -52,7 +52,7 @@ _SUPPORTED_FIELD_SOURCES = {
     "history": "history_of_present_illness",
     "past-history": "past_history",
     "medication": "medications",
-    "allergy": "allergy",
+    "allergy": "drug_allergy",
     "social": "social_history",
     "review-of-systems": "review_of_systems",
     "physical": "physical_examination",
@@ -4634,6 +4634,7 @@ def run_clinical_workflow(
             compact_primary_result["validation"],
             api3_document,
             translated_segments,
+            candidate_snapshots=compact_primary_snapshots,
         )
         candidate_reviews = _review_items(
             api3_document,

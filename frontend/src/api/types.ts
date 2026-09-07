@@ -48,7 +48,28 @@ export interface ClinicalCandidateProvenance {
   similarity?: number | null;
 }
 
+export interface UnassignedClinicalFact {
+  fact_id: string;
+  fact: {
+    text?: string;
+    type?: string;
+    assertion?: string;
+    candidate_ref?: string;
+    values?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  candidate_label?: string | null;
+  evidence: Array<{
+    segment_id: string;
+    start?: number;
+    end?: number;
+    raw_text?: string;
+    translated_text_en?: string;
+  }>;
+}
+
 export interface ClinicalDraftReviewItem {
+  unassigned_fact?: UnassignedClinicalFact;
   id: string;
   type?: string;
   field_id: string;
@@ -127,6 +148,7 @@ export interface PersistedClinicalRecord {
     record: Record<string, string>;
     field_statuses?: Record<string, string> | null;
     field_provenance?: Record<string, unknown>;
+    unassigned_facts?: UnassignedClinicalFact[];
     generated?: boolean;
     whisper_payload?: WhisperDraftRequest;
     conversation_sent_at?: string;

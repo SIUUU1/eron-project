@@ -222,6 +222,35 @@ class CompactRecordLeanContractTests(unittest.TestCase):
         self.assertEqual(draft["fields"]["chief"]["status"], "empty")
         self.assertEqual(draft["fields"]["chief"]["information_status"], "NOT_ASSESSED")
 
+    def test_unassigned_fact_preserves_assertion_all_evidence_and_snapshot_label(self):
+        facts = {
+            "f1": {"type": "MATCHED_TERM", "candidate_ref": "cr_one",
+                   "assertion": "DENIED", "segments": ["seg_0001", "seg_0002"]},
+            "f2": {"type": "NARRATIVE", "text": "Father died of MI",
+                   "assertion": "PRESENT", "segments": ["missing"]},
+        }
+        record = {"facts": facts, "fields": {}}
+        original = copy.deepcopy(record)
+        validation = {"status": "REVIEW", "issues": [
+            {"issue_code": "UNASSIGNED_FACT", "fact_id": key, "field_ids": []}
+            for key in facts
+        ]}
+        draft = project_compact_primary_draft(
+            record, validation, {"segments": _segments(2)},
+            [{"segment_id": "seg_0001", "translated_text_en": "No contrast allergy"}],
+            candidate_snapshots={"cr_one": {"canonical": "Contrast media allergy"}},
+        )
+        first, second = [item["unassigned_fact"] for item in draft["review_items"]]
+        self.assertEqual(first["fact"], facts["f1"])
+        self.assertEqual(first["candidate_label"], "Contrast media allergy")
+        self.assertEqual([item["segment_id"] for item in first["evidence"]],
+                         ["seg_0001", "seg_0002"])
+        self.assertEqual(first["evidence"][0]["translated_text_en"], "No contrast allergy")
+        self.assertEqual(second["fact"]["text"], "Father died of MI")
+        self.assertEqual(second["evidence"], [])
+        self.assertEqual(record, original)
+        self.assertTrue(all(field["value"] == "" for field in draft["fields"].values()))
+
     def test_backend_rejects_wrong_lean_version_even_after_model_validation(self):
         validation = validate_lean_record(
             {"schema_version": "wrong", "facts": {}, "fields": {}},

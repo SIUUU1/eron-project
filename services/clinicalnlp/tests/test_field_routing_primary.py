@@ -103,6 +103,24 @@ class _RecordingResolver:
 
 
 class FieldRoutingPrimaryWorkflowTests(unittest.TestCase):
+    def test_public_workflow_preserves_unassigned_fact_review_details(self):
+        detail = {
+            "fact_id": "f1",
+            "fact": {"type": "NARRATIVE", "text": "Father died of MI",
+                     "assertion": "PRESENT", "segments": ["seg_1"]},
+            "candidate_label": None,
+            "evidence": [{"segment_id": "seg_1", "raw_text": "아버지 심근경색",
+                          "translated_text_en": "Father died of MI"}],
+        }
+        result = to_clinical_workflow_v2({
+            "draft": {"fields": {}, "review_items": [{
+                "id": "unassigned:f1", "field_id": "workflow", "needs_review": True,
+                "unassigned_fact": detail,
+            }]},
+        })
+        self.assertEqual(result["draft"]["review_items"][0]["unassigned_fact"], detail)
+        self.assertEqual(result["draft"]["fields"]["past_history"]["value"], "")
+
     def test_multiple_explicit_chief_complaints_are_separated_with_commas(self):
         cases = (
             ("seg_0001", "배가 아파요."),
