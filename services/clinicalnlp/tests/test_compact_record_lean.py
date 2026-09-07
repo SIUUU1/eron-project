@@ -291,6 +291,23 @@ class CompactRecordLeanContractTests(unittest.TestCase):
         self.assertTrue(result["record"]["facts"])
         self.assertIn("chief_complaint", result["record"]["fields"])
 
+    def test_single_and_chunked_field_prompts_keep_chief_and_nrs_display_contract(self):
+        for count in (1, 17):
+            with self.subTest(segment_count=count):
+                client = _LeanClient()
+                extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
+                extractor.generate_compact_record_lean({"segments": _segments(count)}, {})
+                prompts = [call["system_prompt"] for call in client.calls
+                           if call["name"] != "clinical_record_compact_facts_v1"]
+                self.assertTrue(prompts)
+                for prompt in prompts:
+                    self.assertIn("Chest pain, Dyspnea", prompt)
+                    self.assertIn("NRS 8 / Left chest", prompt)
+                    self.assertIn("NRS - / Left chest", prompt)
+                    self.assertIn("NRS 8 / -", prompt)
+                    self.assertIn("NRS - / -", prompt)
+                    self.assertIn("retain the supported wording", prompt)
+
     def test_failed_chunk_preserves_successful_facts_and_marks_partial(self):
         client = _LeanClient(fail_segment_id="seg_0017")
         extractor = LlamaServerClinicalExtractor("http://unused", llm_client=client)
