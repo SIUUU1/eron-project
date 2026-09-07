@@ -11,9 +11,10 @@ and all resolvable source `evidence` with timestamps, raw text and translation.
 Assertions are preserved, including DENIED and UNCERTAIN. Missing evidence is not
 invented. This change performs no additional retrieval or LLM requests.
 
-The records UI displays these separately as `초안 미반영 정보`, including assertion
-and source context. It does not append text, choose a clinical field, or mark the
-information resolved automatically. Draft saves retain the list in the existing
+The records UI currently hides the `초안 미반영 정보` panel at the user's request.
+The reusable panel component is retained but is not rendered by the records route.
+This does not append text, choose a clinical field, or mark information resolved.
+Draft saves still retain the list in the existing
 JSON `record_payload.unassigned_facts`; older drafts without this key show no list.
 Replacing the source clears the old list; successful regeneration replaces it.
 

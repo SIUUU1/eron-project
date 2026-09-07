@@ -58,7 +58,6 @@ import {
   type AudioRecorderState,
 } from "@/lib/browser-audio-recorder";
 import { FieldProvenancePanel } from "@/components/records/field-provenance-panel";
-import { UnassignedFactsPanel } from "@/components/records/unassigned-facts-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1456,7 +1455,6 @@ function RecordWorkflow({
                 </p>
               ) : null}
               <ScrollArea className="h-[420px] pr-3">
-                <UnassignedFactsPanel facts={unassignedFacts} />
                 <div className="space-y-3">
                   {fieldOrder.map((key) => {
                     const provenance = fieldProvenance[key];
