@@ -23,12 +23,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 export const Route = createFileRoute("/monitoring/")({
   head: () => ({
     meta: [
-      { title: "환자 모니터링 · ER-GUARD AI" },
       {
         name: "description",
         content: "응급실 재실 환자를 내원시간 순으로 확인하고 악화 예측 상태를 조회합니다.",
       },
-      { property: "og:title", content: "환자 모니터링 · ER-GUARD AI" },
+      { property: "og:title", content: "환자 모니터링 · ER:ON(이로운)" },
       {
         property: "og:description",
         content: "응급실 재실 환자 목록과 악화 예측 상태를 확인하는 모니터링 화면.",

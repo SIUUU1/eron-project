@@ -45,3 +45,22 @@ CREATE INDEX IF NOT EXISTS ix_bed_assign_stay      ON app.bed_assignment (ed_sta
 -- 값이라(app.v_demo_stay) 인덱싱 대상이 아니다. 300 stay 규모에서는 불필요하다.
 
 -- mimic.ed_diagnosis 는 PK(stay_id, seq_num) 선행 컬럼으로 충분 → 별도 인덱스 없음
+
+-- 악화 라벨 원천: 라벨 판정은 코호트의 hadm_id 로 이벤트를 훑는다.
+-- 승압제 에피소드는 (icu stay, itemid) 별로 시간순 스캔하므로 그 조합을 따로 건다.
+CREATE INDEX IF NOT EXISTS ix_procedureevents_hadm_time ON mimic.procedureevents (hadm_id, starttime);
+CREATE INDEX IF NOT EXISTS ix_inputevents_hadm_time     ON mimic.inputevents (hadm_id, starttime);
+CREATE INDEX IF NOT EXISTS ix_inputevents_stay_item     ON mimic.inputevents (icu_stay_id, itemid, starttime);
+CREATE INDEX IF NOT EXISTS ix_emar_hadm_time            ON mimic.emar (hadm_id, charttime);
+CREATE INDEX IF NOT EXISTS ix_prescriptions_hadm_time   ON mimic.prescriptions (hadm_id, starttime);
+
+-- 모델 성능 모니터링
+--
+-- model_outcome 의 (ed_stay_id, prediction_time) 는 UNIQUE 제약
+-- (ed_stay_id, prediction_time, label_definition) 의 선행 컬럼이라 별도 인덱스를 만들지 않는다.
+-- 아직 평가하지 않은 예측을 고를 때 evaluation_end_time 으로 훑으므로 그것만 건다.
+CREATE INDEX IF NOT EXISTS ix_model_outcome_eval_end  ON app.model_outcome (evaluation_end_time);
+CREATE INDEX IF NOT EXISTS ix_model_metric_version    ON app.model_performance_metric (model_version, evaluation_period_end DESC);
+
+-- app.model_drift_metric 에는 인덱스를 만들지 않는다. 현재 비어 있고(feature 분포 미저장),
+-- 채워지더라도 feature 100개 × snapshot 규모라 전체 스캔으로 충분하다.

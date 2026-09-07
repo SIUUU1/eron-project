@@ -14,24 +14,30 @@ import {
   TrendingUp,
 } from "lucide-react";
 
-import { getAlerts, getBeds, getReassessQueue, dashboardKeys } from "@/api/dashboard";
+import {
+  getAlerts,
+  getBeds,
+  getIncompleteRecords,
+  getReassessQueue,
+  dashboardKeys,
+} from "@/api/dashboard";
 import { bandMeta, formatTime, sexLabel } from "@/api/display";
-import type { BedItem, BedsResponse } from "@/api/types";
+import type { BedItem, BedsResponse, ClinicalRecordRequiredField } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { bedStatusMeta, incompleteRecords } from "@/lib/mock-data";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { bedStatusMeta } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "응급실 현황 · ER-GUARD AI" },
       {
         name: "description",
         content: "전체 병상 현황판과 실시간 AI 경고를 한 화면에서 확인하는 응급실 현황 대시보드.",
       },
-      { property: "og:title", content: "응급실 현황 · ER-GUARD AI" },
+      { property: "og:title", content: "응급실 현황 · ER:ON(이로운)" },
       {
         property: "og:description",
         content: "전체 병상 현황판과 실시간 AI 경고를 확인하는 응급실 현황 대시보드.",
@@ -48,6 +54,29 @@ type BedZoneItem = BedsResponse["zones"][number];
  * 데모 시계가 흐르면 퇴실·경보·위험도가 바뀌므로 화면이 따라가야 한다.
  */
 const REFRESH_MS = 30_000;
+
+const incompleteRecordFieldLabels: Record<ClinicalRecordRequiredField, string> = {
+  chief_complaint: "주호소",
+  pain_assessment: "통증평가",
+  history_of_present_illness: "현병력",
+  past_history: "과거력",
+  medications: "복용약",
+  allergy: "알레르기",
+  social_history: "사회력",
+  review_of_systems: "계통문진",
+  physical_examination: "신체검진",
+  outcome: "응급진료결과",
+};
+
+function formatMissingRecordFields(fields: ClinicalRecordRequiredField[]): string {
+  const firstField = fields[0];
+  if (!firstField) return "필수 항목 누락";
+
+  const firstLabel = incompleteRecordFieldLabels[firstField];
+  if (fields.length === 1) return `${firstLabel} 누락`;
+
+  return `${firstLabel} 외 ${fields.length - 1}개 항목 누락`;
+}
 
 /** 현황판 페이지 구성 — 1페이지 48병상, 2페이지 36병상 (전체 84병상). */
 const BED_PAGE_SIZES = [48, 36];
@@ -136,6 +165,11 @@ function DashboardPage() {
     queryFn: ({ signal }) => getReassessQueue(signal),
     refetchInterval: REFRESH_MS,
   });
+  const incompleteRecordsQ = useQuery({
+    queryKey: dashboardKeys.incompleteRecords,
+    queryFn: ({ signal }) => getIncompleteRecords(5, signal),
+    refetchInterval: REFRESH_MS,
+  });
 
   const beds = bedsQ.data;
 
@@ -174,7 +208,7 @@ function DashboardPage() {
     },
     {
       label: "기록 미완료",
-      value: `${incompleteRecords.length}건`,
+      value: incompleteRecordsQ.data ? `${incompleteRecordsQ.data.count}건` : "…",
       icon: ClipboardList,
       tone: "text-risk-watch",
     },
@@ -193,18 +227,6 @@ function DashboardPage() {
           <RefreshCw className="size-3.5" /> {REFRESH_MS / 1000}초마다 자동갱신
         </div>
       </div>
-
-      <p className="flex items-center gap-1.5 rounded-md border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
-        <Info className="size-3.5 shrink-0" />
-        환자·활력징후는 MIMIC-IV 실데이터입니다. 병상 배치는 데모 값이며,
-        {/* 로딩 중(beds === undefined)에는 근거를 단정하지 않는다 */}
-        {beds
-          ? beds.summary.pending > 0
-            ? ` 병상 색상은 AI 예측 기준이며, 첫 예측 전인 ${beds.summary.pending}병상은 흰색(예측 대기)입니다.`
-            : " 병상 색상은 AI 예측 기준입니다."
-          : ""}
-        &nbsp;기록 미완료 항목은 아직 mock 데이터입니다.
-      </p>
 
       <div className="grid grid-cols-5 gap-4">
         {summaryCards.map((c) => (
@@ -352,6 +374,28 @@ function DashboardPage() {
             <CardHeader className="border-b py-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Bell className="size-4 text-mint" /> 실시간 AI 경고
+                {/* 안내문구는 항상 노출하지 않고 이 아이콘에 hover 했을 때만 띄운다 */}
+                <TooltipProvider delayDuration={100}>
+                  <Tooltip>
+                    <TooltipTrigger
+                      type="button"
+                      aria-label="실시간 AI 경고 안내"
+                      className="-ml-1 rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <Info className="size-3.5" />
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="top"
+                      align="start"
+                      collisionPadding={12}
+                      className="max-w-xs text-[11px] font-normal leading-relaxed"
+                    >
+                      지금 🔴 재평가 필요 상태인 재실 환자만 표시합니다(등급·확률은 최신 예측 기준).
+                      시각은 경보가 켜진 시점이며, 문구는 예측에 기여한 신호로 임상적 인과관계가
+                      아닙니다.
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <Badge variant="outline" className={`ml-auto ${bandMeta.red.badge}`}>
                   <span className={`mr-1 size-1.5 rounded-full ${bandMeta.red.dot}`} />
                   {bandMeta.red.label}
@@ -437,37 +481,63 @@ function DashboardPage() {
                   </ul>
                 )}
               </div>
-              <p className="border-t px-4 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                지금 🔴 재평가 필요 상태인 재실 환자만 표시합니다(등급·확률은 최신 예측 기준).
-                시각은 경보가 켜진 시점이며, 문구는 예측에 기여한 신호로 임상적 인과관계가 아닙니다.
-              </p>
             </CardContent>
           </Card>
 
           <Card>
-            <CardHeader className="border-b py-3">
-              <CardTitle className="text-sm">
-                기록 미완료 알림
-                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">(mock)</span>
-              </CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between border-b py-3">
+              <CardTitle className="text-sm">기록 미완료 알림</CardTitle>
+              {incompleteRecordsQ.data &&
+              incompleteRecordsQ.data.count > incompleteRecordsQ.data.items.length ? (
+                <Link
+                  to="/records"
+                  aria-label="기록 미완료 전체 목록 보기"
+                  className="text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  더보기 &gt;
+                </Link>
+              ) : null}
             </CardHeader>
-            <CardContent className="space-y-2 pt-3">
-              {incompleteRecords.map((r) => (
-                <div key={r.patient} className="flex items-start justify-between gap-2 text-sm">
-                  {r.patientId ? (
-                    <Link
-                      to="/records/$patientId"
-                      params={{ patientId: r.patientId }}
-                      className="font-medium hover:underline"
-                    >
-                      {r.patient}
-                    </Link>
-                  ) : (
-                    <span className="font-medium">{r.patient}</span>
-                  )}
-                  <span className="text-right text-xs text-risk-rising">{r.missing}</span>
+            <CardContent className="pt-3">
+              {incompleteRecordsQ.isPending ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-5 w-full" />
+                  <Skeleton className="h-5 w-full" />
+                  <Skeleton className="h-5 w-full" />
                 </div>
-              ))}
+              ) : incompleteRecordsQ.isError ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">
+                  기록 미완료 정보를 불러오지 못했습니다
+                </p>
+              ) : incompleteRecordsQ.data.items.length === 0 ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">
+                  기록 미완료 환자가 없습니다
+                </p>
+              ) : (
+                <div className="max-h-48 space-y-2 overflow-y-auto">
+                  {incompleteRecordsQ.data.items.map((record) => (
+                    <div
+                      key={record.stay_id}
+                      className="flex items-start justify-between gap-2 text-sm"
+                    >
+                      <Link
+                        to="/records/$patientId"
+                        params={{ patientId: record.stay_id }}
+                        className="font-medium hover:underline"
+                      >
+                        {record.display_name
+                          ? `${record.display_name}(${record.stay_id})`
+                          : `ED-${record.stay_id}`}
+                      </Link>
+                      <span className="text-right text-xs text-risk-rising">
+                        {record.reason === "RECORD_NOT_CREATED"
+                          ? "기록 미작성"
+                          : formatMissingRecordFields(record.missing_fields)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

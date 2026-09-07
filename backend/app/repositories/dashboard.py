@@ -67,6 +67,26 @@ def list_beds(db: Session) -> list[Any]:
     return list(db.execute(sql).mappings())
 
 
+def list_current_stay_records(db: Session) -> list[Any]:
+    """현재 재실 환자와 응급진료기록을 한 번에 조회한다."""
+    sql = text("""
+        SELECT e.stay_id,
+               al.display_name,
+               e.intime,
+               cr.status AS record_status,
+               cr.record_payload
+        FROM mimic.edstays e
+        JOIN app.v_demo_stay d ON d.ed_stay_id = e.stay_id
+        LEFT JOIN app.patient_alias al ON al.ed_stay_id = e.stay_id
+        LEFT JOIN public.clinical_records cr
+               ON cr.ed_stay_id = CAST(e.stay_id AS text)
+        WHERE d.is_active
+          AND NOT d.has_departed
+        ORDER BY e.intime ASC NULLS LAST, e.stay_id ASC
+    """)
+    return list(db.execute(sql).mappings())
+
+
 # 🔔 재검토 필요 알림.
 #
 #   알림 1건 = **예측 1시점**이다(환자 1명이 아니다). 같은 환자라도 예측 시점이 다르면

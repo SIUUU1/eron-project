@@ -222,6 +222,33 @@ def upsert_predictions(db: Session, rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
+_UPSERT_PREDICTION_FEATURE = text("""
+    INSERT INTO app.prediction_feature
+        (ed_stay_id, prediction_time, model_version, feature_hash, feature_values)
+    VALUES
+        (:ed_stay_id, :prediction_time, :model_version, :feature_hash,
+         CAST(:feature_values AS jsonb))
+    ON CONFLICT (ed_stay_id, prediction_time, model_version) DO UPDATE SET
+        feature_hash   = EXCLUDED.feature_hash,
+        feature_values = EXCLUDED.feature_values,
+        created_at     = now()
+""")
+
+
+def upsert_prediction_features(db: Session, rows: list[dict[str, Any]]) -> int:
+    """예측 시점의 model feature 값을 기록한다 (drift 모니터링 전용).
+
+    🔑 app.prediction 과 별도 테이블이다. detail 에 넣으면 병상·알림·환자목록 응답에
+       feature 100개가 그대로 실려 대시보드가 무거워진다.
+    ⚠ 실패해도 예측 저장을 되돌리지 않는다 — 위험도가 화면에 뜨는 것이 우선이다.
+    """
+    if not rows:
+        return 0
+    db.execute(_UPSERT_PREDICTION_FEATURE, rows)
+    db.commit()
+    return len(rows)
+
+
 def stay_exists(db: Session, stay_id: int) -> bool:
     """조회 가능한 stay 인가 = 데모 예측 대상인가.
 

@@ -12,6 +12,7 @@ from app.schemas.ed.dashboard import (
     AlertsResponse,
     BedsResponse,
     DashboardSummary,
+    IncompleteRecordsResponse,
     ReassessResponse,
 )
 from app.services import ed as svc
@@ -60,6 +61,25 @@ def get_beds(db: Session = Depends(get_db)) -> BedsResponse:
     rows = repo.list_beds(db)
     zones, summary, any_prediction = svc.build_bed_zones(rows)
     return BedsResponse(summary=summary, zones=zones, meta=svc.beds_meta(any_prediction))
+
+
+@router.get(
+    "/dashboard/incomplete-records",
+    response_model=IncompleteRecordsResponse,
+    summary="기록 미완료 알림",
+    description=(
+        "현재 재실 환자 중 응급진료기록이 없거나 DRAFT의 필수 필드가 누락된 환자를 "
+        "오래 체류한 순서로 반환한다. SIGNED 기록과 누락 없는 DRAFT는 제외한다."
+    ),
+)
+def get_incomplete_records(
+    limit: int = Query(5, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> IncompleteRecordsResponse:
+    items, count = svc.to_incomplete_record_items(
+        repo.list_current_stay_records(db), limit=limit
+    )
+    return IncompleteRecordsResponse(count=count, items=items)
 
 
 @router.get(

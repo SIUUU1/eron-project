@@ -145,6 +145,67 @@ CREATE TABLE IF NOT EXISTS mimic.chartevents (
     valuenum    DOUBLE PRECISION
 );
 
+
+-- ---------------------------------------------------------------------
+-- 악화 라벨 원천 (feature 아님 — 성능 모니터링의 outcome 판정에만 쓴다)
+--
+-- 🔑 학습 파이프라인(`src/data/build_events.py`)이 y_deterioration 을 만들 때 읽는
+--    원천 4개다. 예측에는 필요 없고, "예측이 맞았는지" 를 판정할 때만 필요하다.
+--    악화 정의: (t, t+3h] 안의 호흡부전 처치 OR 승압제 OR CPR OR 사망 OR 생리학적 악화 onset.
+--    생리학적 악화는 mimic.ed_vitalsign + mimic.chartevents 로 산출하므로 여기 없다.
+--
+-- 🔑 itemid 화이트리스트를 걸지 않는다. mimic.labevents 와 같은 이유다 — 걸어두면
+--    라벨 정의가 개정될 때(승압제 목록 추가 등) 조용히 결측이 된다. 데모 데이터셋
+--    기준 네 파일 합쳐 8만 행이 안 되므로 전량을 담아도 비용이 없다.
+--    실제 판정 조건은 backend/app/services/model_monitoring_label.py 한 곳에만 둔다.
+--
+-- 🔑 hadm_id 에 FK 를 걸지 않는다. mimic.labevents 와 같은 이유이며, 코호트 밖 입원의
+--    행이 섞여 들어와도 라벨 조인에서 자연히 걸러진다.
+-- ---------------------------------------------------------------------
+
+-- 호흡부전 처치(삽관·침습/비침습 환기)·CPR. 판정은 starttime 기준이다.
+CREATE TABLE IF NOT EXISTS mimic.procedureevents (
+    id          BIGSERIAL PRIMARY KEY,
+    icu_stay_id BIGINT,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    itemid      INTEGER   NOT NULL,
+    starttime   TIMESTAMP NOT NULL
+);
+
+-- 승압제 1순위 원천. 연속 주입행을 에피소드로 묶어야 하므로 endtime 도 담는다
+-- (gap 1h 초과면 새 에피소드 · 지속 1h 미만 에피소드는 이벤트로 세지 않는다).
+CREATE TABLE IF NOT EXISTS mimic.inputevents (
+    id          BIGSERIAL PRIMARY KEY,
+    icu_stay_id BIGINT,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    itemid      INTEGER   NOT NULL,
+    starttime   TIMESTAMP NOT NULL,
+    endtime     TIMESTAMP
+);
+
+-- 승압제 2순위 원천(실제 투여 시작 시각). 약물명·투여 이벤트 문자열로 판정한다.
+CREATE TABLE IF NOT EXISTS mimic.emar (
+    id          BIGSERIAL PRIMARY KEY,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    charttime   TIMESTAMP NOT NULL,
+    medication  TEXT,
+    event_txt   TEXT
+);
+
+-- 승압제 3순위 원천(처방 시각). route 가 정맥 투여인 것만 이벤트로 본다.
+CREATE TABLE IF NOT EXISTS mimic.prescriptions (
+    id          BIGSERIAL PRIMARY KEY,
+    subject_id  BIGINT    NOT NULL,
+    hadm_id     BIGINT,
+    starttime   TIMESTAMP NOT NULL,
+    drug        TEXT,
+    route       TEXT
+);
+
+
 -- ---------------------------------------------------------------------
 -- app 스키마
 -- ---------------------------------------------------------------------
@@ -165,6 +226,32 @@ CREATE TABLE IF NOT EXISTS app.prediction (
     created_at       TIMESTAMP NOT NULL DEFAULT now(),
     CONSTRAINT prediction_unique UNIQUE (ed_stay_id, model_version, prediction_time)
 );
+
+-- 예측 시점의 model feature 값 (drift 모니터링 전용).
+--
+-- 🔑 왜 app.prediction.detail 에 넣지 않는가
+--    detail 은 app.v_latest_prediction 을 통해 병상·알림·환자목록 응답에 그대로 실린다.
+--    거기에 feature 100개를 넣으면 대시보드 응답이 통째로 무거워진다. drift 는
+--    별도 화면에서만 쓰므로 조회 경로를 분리한다.
+--
+-- 🔑 feature 는 riskmodel 이 만든 값을 그대로 받아 적는다. backend 가 다시 만들지 않는다
+--    (repositories/ml_features.py 주석과 같은 이유 — 규칙이 두 곳에 생기면 조용히 어긋난다).
+--    riskmodel 은 include_features=true 일 때만 실어 보낸다.
+--
+-- ⚠ 이름은 여기 저장하지 않는다. bundle.json["features"] 순서가 정본이고,
+--   feature_values 는 그 순서에 대응하는 값 배열이다. 이름을 행마다 반복하면 정본이 둘이 된다.
+CREATE TABLE IF NOT EXISTS app.prediction_feature (
+    ed_stay_id      BIGINT    NOT NULL,
+    prediction_time TIMESTAMP NOT NULL,   -- MIMIC 원본 시간축 (app.prediction 과 같다)
+    model_version   TEXT      NOT NULL,
+    -- feature_hash 가 다르면 feature 구성이 바뀐 것이다. 섞어서 분포를 내면 안 된다.
+    feature_hash    TEXT,
+    -- 숫자 배열. 결측은 null 이다(0 이 아니다). values 는 SQL 예약어라 이름을 붙여 쓴다.
+    feature_values  JSONB     NOT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (ed_stay_id, prediction_time, model_version)
+);
+
 
 -- 코호트 정의 (선별 결과).
 --
@@ -235,54 +322,6 @@ CREATE TABLE IF NOT EXISTS app.bed_assignment (
     released_at TIMESTAMP
 );
 
--- 의료진 "재검토 완료" 확인 상태.
---
--- 🔑 경고 자체는 app.prediction 에서 조회 시점에 파생한다(app.alert 는 쓰지 않는다).
---    여기 저장하는 것은 **의료진이 확인했다는 사실** 하나뿐이다.
---
--- 🔑 PK 에 prediction_time 을 포함하는 이유
---    확인은 "그 시점 예측에 대한 확인"이다. 다음 예측이 생기면 최신 prediction_time 이
---    달라져 이 행과 짝이 맞지 않으므로 확인 표시가 저절로 풀린다.
---    (별도 리셋 스케줄러가 필요 없다 — 최신 예측과의 관계로 계산한다)
---
--- ⚠ 모델의 alarm/band 를 바꾸지 않는다. AI 상태와 의료진 확인 상태는 별개다.
-CREATE TABLE IF NOT EXISTS app.prediction_ack (
-    ed_stay_id      BIGINT    NOT NULL,
-    -- app.prediction.prediction_time 과 같은 **MIMIC 원본 시간축**이다.
-    prediction_time TIMESTAMP NOT NULL,
-    -- ⏱ 실제 서버 시각(감사 기록용).
-    acknowledged_at TIMESTAMP NOT NULL DEFAULT now(),
-    -- ⏱ **데모 시각**. 확인이 유효한지는 이 값으로 판정한다.
-    --    데모 시계를 되돌리면 그보다 나중에 한 확인은 '아직 하지 않은 것'이 되어야 한다
-    --    (기록을 지우지 않고 시간 기준으로만 무효화한다 — 다시 앞으로 가면 되살아난다).
-    acknowledged_demo_at TIMESTAMP NOT NULL DEFAULT app.demo_now(),
-    acknowledged_by TEXT,
-    created_at      TIMESTAMP NOT NULL DEFAULT now(),
-    PRIMARY KEY (ed_stay_id, prediction_time)
-);
-
--- 기존 배포본 보완 (컬럼이 없으면 추가하고 데모 현재 시각으로 채운다)
-ALTER TABLE app.prediction_ack
-    ADD COLUMN IF NOT EXISTS acknowledged_demo_at TIMESTAMP;
-UPDATE app.prediction_ack SET acknowledged_demo_at = app.demo_now()
- WHERE acknowledged_demo_at IS NULL;
-ALTER TABLE app.prediction_ack
-    ALTER COLUMN acknowledged_demo_at SET NOT NULL,
-    ALTER COLUMN acknowledged_demo_at SET DEFAULT app.demo_now();
-
-
--- 모델 연동 전까지 비어 있다 (가짜 경고를 만들지 않는다)
-CREATE TABLE IF NOT EXISTS app.alert (
-    id              BIGSERIAL PRIMARY KEY,
-    ed_stay_id      BIGINT    NOT NULL,
-    alert_time      TIMESTAMP NOT NULL,
-    level           TEXT      NOT NULL,
-    message         TEXT      NOT NULL,
-    acknowledged_at TIMESTAMP,
-    acknowledged_by TEXT
-);
-
-
 -- ---------------------------------------------------------------------
 -- 데모 시계
 --
@@ -341,3 +380,151 @@ LANGUAGE sql STABLE AS $$
         now()::timestamp
     )
 $$;
+
+-- 의료진 "재검토 완료" 확인 상태.
+--
+-- 🔑 경고 자체는 app.prediction 에서 조회 시점에 파생한다(app.alert 는 쓰지 않는다).
+--    여기 저장하는 것은 **의료진이 확인했다는 사실** 하나뿐이다.
+--
+-- 🔑 PK 에 prediction_time 을 포함하는 이유
+--    확인은 "그 시점 예측에 대한 확인"이다. 다음 예측이 생기면 최신 prediction_time 이
+--    달라져 이 행과 짝이 맞지 않으므로 확인 표시가 저절로 풀린다.
+--    (별도 리셋 스케줄러가 필요 없다 — 최신 예측과의 관계로 계산한다)
+--
+-- ⚠ 모델의 alarm/band 를 바꾸지 않는다. AI 상태와 의료진 확인 상태는 별개다.
+CREATE TABLE IF NOT EXISTS app.prediction_ack (
+    ed_stay_id      BIGINT    NOT NULL,
+    -- app.prediction.prediction_time 과 같은 **MIMIC 원본 시간축**이다.
+    prediction_time TIMESTAMP NOT NULL,
+    -- ⏱ 실제 서버 시각(감사 기록용).
+    acknowledged_at TIMESTAMP NOT NULL DEFAULT now(),
+    -- ⏱ **데모 시각**. 확인이 유효한지는 이 값으로 판정한다.
+    --    데모 시계를 되돌리면 그보다 나중에 한 확인은 '아직 하지 않은 것'이 되어야 한다
+    --    (기록을 지우지 않고 시간 기준으로만 무효화한다 — 다시 앞으로 가면 되살아난다).
+    acknowledged_demo_at TIMESTAMP NOT NULL DEFAULT app.demo_now(),
+    acknowledged_by TEXT,
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (ed_stay_id, prediction_time)
+);
+
+-- 기존 배포본 보완 (컬럼이 없으면 추가하고 데모 현재 시각으로 채운다)
+ALTER TABLE app.prediction_ack
+    ADD COLUMN IF NOT EXISTS acknowledged_demo_at TIMESTAMP;
+UPDATE app.prediction_ack SET acknowledged_demo_at = app.demo_now()
+ WHERE acknowledged_demo_at IS NULL;
+ALTER TABLE app.prediction_ack
+    ALTER COLUMN acknowledged_demo_at SET NOT NULL,
+    ALTER COLUMN acknowledged_demo_at SET DEFAULT app.demo_now();
+
+
+-- 모델 연동 전까지 비어 있다 (가짜 경고를 만들지 않는다)
+CREATE TABLE IF NOT EXISTS app.alert (
+    id              BIGSERIAL PRIMARY KEY,
+    ed_stay_id      BIGINT    NOT NULL,
+    alert_time      TIMESTAMP NOT NULL,
+    level           TEXT      NOT NULL,
+    message         TEXT      NOT NULL,
+    acknowledged_at TIMESTAMP,
+    acknowledged_by TEXT
+);
+
+
+-- ---------------------------------------------------------------------
+-- AI 모델 성능 모니터링
+--
+-- 🔑 모델 메타데이터 테이블(model_registry)은 만들지 않는다.
+--    모델명·버전·threshold·feature 수·horizon 의 정본은 artifacts/bundle.json 이다.
+--    DB 에 복제하면 정본이 둘이 되고, 재학습 때 조용히 어긋난다.
+--
+-- 🔑 여기 있는 것은 **계산 결과 캐시**다. 원천은 app.prediction 과 mimic.* 이며,
+--    지우고 다시 계산해도 같은 값이 나온다.
+-- ---------------------------------------------------------------------
+
+-- 예측 1건과 그 관찰창의 실제 악화 여부.
+--
+-- 🔑 시간축은 전부 **MIMIC 원본 축**이다(app.prediction.prediction_time 과 같다).
+--    데모 시계는 "이 관찰창이 화면상 도래했는가" 만 판정하며 저장하지 않는다.
+--    demo_offset 은 stay 마다 다르므로(app.v_demo_stay) 저장하면 시계를 움직일 때 어긋난다.
+--
+-- 🔑 label_definition 이 UNIQUE 에 들어가는 이유
+--    악화 정의는 학습 사양에 딸린 값이다. 나중에 정의가 개정되면 새 정의로 행이 추가될 뿐
+--    기존 행을 덮어쓰지 않는다 — 과거 성능 수치의 근거가 사라지면 안 된다.
+CREATE TABLE IF NOT EXISTS app.model_outcome (
+    id                  BIGSERIAL PRIMARY KEY,
+    ed_stay_id          BIGINT    NOT NULL,
+    prediction_time     TIMESTAMP NOT NULL,
+    -- 악화 정의의 식별자. 예: training_v2.0.0_labelB_srcC_win3h
+    label_definition    TEXT      NOT NULL,
+    -- prediction_time + label_window_h. 이 시각이 지나야 판정할 수 있다.
+    evaluation_end_time TIMESTAMP NOT NULL,
+    -- 그 stay 의 관측 종료(obs_end). 관찰창이 이 시각을 넘으면 일부 이벤트를 볼 수 없다.
+    observation_end     TIMESTAMP,
+    -- 1 = 악화 발생, 0 = 미발생. 중도절단이면 NULL 이고 지표 계산에서 빠진다.
+    outcome_label       SMALLINT  CHECK (outcome_label IN (0, 1)),
+    -- 양성일 때 어떤 이벤트였는지. resp_inv | resp_niv | cpr | vaso | death | abnormal
+    event_type          TEXT,
+    event_time          TIMESTAMP,
+    -- 관측 경로 자체가 없어 판정할 수 없는 행(입원 기록이 없어 처치·사망을 볼 수 없다).
+    -- 음성으로 세지 않는다 — 지표에서 제외한다.
+    is_censored         BOOLEAN   NOT NULL DEFAULT FALSE,
+    -- 학습 grid 는 첫 악화 시점에서 끊긴다(bundle.grid.truncate_at_first_event).
+    -- 그 이후 시점은 학습 분포에 없으므로 지표에서 제외하고 표시만 한다.
+    is_truncated        BOOLEAN   NOT NULL DEFAULT FALSE,
+    computed_at         TIMESTAMP NOT NULL DEFAULT now(),
+    CONSTRAINT model_outcome_unique UNIQUE (ed_stay_id, prediction_time, label_definition)
+);
+
+
+-- 기간별 성능 snapshot (이력).
+--
+-- 🔑 **평가 집합이 달라졌을 때만** 한 행이 늘어난다. 조회할 때마다 적으면 30초 폴링에
+--    하루 2,880 행이 쌓이는데 값은 대부분 같다. 평가 완료 건수·양성 건수·평가 구간 끝이
+--    직전 snapshot 과 같으면 적지 않는다(repositories/model_monitoring.record_metric_snapshot).
+--    지표 자체는 언제든 app.model_outcome 에서 다시 계산할 수 있다. 이 표는
+--    "그때는 이랬다" 를 남기기 위한 것이다 — 모델 교체 전후 비교 등.
+CREATE TABLE IF NOT EXISTS app.model_performance_metric (
+    id                      BIGSERIAL PRIMARY KEY,
+    model_version           TEXT      NOT NULL,
+    label_definition        TEXT      NOT NULL,
+    evaluation_period_start TIMESTAMP NOT NULL,
+    evaluation_period_end   TIMESTAMP NOT NULL,
+    -- sample_count = 기간 안의 전체 예측. evaluated 만 지표에 들어간다.
+    sample_count            INTEGER   NOT NULL DEFAULT 0,
+    evaluated_count         INTEGER   NOT NULL DEFAULT 0,
+    pending_count           INTEGER   NOT NULL DEFAULT 0,
+    censored_count          INTEGER   NOT NULL DEFAULT 0,
+    positive_count          INTEGER   NOT NULL DEFAULT 0,
+    -- 표본이 부족하면 NULL 이다. 0 이 아니다 — 0.0 은 "성능이 0" 으로 읽힌다.
+    pr_auc                  DOUBLE PRECISION,
+    auroc                   DOUBLE PRECISION,
+    recall                  DOUBLE PRECISION,
+    precision               DOUBLE PRECISION,
+    f1                      DOUBLE PRECISION,
+    true_positive           INTEGER,
+    true_negative           INTEGER,
+    false_positive          INTEGER,
+    false_negative          INTEGER,
+    threshold               DOUBLE PRECISION,
+    created_at              TIMESTAMP NOT NULL DEFAULT now()
+);
+
+
+-- Data drift.
+--
+-- ⚠ 현재는 비어 있다. 채우려면 예측 시점의 feature 100개 분포가 필요한데,
+--   app.prediction.detail 에는 기여 상위 신호만 남고 feature 벡터는 저장되지 않는다.
+--   backend 가 feature 를 다시 만드는 것은 금지다 — 그 규칙은 riskmodel 한 곳에만 둔다
+--   (repositories/ml_features.py 주석). riskmodel 이 feature row 를 함께 돌려주고
+--   그것을 저장하게 되면 그때 채운다. 그전까지 API 는 insufficient_data 를 반환한다.
+--   가짜 PSI 를 만들지 않는다.
+CREATE TABLE IF NOT EXISTS app.model_drift_metric (
+    id                BIGSERIAL PRIMARY KEY,
+    model_version     TEXT      NOT NULL,
+    feature_name      TEXT      NOT NULL,
+    psi               DOUBLE PRECISION,
+    status            TEXT      NOT NULL
+                      CHECK (status IN ('ok', 'warning', 'critical', 'insufficient_data')),
+    reference_source  TEXT,
+    sample_count      INTEGER,
+    computed_at       TIMESTAMP NOT NULL DEFAULT now()
+);

@@ -1,10 +1,11 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Activity, ClipboardCheck, LayoutDashboard, Settings, ShieldCheck } from "lucide-react";
+import { Activity, ClipboardCheck, Gauge, LayoutDashboard, Settings } from "lucide-react";
 
 const items = [
   { title: "응급실 현황", url: "/", icon: LayoutDashboard },
   { title: "환자 모니터링", url: "/monitoring", icon: Activity },
   { title: "AI 진료기록 및 누락 검사", url: "/records", icon: ClipboardCheck },
+  { title: "AI 모델 성능", url: "/model-monitoring", icon: Gauge },
   { title: "시스템 설정", url: "/settings", icon: Settings },
 ];
 
@@ -15,14 +16,21 @@ export function AppSidebar() {
 
   return (
     <aside className="flex w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground">
-      <div className="flex items-center gap-3 border-b border-sidebar-border px-5 py-4">
-        <div className="flex size-9 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
-          <ShieldCheck className="size-5" />
-        </div>
-        <div className="leading-tight">
-          <p className="text-base font-bold tracking-tight">ER-GUARD AI</p>
-          <p className="text-[11px] text-sidebar-foreground/60">ER:ON 응급의료센터</p>
-        </div>
+      <div className="flex items-center justify-center border-b border-sidebar-border px-5 py-4">
+        {/* 로고를 누르면 홈(응급실 현황)으로 돌아간다 */}
+        <Link
+          to="/"
+          aria-label="ER:ON 응급실 현황으로 이동"
+          className="rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+        >
+          <img
+            src="/eron-logo.png"
+            alt="predict Record ER:ON"
+            width={440}
+            height={321}
+            className="h-20 w-auto max-w-full object-contain"
+          />
+        </Link>
       </div>
 
       <nav className="flex flex-1 flex-col gap-1 p-3">

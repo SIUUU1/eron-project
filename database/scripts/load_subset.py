@@ -3,6 +3,7 @@
 
     python3 database/scripts/load_subset.py                # 기본 배치
     python3 database/scripts/load_subset.py --demo-start   # 시연용 배치
+    python3 database/scripts/load_subset.py --label-events # 악화 라벨 원천만 (성능 모니터링용)
 
 app.cohort 에 고정된 ED stay 만 적재한다. 전체 적재가 아니다.
 CSV 는 스트리밍으로 읽고, PostgreSQL COPY 로 밀어넣는다.
@@ -54,6 +55,13 @@ EVENTS_ONLY = "--events-only" in sys.argv
 # --raw-history : mimic.edstays / mimic.admissions 를 코호트 환자의 전체 ED 이력으로
 # 보완한다. 없는 행만 추가하므로 기존 시연 상태(app.demo_stay·bed_assignment)를 건드리지 않는다.
 RAW_HISTORY = "--raw-history" in sys.argv
+
+# --label-events : 악화 라벨 원천 4개(procedureevents · inputevents · emar · prescriptions)만
+# 적재한다. 모델 성능 모니터링이 "예측이 맞았는지" 를 판정할 때만 쓰는 원천이며,
+# 예측 자체에는 필요 없다. **이미 적재돼 있으면 건너뛴다** — 기존 데이터를 지우지 않는다.
+# 다시 적재하려면 --reload-label-events 를 함께 준다(이 4개 테이블만 비운다).
+LABEL_EVENTS = "--label-events" in sys.argv
+RELOAD_LABEL_EVENTS = "--reload-label-events" in sys.argv
 
 # chartevents 에 whitelist 를 걸되, 목록은 모델 번들에서 읽는다.
 # 코드에 itemid 를 적어두면 모델이 개정될 때 조용히 어긋난다(실제로 224690 이 빠져 있었다).
@@ -320,9 +328,159 @@ def events_only() -> int:
     return 0
 
 
+def load_label_events(hosp: Path, icu: Path, subjects: set) -> dict[str, int]:
+    """악화 라벨 원천 4개 적재.
+
+    🔑 feature 가 아니다. 모델 성능 모니터링이 (t, t+3h] 안의 실제 악화를 판정할 때만 쓴다.
+       학습 파이프라인 `src/data/build_events.py` 가 읽는 원천과 같다.
+
+    🔑 labevents 와 같은 기준으로 **코호트 subject 전체**를 담고 시간창을 걸지 않는다.
+       라벨 판정은 hadm_id 로 조인하지만, hadm 만으로 거르면 나중에 코호트를 넓혔을 때
+       조용히 결측이 된다. 데모 데이터셋 기준 네 파일 합쳐 8만 행이 안 된다.
+
+    🔑 itemid·약물명 화이트리스트를 여기서 걸지 않는다. 판정 조건은
+       backend/app/services/model_monitoring_label.py 한 곳에만 둔다 — 두 곳에 적으면 어긋난다.
+    """
+    counts: dict[str, int] = {}
+
+    # procedureevents: subject_id,hadm_id,stay_id,caregiver_id,starttime,endtime,storetime,itemid,...
+    def rows_procedureevents():
+        it = stream(require(icu / "procedureevents.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[4]:
+                yield [r_[2], r_[0], r_[1], r_[7], r_[4]]
+
+    counts["mimic.procedureevents"] = copy_rows(
+        "mimic.procedureevents",
+        ["icu_stay_id", "subject_id", "hadm_id", "itemid", "starttime"],
+        rows_procedureevents())
+    log(f"  procedureevents {counts['mimic.procedureevents']:>6}  (호흡부전 처치 · CPR)")
+
+    # inputevents: subject_id,hadm_id,stay_id,caregiver_id,starttime,endtime,storetime,itemid,...
+    # endtime 은 승압제 주입 에피소드를 묶는 데 쓴다.
+    def rows_inputevents():
+        it = stream(require(icu / "inputevents.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[4]:
+                yield [r_[2], r_[0], r_[1], r_[7], r_[4], r_[5]]
+
+    counts["mimic.inputevents"] = copy_rows(
+        "mimic.inputevents",
+        ["icu_stay_id", "subject_id", "hadm_id", "itemid", "starttime", "endtime"],
+        rows_inputevents())
+    log(f"  inputevents     {counts['mimic.inputevents']:>6}  (승압제 1순위)")
+
+    # emar: subject_id,hadm_id,emar_id,emar_seq,poe_id,pharmacy_id,enter_provider_id,
+    #       charttime,medication,event_txt,scheduletime,storetime
+    def rows_emar():
+        it = stream(require(hosp / "emar.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[7]:
+                yield [r_[0], r_[1], r_[7], r_[8], r_[9]]
+
+    counts["mimic.emar"] = copy_rows(
+        "mimic.emar",
+        ["subject_id", "hadm_id", "charttime", "medication", "event_txt"],
+        rows_emar())
+    log(f"  emar            {counts['mimic.emar']:>6}  (승압제 2순위)")
+
+    # prescriptions: subject_id,hadm_id,pharmacy_id,poe_id,poe_seq,order_provider_id,
+    #                starttime,stoptime,drug_type,drug,...,route
+    def rows_prescriptions():
+        it = stream(require(hosp / "prescriptions.csv.gz")); next(it)
+        for r_ in it:
+            if r_[0] in subjects and r_[6]:
+                yield [r_[0], r_[1], r_[6], r_[9], r_[20]]
+
+    counts["mimic.prescriptions"] = copy_rows(
+        "mimic.prescriptions",
+        ["subject_id", "hadm_id", "starttime", "drug", "route"],
+        rows_prescriptions())
+    log(f"  prescriptions   {counts['mimic.prescriptions']:>6}  (승압제 3순위)")
+    return counts
+
+
+LABEL_EVENT_TABLES = (
+    "mimic.procedureevents", "mimic.inputevents", "mimic.emar", "mimic.prescriptions",
+)
+
+
+def label_events() -> int:
+    """악화 라벨 원천 4개만 적재한다. 다른 테이블·시연 상태는 건드리지 않는다."""
+    hosp = require(ROOT / "MIMIC-IV-HOSP")
+    icu = require(ROOT / "MIMIC-IV-ICU")
+
+    log("[1/4] 스키마 적용 …")
+    psql_file(require(INIT / "01_schema.sql"))
+
+    before = {t: int(scalar(f"count(*) FROM {t}")) for t in LABEL_EVENT_TABLES}
+    filled = [t for t, n in before.items() if n]
+    if filled and not RELOAD_LABEL_EVENTS:
+        log("")
+        for t in LABEL_EVENT_TABLES:
+            log(f"  {t:<24} {before[t]:>8} 행")
+        log("")
+        log("이미 적재돼 있습니다. 기존 데이터를 지우지 않고 종료합니다.")
+        log("다시 적재하려면 --reload-label-events 를 함께 주세요.")
+        return 0
+
+    cohort = db_rows("SELECT ed_stay_id, subject_id, hadm_id FROM app.cohort ORDER BY ed_stay_id")
+    if not cohort:
+        log("[FATAL] app.cohort 가 비어 있습니다.")
+        return 2
+    subjects = {r[1] for r in cohort}
+    hadms = {r[2] for r in cohort if r[2]}
+    log(f"코호트: subject {len(subjects)} · hadm {len(hadms)}")
+
+    if RELOAD_LABEL_EVENTS and filled:
+        log("[2/4] 라벨 원천 4개만 비우기 …")
+        psql(f"TRUNCATE {', '.join(LABEL_EVENT_TABLES)} RESTART IDENTITY;")
+    else:
+        log("[2/4] 비울 것 없음 (신규 적재)")
+
+    log("[3/4] 적재 …")
+    counts = load_label_events(hosp, icu, subjects)
+
+    log("[4/4] 인덱스 · 검증 …")
+    psql_file(require(INIT / "02_indexes.sql"))
+
+    ok = True
+
+    def check(label: str, sql: str, expect: str) -> None:
+        nonlocal ok
+        got = scalar(sql)
+        good = got == expect
+        ok = ok and good
+        log(f"  {'✅' if good else '❌'} {label:<40} = {got:<8} (expect {expect})")
+
+    for t in LABEL_EVENT_TABLES:
+        check(f"{t} 비어 있지 않음", f"(count(*) > 0)::text FROM {t}", "true")
+    check("procedureevents 시각 결측",
+          "count(*) FROM mimic.procedureevents WHERE starttime IS NULL", "0")
+    check("inputevents 시각 역전(종료 < 시작)",
+          "count(*) FROM mimic.inputevents WHERE endtime < starttime", "0")
+    check("고아행(코호트 밖 subject)",
+          """count(*) FROM mimic.procedureevents e
+             WHERE NOT EXISTS (SELECT 1 FROM mimic.patients p WHERE p.subject_id = e.subject_id)""",
+          "0")
+
+    log("")
+    log("  적재 결과")
+    for t in LABEL_EVENT_TABLES:
+        log(f"    {t:<24} {before[t]:>8} → {scalar(f'count(*) FROM {t}'):>8}")
+
+    if not ok:
+        log("❌ 검증 실패 — 적재를 신뢰할 수 없습니다.")
+        return 1
+    log(f"✅ 라벨 원천 적재 완료 · {sum(counts.values()):,} 행")
+    return 0
+
+
 def main() -> int:
     if RAW_HISTORY:
         return raw_history()
+    if LABEL_EVENTS:
+        return label_events()
     if EVENTS_ONLY:
         return events_only()
     ed = require(ROOT / "MIMIC-IV-ED")

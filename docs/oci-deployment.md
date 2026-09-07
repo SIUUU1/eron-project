@@ -68,7 +68,7 @@ mkdir -p runtime/clinicalnlp/scispacy runtime/clinicalnlp/medical-dictionaries
 | 자산 | 경로 | 비고 |
 |---|---|---|
 | 모델 가중치 | `artifacts/*.pkl` | 34MB. `.gitignore` 의 `artifacts/*.pkl` |
-| MIMIC 원본 | `MIMIC-DEMO/` | 환자 유래 데이터. **절대 커밋 금지** |
+| MIMIC 원본 | `MIMIC-DEMO/` | 환자 유래 데이터. **절대 커밋 금지**. §4 경로 A 로 배포하면 서버에는 두지 않아도 된다 |
 | 의료사전 | `runtime/clinicalnlp/medical-dictionaries/` | KCD 약어 확장용 |
 
 전송 후 무결성을 확인한다.
@@ -77,7 +77,7 @@ mkdir -p runtime/clinicalnlp/scispacy runtime/clinicalnlp/medical-dictionaries
 cd artifacts && sha256sum -c CHECKSUMS.txt
 ```
 
-### 3. DB
+### 3. DB 스키마
 
 볼륨이 비어 있을 때만 `database/init/*.sql` 이 자동 실행된다. **이미 데이터가 있는
 DB 에 스키마 변경을 반영할 때는 직접 적용한다.** `01~03` 은 전부
@@ -88,8 +88,77 @@ docker exec -i eron-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -v ON_ERROR_STOP=1 < database/init/01_schema.sql
 ```
 
-lab/ICU 활력징후는 별도로 적재한다. `--events-only` 는 시연 상태(`app.demo_stay`)를
-건드리지 않는다.
+`public.clinical_records` 와 `public.kcd_codes` 는 init SQL 이 아니라 backend 기동 시
+`Base.metadata.create_all` 이 만든다. 스키마를 손으로 맞출 때 빠뜨리기 쉽다
+(`docs/database-design.md` §9.3).
+
+### 4. DB 데이터
+
+두 가지 경로가 있다. **서버에서는 A 를 쓴다.**
+
+| | 경로 A — 로컬 덤프 이관 (권장) | 경로 B — CSV 재적재 |
+|---|---|---|
+| 필요한 것 | `.sql.gz` 파일 하나 | 서버에 `MIMIC-DEMO/` 원본 |
+| 코호트·데모 시계·기존 예측 | 로컬과 **동일하게** 옮겨진다 | 다시 뽑아야 한다(값이 달라진다) |
+| 쓰는 곳 | 배포 서버 | 로컬 개발, 코호트 재선별 |
+
+경로 A 를 쓰면 서버에 MIMIC 원본을 두지 않아도 된다. `app.cohort` 선별 결과와
+`app.demo_stay` 시간축, 이미 계산된 `app.prediction` 은 재현 대상이 아니라 **이관
+대상**이기 때문이다. 상세 설계는 `docs/database-design.md` §12.1 을 따른다.
+
+#### A. 로컬 덤프 이관
+
+대상은 `database/scripts/project_tables.sh` 의 화이트리스트 **18개 테이블**뿐이다.
+`clinicalnlp.*` · `public.*` · `mimic_ed.*` 는 대상이 아니다 — 서버에만 있는
+의료용어·진료기록을 덮어쓰지 않기 위해서다.
+
+```sh
+# 1) 서버 상태 먼저 확인한다 (읽기 전용. 파일 전송 없이 그대로 흘려보낸다)
+ssh <user>@<oci-host> 'cd ~/eron-project && set -a && . ./.env && set +a \
+  && docker exec -i eron-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+  < database/scripts/oci_inspect.sql
+
+# 2) 로컬에서 덤프를 만든다 (읽기 전용. backups/ 에 SQL + 매니페스트)
+./database/scripts/dump_project_tables.sh
+
+# 3) 전송
+scp backups/eron_project_<stamp>.sql.gz backups/eron_project_<stamp>.manifest.txt \
+    <user>@<oci-host>:~/eron-project/backups/
+
+# 4) 서버에서 적재. 이 스크립트만이 DB 를 바꾼다
+ssh <user>@<oci-host>
+cd ~/eron-project
+docker compose stop backend        # 재예측 스케줄러의 INSERT 를 멈춘다. 볼륨은 그대로다
+./database/scripts/restore_project_tables.sh backups/eron_project_<stamp>.sql.gz
+docker compose start backend
+```
+
+`restore` 는 적용 전에 스스로 멈출 조건을 확인한다.
+
+1. SQL 파일 검증 — `DROP`/`DELETE`/`ALTER`/`CREATE`/`GRANT`/`REVOKE` 가 있으면 중단.
+   파괴적 구문은 화이트리스트 18개에 대한 `TRUNCATE` **한 줄**이어야 하고,
+   `CASCADE` 가 붙어 있으면 중단한다.
+2. 대상 테이블 존재 확인 — 없으면 중단(`01_schema.sql` 을 먼저 적용해야 한다).
+3. 컬럼 호환성 — 덤프의 `COPY` 컬럼이 대상에 없으면 중단(서버 스키마가 더 오래된 경우).
+4. 화이트리스트 **밖에서 대상을 참조하는 FK** 가 있으면 중단. `CASCADE` 를 쓰지 않으므로
+   다른 프로젝트 데이터가 조용히 지워지는 경로가 없다.
+5. 롤백용 백업을 먼저 뜬다 — `backups/oci_before_restore_<stamp>.dump` (대상 18개만).
+6. `RELOAD` 를 정확히 입력해야 진행한다. 자동화할 때만 `--yes` 를 붙인다.
+
+적재는 **단일 트랜잭션**이라 중간에 실패하면 전부 롤백된다(부분 적용이 없다).
+끝나면 매니페스트의 행 수와 대조하고, 하나라도 다르면 실패로 끝난다.
+
+되돌릴 때는 5번에서 뜬 백업을 쓴다.
+
+```sh
+docker exec -i eron-postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  --data-only --disable-triggers < backups/oci_before_restore_<stamp>.dump
+```
+
+#### B. CSV 재적재
+
+로컬에서 코호트를 다시 뽑거나 lab/ICU 활력징후만 채울 때 쓴다.
+`--events-only` 는 시연 상태(`app.demo_stay`)를 건드리지 않는다.
 
 ```sh
 MIMIC_DATA_DIR=$PWD/MIMIC-DEMO python3 database/scripts/load_subset.py --events-only
@@ -98,7 +167,17 @@ MIMIC_DATA_DIR=$PWD/MIMIC-DEMO python3 database/scripts/load_subset.py --events-
 > 모델 100개 feature 중 36개가 `lab_*` 다. `mimic.labevents` 가 비어 있으면
 > 예측은 나오지만 근거가 크게 빈 상태가 된다. 반드시 적재하고 배포한다.
 
-### 4. 기동
+#### 상태 확인
+
+로컬에서도 서버에서도 같은 명령이다. `SELECT` 만 실행한다.
+
+```sh
+./database/scripts/inspect_project_tables.sh
+```
+
+18개 테이블의 row 수, 시퀀스 현재값, 데모 시계·코호트 seed·최신 예측 시각을 보여준다.
+
+### 5. 기동
 
 ```sh
 docker compose config                                   # 검증 먼저
@@ -178,6 +257,10 @@ echo | openssl s_client -connect eron.co.kr:443 -servername eron.co.kr 2>/dev/nu
 
 - `docker compose down -v` 는 DB 볼륨(`eron-postgres-data`)을 지운다. 쓰지 않는다.
 - 스키마 변경 전에는 `docker exec eron-postgres pg_dump -Fc` 로 먼저 받아둔다.
+- 서버 DB 를 바꾸는 스크립트는 `restore_project_tables.sh` **하나뿐**이고, 바꾸는 범위는
+  화이트리스트 18개 테이블이다. `dump`·`inspect`·`oci_inspect.sql` 은 `SELECT` 만 한다.
+- `backups/*.sql.gz` 에는 MIMIC 유래 임상값이 들어 있다. 커밋하지 않고, 적재 후 서버에
+  남겨두지 않는다.
 - `.env`, `services/*/.env`, `artifacts/*.pkl`, `MIMIC-DEMO/` 는 커밋하지 않는다.
 - backend/frontend 만 재생성해도 nginx 는 재시작하지 않아도 된다.
   upstream 에 `resolve` 가 걸려 있어 Docker DNS 로 IP 를 다시 해석한다.

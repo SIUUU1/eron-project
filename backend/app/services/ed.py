@@ -8,6 +8,8 @@ raw SQL 결과를 Pydantic 스키마로 옮기는 곳이며, 여기서 직접 SQ
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +20,7 @@ from app.schemas.ed.dashboard import (
     BedsMeta,
     BedSummary,
     BedZone,
+    IncompleteRecordItem,
     ReassessItem,
 )
 from app.schemas.ed.prediction import LatestPrediction, PredictionPoint, RiskSignal
@@ -267,6 +270,92 @@ def build_bed_zones(rows: list[Any]) -> tuple[list[BedZone], BedSummary, bool]:
 def beds_meta(any_prediction: bool) -> BedsMeta:
     """색의 근거. 예측이 하나도 도래하지 않았으면 'none' 이다(대체 색을 쓰지 않는다)."""
     return BedsMeta(status_source="prediction" if any_prediction else "none")
+
+
+# API 필드 ID와 저장된 record_payload.record 키의 대응. 기록 화면의 현재 필수 10개
+# 항목과 같고, 진료계획·추정진단은 현재 필수 항목이 아니므로 포함하지 않는다.
+_REQUIRED_RECORD_FIELDS = (
+    ("chief_complaint", "chiefComplaint"),
+    ("pain_assessment", "painAssessment"),
+    ("history_of_present_illness", "presentIllness"),
+    ("past_history", "pastHistory"),
+    ("medications", "medication"),
+    ("allergy", "allergy"),
+    ("social_history", "socialHistory"),
+    ("review_of_systems", "systemReview"),
+    ("physical_examination", "physicalExam"),
+    ("outcome", "outcome"),
+)
+_MISSING_RECORD_VALUES = {"", "미확인", "NOT_ASSESSED", "선택되지 않음"}
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _missing_required_fields(record_payload: Any) -> list[str]:
+    payload = _mapping(record_payload)
+    record = _mapping(payload.get("record"))
+    statuses = _mapping(payload.get("field_statuses"))
+    missing: list[str] = []
+
+    for api_field, record_field in _REQUIRED_RECORD_FIELDS:
+        status = statuses.get(record_field)
+        if status == "missing":
+            missing.append(api_field)
+            continue
+        if status in {"complete", "review"}:
+            continue
+
+        value = record.get(record_field)
+        normalized = value.strip() if isinstance(value, str) else ""
+        if normalized in _MISSING_RECORD_VALUES:
+            missing.append(api_field)
+
+    return missing
+
+
+def to_incomplete_record_items(
+    rows: list[Any], *, limit: int
+) -> tuple[list[IncompleteRecordItem], int]:
+    """재실 환자의 기록 미작성/필수 필드 누락 목록과 전체 건수를 만든다."""
+    incomplete: list[IncompleteRecordItem] = []
+    for row in rows:
+        status = row["record_status"]
+        if status == "SIGNED":
+            continue
+        if status is None:
+            incomplete.append(
+                IncompleteRecordItem(
+                    stay_id=str(row["stay_id"]),
+                    display_name=row["display_name"],
+                    record_status=None,
+                    reason="RECORD_NOT_CREATED",
+                )
+            )
+            continue
+
+        missing_fields = _missing_required_fields(row["record_payload"])
+        if missing_fields:
+            incomplete.append(
+                IncompleteRecordItem(
+                    stay_id=str(row["stay_id"]),
+                    display_name=row["display_name"],
+                    record_status="DRAFT",
+                    reason="MISSING_REQUIRED_FIELDS",
+                    missing_fields=missing_fields,
+                )
+            )
+
+    return incomplete[:limit], len(incomplete)
 
 
 def reassess_meta(any_prediction: bool) -> BedsMeta:

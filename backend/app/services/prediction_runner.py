@@ -209,6 +209,30 @@ def _to_rows(stay_id: int, result: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _to_feature_rows(stay_id: int, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """예측 시점의 model feature 값 → app.prediction_feature 행.
+
+    riskmodel 이 include_features 를 지원하지 않거나(구 버전) 값을 싣지 않았으면
+    빈 목록이다. drift 화면만 비고 예측은 정상 동작한다.
+    """
+    names = result.get("feature_names")
+    if not names:
+        return []
+    rows = []
+    for point in result["predictions"]:
+        values = point.get("feature_values")
+        if not values:
+            continue
+        rows.append({
+            "ed_stay_id": stay_id,
+            "prediction_time": point["t"],
+            "model_version": result["model_version"],
+            "feature_hash": result.get("feature_hash"),
+            "feature_values": json.dumps(values),
+        })
+    return rows
+
+
 async def _predict_batch(
     client: RiskModelClient,
     payloads: list[tuple[int, dict[str, Any]]],
@@ -259,6 +283,8 @@ async def run_once(
         "slot": slot_limit.isoformat() if slot_limit is not None else None,
         "scored": 0,
         "rows": 0,
+        # drift 모니터링용 feature 행. riskmodel 이 값을 싣지 않으면 0 으로 남는다.
+        "features": 0,
         "out_of_scope": 0,
         "failed": 0,
     }
@@ -270,6 +296,10 @@ async def run_once(
     for stay in selected:
         payload = mf.load_model_input(db, stay["stay_id"], stay["t_now"])
         if payload is not None:
+            # drift 모니터링이 예측 시점의 feature 분포를 봐야 한다. 값은 riskmodel 이
+            # 이미 만든 것을 그대로 받아 적는다 — backend 가 다시 만들지 않는다.
+            # ⚠ 위험도 계산에는 영향이 없다. 응답에 값을 더 실을 뿐이다.
+            payload["include_features"] = True
             payloads.append((stay["stay_id"], payload))
 
     # 2) 모델 호출만 동시성 제한을 걸어 묶어서
@@ -285,6 +315,10 @@ async def run_once(
             summary["out_of_scope"] += 1
             continue
         summary["rows"] += repo.upsert_predictions(db, rows)
+        # feature 는 별도 테이블에 둔다(app.prediction.detail 에 넣으면 대시보드 응답이
+        # 통째로 무거워진다). 없으면 조용히 건너뛴다 — 예측 저장을 막지 않는다.
+        summary["features"] += repo.upsert_prediction_features(
+            db, _to_feature_rows(stay_id, result))
         summary["scored"] += 1
 
     return summary

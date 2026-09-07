@@ -86,6 +86,10 @@ class PredictRequest(BaseModel):
     t_end: datetime
     # true 면 마지막 한 시점만 돌려준다. 그리드 재생은 어차피 처음부터 한다.
     only_last: bool = False
+    # true 면 그 시점의 model feature 값을 함께 돌려준다(drift 모니터링용).
+    # 기본은 false 다 — 위험도만 필요한 호출자의 응답을 키우지 않는다.
+    # ⚠ 예측값에는 아무 영향이 없다. 이미 만든 feature 를 그대로 실어 보낼 뿐이다.
+    include_features: bool = False
 
 
 class ReasonSignal(BaseModel):
@@ -138,6 +142,9 @@ class PredictionPoint(BaseModel):
     # 위험 상승 시점에서 임상 방향 gate 를 통과한 악화 변화가 있었는가.
     clinical_worsening_confirmed: bool | None = None
     reason_detail: list[ReasonSignal] = Field(default_factory=list)
+    # include_features=true 일 때만 채워진다. 순서는 PredictResponse.feature_names 와 같다.
+    # 이름을 시점마다 반복하지 않으려고 값만 배열로 보낸다(100개 × 시점 수).
+    feature_values: list[float | None] | None = None
 
 
 class PredictResponse(BaseModel):
@@ -154,6 +161,11 @@ class PredictResponse(BaseModel):
     # 임상 방향 gate 버전. 어떤 규칙으로 걸러진 설명인지 되짚을 수 있어야 한다.
     clinical_gate_version: str | None = None
     service_explainability_version: str | None = None
+    # include_features=true 일 때만 채워진다. bundle.json["features"] 순서 그대로다.
+    feature_names: list[str] | None = None
+    # feature 구성의 지문. 이 값이 다르면 feature 세트가 바뀐 것이므로
+    # 분포를 섞어서 비교하면 안 된다(drift 모니터링이 이 값으로 가른다).
+    feature_hash: str | None = None
     predictions: list[PredictionPoint] = Field(default_factory=list)
 
 
@@ -248,7 +260,32 @@ def _grid_end(p: Patient, t_end: datetime) -> datetime:
     return min(t_end, p.ed_outtime + timedelta(hours=_OUTTIME_OFFSET_H))
 
 
-def _point(row: dict) -> PredictionPoint:
+def _feature_values_by_t_idx(frame) -> dict[int, list[float | None]]:
+    """t_idx → model feature 값 배열. 순서는 bundle 의 feature 순서 그대로다.
+
+    🔑 이미 만들어 둔 frame 을 그대로 읽는다. feature 를 다시 만들지 않는다 —
+       규칙이 두 곳에 생기면 조용히 어긋난다.
+    ⚠ 채점 결과(scored)는 stay·t_idx 로 정렬되므로 위치가 아니라 t_idx 로 맞춘다.
+    """
+    names = _service.features
+    out: dict[int, list[float | None]] = {}
+    for row in frame.iter_rows(named=True):
+        idx = row.get("t_idx")
+        if idx is None:
+            continue
+        values: list[float | None] = []
+        for name in names:
+            value = row.get(name)
+            # NaN 은 JSON 으로 나갈 수 없다. 결측과 같게 None 으로 둔다.
+            if value is None or (isinstance(value, float) and value != value):
+                values.append(None)
+            else:
+                values.append(float(value))
+        out[int(idx)] = values
+    return out
+
+
+def _point(row: dict, features: list[float | None] | None = None) -> PredictionPoint:
     """채점 결과 한 행 → 응답 한 점.
 
     ⚠ reason_detail 이 비어도 reason_type·reason_title 은 그대로 넘긴다.
@@ -271,6 +308,7 @@ def _point(row: dict) -> PredictionPoint:
         reason_basis=row.get("reason_basis"),
         clinical_worsening_confirmed=row.get("clinical_worsening_confirmed"),
         reason_detail=detail,
+        feature_values=features,
     )
 
 
@@ -347,8 +385,13 @@ def predict(req: PredictRequest) -> PredictResponse:
     if req.only_last:
         scored = scored[-1:]
 
+    # drift 모니터링용. 요청이 있을 때만 싣는다.
+    by_t_idx = _feature_values_by_t_idx(frame) if req.include_features else {}
+
     return PredictResponse(
         in_scope=True,
+        feature_names=list(_service.features) if req.include_features else None,
+        feature_hash=_bundle.get("feature_hash") if req.include_features else None,
         reason_notice=next((r["reason_notice"] for r in scored if r.get("reason_notice")), None),
         clinical_gate_version=next(
             (r["clinical_gate_version"] for r in scored if r.get("clinical_gate_version")), None
@@ -357,7 +400,9 @@ def predict(req: PredictRequest) -> PredictResponse:
             (r["service_explainability_version"] for r in scored
              if r.get("service_explainability_version")), None
         ),
-        predictions=[_point(row) for row in scored],
+        predictions=[
+            _point(row, by_t_idx.get(row.get("t_idx"))) for row in scored
+        ],
         **base,
     )
 

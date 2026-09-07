@@ -5,6 +5,7 @@ import { ApiError } from "../src/api/client.ts";
 import {
   clinicalAudioTranscriptionErrorMessage,
   clinicalRecordDiagnosisEntries,
+  normalizeClinicalRecordImpression,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -97,6 +98,22 @@ test("복수 추정진단을 순서대로 주진단과 부진단 행으로 정�
   );
   assert.deepEqual(clinicalRecordDiagnosisEntries(""), [""]);
   assert.deepEqual(clinicalRecordDiagnosisEntries("미확인"), [""]);
+});
+
+test("추가된 빈 부진단 행은 편집 중 유지하고 저장 시 제외한다", () => {
+  assert.deepEqual(clinicalRecordDiagnosisEntries("Hypertension\n"), ["Hypertension", ""]);
+  assert.equal(normalizeClinicalRecordImpression("Hypertension\n"), "Hypertension");
+});
+
+test("추정진단을 편집하는 동안 각 입력 행 끝의 공백을 유지한다", () => {
+  assert.deepEqual(clinicalRecordDiagnosisEntries("Acute \nDiabetes mellitus "), [
+    "Acute ",
+    "Diabetes mellitus ",
+  ]);
+  assert.equal(
+    normalizeClinicalRecordImpression("Acute \nDiabetes mellitus "),
+    "Acute\nDiabetes mellitus",
+  );
 });
 
 test("다른 후보를 선택하거나 제외하면 추가된 후보 줄만 교체하거나 제거한다", () => {
@@ -192,7 +209,7 @@ test("형식이 잘못된 Whisper segment는 파일 입력 단계에서 거부�
   );
 });
 
-test("Whisper 화자명은 화면 표시에서도 유지하고 누락된 화자만 구분한다", () => {
+test("Whisper segment는 화면 표시용 ID와 시작·종료 시각을 유지한다", () => {
   assert.deepEqual(
     whisperDraftToDialogue({
       segments: [
@@ -201,8 +218,18 @@ test("Whisper 화자명은 화면 표시에서도 유지하고 누락된 화자�
       ],
     }),
     [
-      { speaker: "SPEAKER_00", text: "첫 문장" },
-      { speaker: "화자 미지정", text: "둘째 문장" },
+      {
+        speaker: "SPEAKER_00",
+        segmentId: "seg_1",
+        timestamp: "00:01.00–00:02.00",
+        text: "첫 문장",
+      },
+      {
+        speaker: "화자 미지정",
+        segmentId: "seg_2",
+        timestamp: "00:02.00–00:03.00",
+        text: "둘째 문장",
+      },
     ],
   );
 });
@@ -688,6 +715,11 @@ test("음성 파일은 STT 전용 API에서 Whisper segment를 받아 대화 입
   assert.equal(receivedInit.body.get("audio"), audio);
   assert.deepEqual(result, whisperPayload);
   assert.deepEqual(whisperDraftToDialogue(result), [
-    { speaker: "SPEAKER_00", text: "합성 흉통 문장" },
+    {
+      speaker: "SPEAKER_00",
+      segmentId: "seg_0001",
+      timestamp: "00:00.00–00:01.50",
+      text: "합성 흉통 문장",
+    },
   ]);
 });

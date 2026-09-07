@@ -2,6 +2,18 @@
 
 > 상태: **구현 완료**.
 > 작성 2026-08-26 / 개정 2026-08-26 (rev.3 — 구현 결과 반영)
+>
+> ⚠ 이 문서는 **응급실 현황·모니터링 작업(rev.3)의 설계 기록**입니다. §1 현황 실측,
+> §2 작업 범위, §7 compose 제안은 그 시점의 사실이므로 그대로 둡니다.
+> 그 이후 배포로 달라진 부분만 아래에 덧붙입니다 (2026-09-04 기준).
+>
+> | 항목 | rev.3 시점 | 현재 |
+> |---|---|---|
+> | 악화 예측 | 모델 없음 (`PREDICT_AI_URL` 환경변수만) | `services/riskmodel` 가동 (`riskmodel:8790`, profile `risk`) |
+> | 기록 초안 · STT | 범위 밖 | `clinicalnlp:8765` · `whisper:8780` 가동 (profile `clinical` / `stt`) |
+> | 기록 미완료 대시보드 | mock | `public.clinical_records` 기반 live API 사용 |
+> | 벡터 검색 | `QDRANT_URL` 후보 | **Qdrant 미채택.** PostgreSQL/pgvector 사용 (`docs/adr/0001-clinicalnlp-postgresql-storage.md`) |
+> | 엣지 | nginx `:80` | nginx `:80` / `:443`, `eron.co.kr` HTTPS (`docs/oci-deployment.md`) |
 
 ---
 
@@ -92,21 +104,21 @@ eron-project/
 환자 상세 (/monitoring/$patientId) ─ 헤더 · Vital · 시간별 추이 · AI 분석
 ```
 
-### 이번 작업에서 **제외** (기록 영역 — 손대지 않음)
+### 초기 API 연동 작업에서 제외했던 기록 영역
 
 ```text
 AI 진료기록 및 누락 검사 (/records, /records/$patientId)
  ├─ 5단계 워크플로우 (대화 수집 → 기록 초안 → 누락 검사 → 진단코드 → 의사 인증)
  ├─ sampleDialogue / aiDraftRecord / followUpQuestions / kcdCandidates
  ├─ recordFieldLabels / checkStatusMeta / outcomeOptions / emptyRecord
- └─ 대시보드의 "기록 미완료 알림" 및 "기록 미완료" 요약 카드
+ └─ 대시보드의 "기록 미완료 알림" 및 "기록 미완료" 요약 카드 (현재 live API 연동)
 ```
 
-**해당 화면·데이터·컴포넌트는 현재 mock 상태 그대로 유지합니다.**
+이 절은 초기 대시보드 API 작업 당시의 범위를 설명합니다. 현재 응급진료기록은 별도 API로 저장되며, 대시보드 기록 미완료 항목도 live 데이터로 전환되었습니다.
 DB 테이블(`app.ed_record`), API(`/api/ed/records/*`, `/api/ed/stays/{id}/record`, `/api/ed/stays/{id}/diagnoses`), 프론트 연동을 **설계에서 삭제**했습니다.
 `RECORD_AI_URL` / `STT_URL` 연동도 범위 밖입니다.
 
-> 부수 효과: 환자 목록의 `기록 상태` 컬럼과 대시보드의 `기록 미완료` 항목은 API가 아니라 **mock 값을 계속 사용**합니다. `CLAUDE.md`의 "mock과 live를 한 흐름에서 섞지 않는다" 규칙에 대응해, 해당 요소에는 UI 변경 없이 응답 `meta`로 출처를 구분합니다 (R6: 디자인 불변).
+> 현재 대시보드의 `기록 미완료` 항목은 `/api/ed/dashboard/incomplete-records`의 live 응답을 사용합니다.
 
 ---
 
@@ -119,7 +131,7 @@ DB 테이블(`app.ed_record`), API(`/api/ed/records/*`, `/api/ed/stays/{id}/reco
                                 │ http://localhost:8080
                                 ▼
         ┌───────────────────────────────────────────────┐
-        │  nginx  (edge / reverse proxy)      :80        │
+        │  nginx  (edge / reverse proxy)  :80 / :443    │
         │                                               │
         │   location /api/   ──►  backend:8000          │
         │   location /       ──►  frontend:3000         │
@@ -152,14 +164,23 @@ DB 테이블(`app.ed_record`), API(`/api/ed/records/*`, `/api/ed/stays/{id}/reco
                           MIMIC-IV-ED / HOSP / ICU  CSV(.gz)
 ```
 
-### 향후 AI 서비스 (본 작업 범위 밖)
+### AI 서비스 — rev.3 당시 "향후", 현재는 모두 가동 중
+
+rev.3 에서는 셋 다 본 작업 범위 밖이었습니다. 이후 각각 마이크로서비스로 추가되어
+지금은 profile 로 켜고 끕니다. 전부 Docker 내부 DNS 로만 호출하며 호스트·외부에
+포트를 공개하지 않습니다.
 
 ```text
-Backend ──HTTP──> PREDICT_AI_URL   (악화 예측)  → app.prediction 적재
-        ──HTTP──> QDRANT_URL       (벡터 검색)
-
-RECORD_AI_URL (기록 초안) · STT_URL (음성 인식) → 기록 영역이므로 이번 범위에서 제외
+Backend ──HTTP──> riskmodel:8790    (악화 예측)   → app.prediction 적재   profile: risk
+        ──HTTP──> clinicalnlp:8765  (기록 초안)                          profile: clinical
+        ──HTTP──> whisper:8780      (음성 인식)                          profile: stt
 ```
+
+profile 이 꺼져 있어도 backend 자체는 기동하며, 해당 endpoint 만 503 을 반환합니다.
+
+> **`QDRANT_URL` 은 채택되지 않았습니다.** 의료용어·정책 벡터 검색은 별도 VectorDB
+> 없이 PostgreSQL/pgvector 로 처리합니다 — `docs/adr/0001-clinicalnlp-postgresql-storage.md`.
+> `.env.example` 의 `QDRANT_URL` 자리는 사용되지 않는 잔재입니다.
 
 ---
 
@@ -180,9 +201,21 @@ RECORD_AI_URL (기록 초안) · STT_URL (음성 인식) → 기록 영역이므
 
 | 스키마 | 내용 | 쓰기 | 이유 |
 |---|---|---|---|
-| `mimic` | edstays, triage, ed_vitalsign, ed_diagnosis, patients, admissions, icustays | ❌ 적재 스크립트만 | 원천 데이터 불변성 보장. 재적재 시 스키마 단위 DROP 가능 |
-| `app` | prediction, bed, bed_assignment, patient_alias, demo_stay, alert | ✅ | 애플리케이션이 생성하는 데이터. Alembic 마이그레이션 대상 |
-| `public` | patients, visits, vitals, predictions, records (기존) | ✅ | 기존 CRUD API 계약 유지 (`CLAUDE.md` 규칙) |
+| `mimic` | edstays, triage, ed_vitalsign, ed_diagnosis, patients, admissions, icustays, labevents, chartevents | ❌ 적재 스크립트만 | 원천 데이터 불변성 보장. 재적재 시 스키마 단위 DROP 가능 |
+| `app` | prediction, prediction_ack, bed, bed_assignment, patient_alias, demo_stay, alert, cohort, demo_clock | ✅ | 애플리케이션이 생성하는 데이터. Alembic 마이그레이션 대상 |
+| `public` | patients, visits, vitals, predictions, records (기존) + clinical_records, kcd_codes | ✅ | 기존 CRUD API 계약 유지 (`CLAUDE.md` 규칙) |
+
+rev.3 이후 추가된 테이블입니다.
+
+| 테이블 | 추가 배경 | 생성 경로 |
+|---|---|---|
+| `mimic.labevents` · `mimic.chartevents` | riskmodel 의 lab feature 36개(전체 100개 중)와 ICU 활력징후 보조 원천 | `database/init/01_schema.sql` |
+| `app.prediction_ack` | 의료진 "재검토 완료" 확인 상태. 경고 자체는 `app.prediction` 에서 조회 시점에 파생한다 | `database/init/01_schema.sql` |
+| `public.clinical_records` · `public.kcd_codes` | 응급진료기록 임시·인증 저장과 KCD 코드 조회 | backend 기동 시 `Base.metadata.create_all` |
+
+> `public` 의 두 테이블은 init SQL 이 아니라 SQLAlchemy 가 만듭니다. 볼륨이 비어 있을
+> 때만 도는 `docker-entrypoint-initdb.d` 와 생성 시점이 다르므로, 스키마를 손으로
+> 맞출 때 빠뜨리기 쉽습니다.
 
 **핵심 원칙**: MIMIC 원천 적재는 Alembic 마이그레이션에 넣지 않습니다. `mimic` 스키마는 `database/init/` SQL + 적재 스크립트로 관리하고, Alembic은 `app` 스키마만 추적합니다.
 

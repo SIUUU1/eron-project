@@ -29,14 +29,23 @@ def _isoformat(value: Any) -> Any:
     return value.isoformat() if isinstance(value, datetime) else value
 
 
+# 관측 외에 그대로 넘기는 스칼라 옵션. 없으면 riskmodel 기본값이 쓰인다.
+_PASSTHROUGH_KEYS = ("only_last", "include_features")
+
+
 def _encode(payload: dict[str, Any]) -> dict[str, Any]:
     """datetime 을 ISO 문자열로 바꾼다. 관측 튜플 안의 시각도 포함된다."""
-    return {
+    encoded = {
         "patient": {k: _isoformat(v) for k, v in payload["patient"].items()},
         "vitals": [[_isoformat(ts), var, val] for ts, var, val in payload["vitals"]],
         "labs": [[_isoformat(ts), var, val] for ts, var, val in payload["labs"]],
         "t_end": _isoformat(payload["t_end"]),
     }
+    # ⚠ 여기 없는 키는 조용히 버려진다. 옵션을 늘리면 이 목록에도 넣어야 한다.
+    for key in _PASSTHROUGH_KEYS:
+        if key in payload:
+            encoded[key] = payload[key]
+    return encoded
 
 
 class RiskModelClient:

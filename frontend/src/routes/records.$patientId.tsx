@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import {
   clinicalAudioTranscriptionErrorMessage,
   clinicalRecordDiagnosisEntries,
+  normalizeClinicalRecordImpression,
   clinicalDraftErrorMessage,
   clinicalDraftPartialMessage,
   createClinicalRecordDraft,
@@ -97,15 +98,14 @@ import type { FieldProvenanceMap } from "@/lib/clinical-provenance";
 
 export const Route = createFileRoute("/records/$patientId")({
   head: ({ params }) => {
-    const title = `환자 ${params.patientId} AI 응급진료기록 · ER-GUARD AI`;
+    const ogTitle = `환자 ${params.patientId} AI 응급진료기록 · ER:ON(이로운)`;
     return {
       meta: [
-        { title },
         {
           name: "description",
           content: "대화 기반 응급진료기록 작성, 누락 검사, KCD 코드 추천 및 의사 인증 워크플로우.",
         },
-        { property: "og:title", content: title },
+        { property: "og:title", content: ogTitle },
       ],
     };
   },
@@ -113,6 +113,8 @@ export const Route = createFileRoute("/records/$patientId")({
 });
 
 const steps = ["기록 작성", "기록 작성 및 누락 검사", "최종 기록", "인증 저장"];
+
+type AudioPreviewSource = "recording" | "file";
 
 const fieldOrder: RecordFieldKey[] = [
   "chiefComplaint",
@@ -283,6 +285,7 @@ function RecordWorkflow({
   const [recording, setRecording] = useState<AudioRecorderState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordedAudio, setRecordedAudio] = useState<AudioRecordingPreview | null>(null);
+  const [audioPreviewSource, setAudioPreviewSource] = useState<AudioPreviewSource | null>(null);
   const [conversationSentAt, setConversationSentAt] = useState<string | null>(
     savedPayload?.conversation_sent_at ?? null,
   );
@@ -353,6 +356,7 @@ function RecordWorkflow({
     }
     recordedAudioUrlRef.current = null;
     setRecordedAudio(null);
+    setAudioPreviewSource(null);
   };
 
   useEffect(
@@ -408,7 +412,10 @@ function RecordWorkflow({
     try {
       const saved = await saveClinicalRecordDraft(patient.id, {
         record_payload: {
-          record,
+          record: {
+            ...record,
+            impression: normalizeClinicalRecordImpression(record.impression),
+          },
           field_statuses: clinicalFieldStatuses,
           field_provenance: fieldProvenance as Record<string, unknown>,
           unassigned_facts: unassignedFacts,
@@ -497,7 +504,7 @@ function RecordWorkflow({
       setGenerationNotice(null);
       setConversationSentAt(null);
       toast.success("Whisper JSON을 불러왔습니다.", {
-        description: `${payload.segments.length}개 segment의 원문과 화자 정보를 유지합니다.`,
+        description: `${payload.segments.length}개 segment의 원문과 시간 정보를 유지합니다.`,
       });
     } catch (error) {
       toast.error("Whisper JSON을 불러오지 못했습니다.", {
@@ -554,12 +561,29 @@ function RecordWorkflow({
     }
   };
 
-  const loadAudioFile = async (event: ChangeEvent<HTMLInputElement>) => {
+  const loadAudioFile = (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    await transcribeAudioFile(file);
+    if (file.size === 0) {
+      toast.error("빈 음성 파일은 사용할 수 없습니다.");
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      toast.error("음성 파일은 25MB 이하여야 합니다.");
+      return;
+    }
+
+    clearRecordedAudio();
+    setRecordingSeconds(0);
+    const preview = createAudioRecordingPreview(file, 0);
+    recordedAudioUrlRef.current = preview.objectUrl;
+    setRecordedAudio(preview);
+    setAudioPreviewSource("file");
+    toast.success("음성 파일을 불러왔습니다.", {
+      description: "미리듣기 후 사용할 음성인지 선택해 주세요.",
+    });
   };
 
   const startRecording = async () => {
@@ -633,6 +657,7 @@ function RecordWorkflow({
       const preview = createAudioRecordingPreview(audio, recordingSeconds);
       recordedAudioUrlRef.current = preview.objectUrl;
       setRecordedAudio(preview);
+      setAudioPreviewSource("recording");
       toast.success("녹음이 완료되었습니다.", {
         description: "미리듣기 후 사용할 녹음인지 선택해 주세요.",
       });
@@ -653,7 +678,10 @@ function RecordWorkflow({
       recordedAudio,
       await transcribeAudioFile(recordedAudio.file),
     );
-    if (!preview) recordedAudioUrlRef.current = null;
+    if (!preview) {
+      recordedAudioUrlRef.current = null;
+      setAudioPreviewSource(null);
+    }
     setRecordedAudio(preview);
   };
 
@@ -890,12 +918,18 @@ function RecordWorkflow({
                   : recording === "paused"
                     ? "녹음이 일시정지되었습니다"
                     : recordedAudio
-                      ? "녹음 내용을 확인해 주세요"
-                      : "환자와의 대화를 녹음하세요"}
+                      ? audioPreviewSource === "file"
+                        ? "음성 파일을 확인해 주세요"
+                        : "녹음 내용을 확인해 주세요"
+                      : "대화를 녹음하세요"}
               </p>
-              <p className="tabular mt-2 text-4xl font-bold tracking-tight">
-                {formatRecordingDuration(recordingSeconds)}
-              </p>
+              {audioPreviewSource === "file" && recordedAudio ? (
+                <p className="mt-2 break-all text-sm font-medium">{recordedAudio.file.name}</p>
+              ) : (
+                <p className="tabular mt-2 text-4xl font-bold tracking-tight">
+                  {formatRecordingDuration(recordingSeconds)}
+                </p>
+              )}
             </div>
 
             {recording === "idle" && !recordedAudio ? (
@@ -962,15 +996,21 @@ function RecordWorkflow({
                   )}
                   {transcribing ? "대화를 변환하고 있습니다" : "이 녹음 사용"}
                 </Button>
-                <div className="grid grid-cols-2 gap-3">
-                  <Button
-                    className="min-h-12"
-                    variant="outline"
-                    onClick={startRecording}
-                    disabled={transcribing}
-                  >
-                    <Mic className="size-4" /> 다시 녹음
-                  </Button>
+                <div
+                  className={`grid gap-3 ${
+                    audioPreviewSource === "recording" ? "grid-cols-2" : "grid-cols-1"
+                  }`}
+                >
+                  {audioPreviewSource === "recording" ? (
+                    <Button
+                      className="min-h-12"
+                      variant="outline"
+                      onClick={startRecording}
+                      disabled={transcribing}
+                    >
+                      <Mic className="size-4" /> 다시 녹음
+                    </Button>
+                  ) : null}
                   <Button
                     className="min-h-12"
                     variant="outline"
@@ -983,7 +1023,7 @@ function RecordWorkflow({
               </div>
             ) : null}
 
-            {recording === "idle" && !recordedAudio && dialogue.length === 0 ? (
+            {recording === "idle" && !recordedAudio ? (
               <>
                 <div className="flex w-full items-center gap-3 text-xs text-muted-foreground">
                   <Separator className="flex-1" /> 또는 <Separator className="flex-1" />
@@ -1001,7 +1041,7 @@ function RecordWorkflow({
                   onClick={() => audioFileInputRef.current?.click()}
                   disabled={transcribing}
                 >
-                  <Upload className="size-4" /> 기존 녹음 파일 선택
+                  <Upload className="size-4" /> 음성 파일 불러오기
                 </Button>
               </>
             ) : null}
@@ -1014,7 +1054,10 @@ function RecordWorkflow({
               <CardTitle className="text-base">변환된 대화 · {dialogue.length}개</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-4">
-              <ScrollArea className="max-h-[50vh] min-h-48 rounded-lg border bg-secondary/30 p-3">
+              <div
+                className="max-h-[50dvh] min-h-48 overflow-y-scroll overscroll-contain touch-pan-y rounded-lg border bg-secondary/30 p-3"
+                style={{ WebkitOverflowScrolling: "touch", scrollbarGutter: "stable" }}
+              >
                 <ul className="space-y-3">
                   {dialogue.map((turn, index) => (
                     <li key={index} className="flex justify-end">
@@ -1024,7 +1067,7 @@ function RecordWorkflow({
                     </li>
                   ))}
                 </ul>
-              </ScrollArea>
+              </div>
               <Button
                 className="min-h-14 w-full text-base"
                 onClick={() => void sendConversationToDesktop()}
@@ -1166,7 +1209,7 @@ function RecordWorkflow({
         <div className="grid gap-5 md:grid-cols-2">
           <Card>
             <CardHeader className="border-b py-3">
-              <CardTitle className="text-base">환자-의료진 대화 기록</CardTitle>
+              <CardTitle className="text-base">대화 기록</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 pt-4">
               <div className="flex flex-wrap gap-2">
@@ -1207,7 +1250,7 @@ function RecordWorkflow({
                 />
                 <Button
                   size="sm"
-                  className="min-h-11 w-full sm:w-auto"
+                  className="hidden min-h-11 w-full sm:w-auto"
                   variant="secondary"
                   onClick={() => whisperFileInputRef.current?.click()}
                   disabled={generating || transcribing || recording !== "idle"}
@@ -1282,11 +1325,18 @@ function RecordWorkflow({
                     이 브라우저에서는 오디오 미리듣기를 지원하지 않습니다.
                   </audio>
                   <p className="break-words text-xs text-muted-foreground">
-                    녹음 시간 {formatRecordingDuration(recordedAudio.durationSeconds)} · 파일 형식{" "}
+                    {audioPreviewSource === "recording"
+                      ? `녹음 시간 ${formatRecordingDuration(recordedAudio.durationSeconds)} · `
+                      : `파일명 ${recordedAudio.file.name} · `}
+                    파일 형식{" "}
                     {displayAudioType(recordedAudio.file)} · 파일 크기{" "}
                     {(recordedAudio.file.size / 1024).toFixed(1)}KB
                   </p>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <div
+                    className={`grid grid-cols-1 gap-2 ${
+                      audioPreviewSource === "recording" ? "sm:grid-cols-3" : "sm:grid-cols-2"
+                    }`}
+                  >
                     <Button className="min-h-11" onClick={useRecordedAudio} disabled={transcribing}>
                       {transcribing ? (
                         <Loader2 className="size-4 animate-spin" />
@@ -1295,14 +1345,16 @@ function RecordWorkflow({
                       )}
                       이 녹음 사용
                     </Button>
-                    <Button
-                      className="min-h-11"
-                      variant="outline"
-                      onClick={startRecording}
-                      disabled={transcribing}
-                    >
-                      <Mic className="size-4" /> 다시 녹음
-                    </Button>
+                    {audioPreviewSource === "recording" ? (
+                      <Button
+                        className="min-h-11"
+                        variant="outline"
+                        onClick={startRecording}
+                        disabled={transcribing}
+                      >
+                        <Mic className="size-4" /> 다시 녹음
+                      </Button>
+                    ) : null}
                     <Button
                       className="min-h-11"
                       variant="outline"
@@ -1324,7 +1376,7 @@ function RecordWorkflow({
                   <p className="py-20 text-center text-sm text-muted-foreground">
                     {transcribing
                       ? "음성을 인식하고 있습니다. 완료되면 대화 기록이 표시됩니다."
-                      : "대화 기록이 없습니다. Whisper JSON이나 음성 파일을 불러와 주세요."}
+                      : "대화 기록이 없습니다. 음성 녹음이나 음성 파일을 불러와 주세요."}
                   </p>
                 ) : (
                   <ul className="space-y-2">
@@ -1340,7 +1392,9 @@ function RecordWorkflow({
                               : "bg-primary text-primary-foreground"
                           }`}
                         >
-                          <p className="mb-0.5 text-[11px] opacity-70">{t.speaker}</p>
+                          <p className="mb-0.5 text-[11px] tabular-nums opacity-70">
+                            {t.segmentId} · {t.timestamp}
+                          </p>
                           {t.text}
                         </div>
                       </li>
@@ -1599,7 +1653,7 @@ function RecordWorkflow({
                 <Loader2 className="mx-auto mb-3 size-8 animate-spin text-primary" />
                 <p className="text-sm font-medium">AI가 응급진료기록을 검토하고 있습니다…</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  주호소(흉통) 기준 필수 임상정보 항목을 대조하는 중입니다.
+                  필수 임상정보 항목을 대조하는 중입니다.
                 </p>
               </CardContent>
             </Card>

@@ -1,6 +1,47 @@
 # eron-project
 위험 신호는 놓치지 않고, 기록의 빈틈은 남기지 않게.  ER:ON, 더 이로운 응급실을 만들다.
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 시스템 구성, 레이어 책임, 스키마 3분할 |
+| [docs/api-design.md](docs/api-design.md) | API 계약. **최신 정본은 `/openapi.json`** |
+| [docs/database-design.md](docs/database-design.md) | 테이블 DDL, MIMIC 매핑, 적재 전략, 데모 시간축 |
+| [docs/oci-deployment.md](docs/oci-deployment.md) | OCI 배포, 도메인, HTTPS, 인증서 갱신, DB 데이터 이관 |
+| [docs/clinical-record-persistence.md](docs/clinical-record-persistence.md) | 응급진료기록 임시저장·인증저장 규칙 |
+| [docs/clinicalnlp-integration.md](docs/clinicalnlp-integration.md) | ClinicalNLP 연동 계약 |
+| [docs/adr/](docs/adr/) | 아키텍처 결정 기록 |
+
+`architecture.md` · `api-design.md` · `database-design.md` 세 편은 2026-08-26 rev.3
+설계 기록이 바탕이라, 그 이후 달라진 부분은 각 문서 상단과 개정 표시에 따로 적어 두었습니다.
+
+개발 규칙은 [CLAUDE.md](CLAUDE.md) 와 [AGENTS.md](AGENTS.md) 를 참고하세요.
+
+## 검증
+
+```sh
+./backend/run-tests.sh                              # 백엔드 단위 테스트 전체
+./backend/run-tests.sh tests.test_model_monitoring  # 모듈 하나만
+cd frontend && npm run lint && npm run build        # 프론트엔드
+```
+
+백엔드 테스트는 운영 이미지에 테스트 코드를 넣지 않으므로, 같은 이미지에 `tests/` 를
+얹어 일회성 컨테이너로 돌립니다. 먼저 `docker compose build backend` 가 필요합니다.
+
+모델 성능 화면의 악화 라벨은 학습 파이프라인 정의를 옮겨 적은 것이라 정기적으로
+정답과 대조해야 합니다 — [backend/scripts/verify_label_reproduction.py](backend/scripts/verify_label_reproduction.py)
+의 docstring에 정답 CSV 생성법과 실행법이 있습니다.
+
+Data drift(PSI)는 학습 feature 분포를 참조로 씁니다. 모델을 교체하면 참조 분포를 다시
+만들고([backend/scripts/build_feature_reference.py](backend/scripts/build_feature_reference.py)),
+저장된 예측의 feature 도 다시 받아야 합니다
+([backend/scripts/backfill_prediction_features.py](backend/scripts/backfill_prediction_features.py) `--force`).
+
+예측 경로(riskmodel)를 건드린 뒤에는 배치 일치 검증을 반드시 돌립니다 —
+[services/riskmodel/tests/test_online_parity.py](services/riskmodel/tests/test_online_parity.py)
+docstring의 2단계 절차이며 **위험도 오차가 0** 이어야 합니다.
+
 ## 음성 기반 응급기록 초안
 
 선택적 `stt` 프로필은 API1의 비동기 계약을 유지하는 Groq Whisper 내부 서비스를 실행합니다.
