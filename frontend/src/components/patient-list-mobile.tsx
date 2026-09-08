@@ -51,7 +51,12 @@ export function PatientListMobile({
                   </span>
                 )}
                 <span className="truncate font-semibold">{p.name}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">
+                {/* 환자번호. 데스크톱 표의 '환자번호' 컬럼과 같은 값(stay_id)을 쓴다.
+                    줄을 늘리지 않도록 이름 뒤에 붙이고, 좁은 화면에서는 이름만 줄인다. */}
+                <span className="shrink-0 whitespace-nowrap font-mono text-xs text-muted-foreground">
+                  ({p.id})
+                </span>
+                <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
                   {p.sex} {p.age === null ? "" : `${p.age}세`}
                 </span>
               </div>
